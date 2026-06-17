@@ -729,7 +729,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "tracing",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -2351,7 +2351,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2405,7 +2405,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
- "uuid 1.23.0",
+ "uuid 1.23.3",
  "zstd",
 ]
 
@@ -2723,7 +2723,7 @@ dependencies = [
  "regex",
  "sha2 0.10.9",
  "unicode-segmentation",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -5219,7 +5219,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -5477,7 +5477,7 @@ dependencies = [
  "tokio",
  "tracing",
  "twox-hash",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -5640,7 +5640,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -5728,7 +5728,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -6545,7 +6545,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "urlencoding",
- "uuid 1.23.0",
+ "uuid 1.23.3",
  "variantly",
  "vob",
 ]
@@ -6580,7 +6580,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "utoipa",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -6660,7 +6660,7 @@ dependencies = [
  "portable-atomic",
  "smallvec 1.15.1",
  "tagptr",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -7256,7 +7256,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "url",
- "uuid 1.23.0",
+ "uuid 1.23.3",
  "web-time",
 ]
 
@@ -7321,7 +7321,7 @@ dependencies = [
  "reqsign-file-read-tokio",
  "serde",
  "sha2 0.10.9",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -9100,7 +9100,7 @@ dependencies = [
  "rend",
  "rkyv_derive",
  "tinyvec",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -10566,7 +10566,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -11508,7 +11508,7 @@ dependencies = [
  "uni-common",
  "uni-plugin-host",
  "uni-store",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -11546,7 +11546,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uni-plugin",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -11616,7 +11616,7 @@ dependencies = [
  "uni-store",
  "uni-xervo",
  "url",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -11735,7 +11735,7 @@ dependencies = [
  "uni-crdt",
  "uni-plugin",
  "uni-store",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -11951,7 +11951,7 @@ dependencies = [
  "uni-plugin",
  "uni-xervo",
  "url",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -12206,7 +12206,7 @@ dependencies = [
  "tracing",
  "uni-db",
  "uni-xervo",
- "uuid 1.23.0",
+ "uuid 1.23.3",
 ]
 
 [[package]]
@@ -12376,9 +12376,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.23.0"
+version = "1.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ac8b6f42ead25368cf5b098aeb3dc8a1a2c05a3eee8a9a1a68c640edbfc79d9"
+checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
