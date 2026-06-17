@@ -103,7 +103,7 @@ rust-stemmers = "1"
 regex = "1"
 
 # Caching
-lru = "0.12"
+lru = "0.18"
 
 # Hashing
 sha2 = "0.10"
