@@ -88,7 +88,7 @@ tree-sitter-typescript = "0.23"
 ort = "2.0.0-rc.11"
 tiktoken-rs = "0.6"
 ndarray = "0.17"
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 # Python binding
 pyo3 = { version = "0.23", features = ["extension-module"] }

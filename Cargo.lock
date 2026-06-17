@@ -2351,7 +2351,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -8142,7 +8142,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph",
@@ -8161,7 +8161,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -12124,7 +12124,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.18",
  "tiktoken-rs",
- "tokenizers 0.22.2",
+ "tokenizers 0.23.1",
  "tokio",
  "tokio-util",
  "tracing",
