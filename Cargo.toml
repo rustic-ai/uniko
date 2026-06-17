@@ -64,7 +64,7 @@ anyhow = "1"
 async-trait = "0.1"
 
 # Random (retry jitter)
-rand = "0.9"
+rand = "0.10"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
