@@ -91,7 +91,7 @@ ndarray = "0.17"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 
 # Python binding
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
