@@ -30,7 +30,7 @@ tiktoken-rs = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 regex = { workspace = true }
-dom_smoothie = "0.17"
+dom_smoothie = "0.18"
 csv = "1.4"
 pdf-extract = "0.10"
 thiserror = { workspace = true }
