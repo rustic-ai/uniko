@@ -45,7 +45,7 @@ dev = [
 # Tooling to run examples/uniko_memory_demo.ipynb:
 #   uv run --group notebook jupyter lab
 notebook = [
-    "jupyterlab>=4",
+    "jupyterlab>=4.6.2",
     "ipykernel>=6",
     "nbconvert>=7",
 ]
