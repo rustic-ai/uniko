@@ -9,7 +9,7 @@ authors = [
 ]
 dependencies = [
     "zensical>=0.0.45,<0.1",
-    "pymdown-extensions>=10.21,<11",
+    "pymdown-extensions>=11.0,<12",
 ]
 
 [project.urls]
