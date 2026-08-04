@@ -302,6 +302,8 @@ Scoped reads filter automatically; you can also apply it directly.
 | `NodeId` | Internal node id (`i64`) returned by create/ingest. |
 | `DeletionReport` | What a delete/forget changed. |
 | `Value`, `Record` | Graph value type and a query result row (`query`/`run_rule`). |
+| `FinalizeReport` | What `Session::finalize` built or refreshed. |
+| `temporal_epoch_millis` | Epoch milliseconds for a datetime-shaped temporal `Value` — the supported way to read a BTIC/timestamp column out of a query row. |
 
 ---
 

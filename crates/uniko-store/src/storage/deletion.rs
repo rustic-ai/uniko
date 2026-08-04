@@ -296,6 +296,24 @@ impl KnowledgeBase {
         }
         Ok(out)
     }
+
+    /// `DETACH DELETE` `ids` inside a caller-owned transaction.
+    ///
+    /// Returns `(nodes_deleted, relationships_deleted)`. Exposed so callers
+    /// that rebuild a derived surface can delete the old nodes and write the
+    /// replacements in one transaction, rather than leaving a window where
+    /// recall observes neither.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`](crate::UnikoError) on a write failure.
+    pub async fn detach_delete_nodes_in_tx(
+        &self,
+        tx: &Transaction,
+        ids: &[NodeId],
+    ) -> Result<(u64, u64)> {
+        detach_delete_ids(tx, ids).await
+    }
 }
 
 // ── In-transaction cascade steps ────────────────────────────────────────
@@ -378,6 +396,17 @@ async fn delete_session_in_tx(
         snid,
     )
     .await?;
+    // Session-anchored chunks (transcript + observation surfaces built by
+    // `Session::finalize`) hang off the Session itself, not off a Message,
+    // so the Message-anchored walk above misses them. Left behind they stay
+    // live in the vector and full-text indexes and remain recallable after
+    // the session is deleted.
+    let session_chunks = ids_by_anchor(
+        tx,
+        "MATCH (s:Session)-[:HAS_CHUNK]->(c:Chunk) WHERE id(s) = $a RETURN DISTINCT id(c) AS nid",
+        snid,
+    )
+    .await?;
 
     // Artifacts attached *solely* to this session → delete their subtrees.
     let solo_artifacts = ids_by_anchor(
@@ -397,6 +426,7 @@ async fn delete_session_in_tx(
     doomed.push(snid);
     doomed.extend(messages);
     doomed.extend(chunks);
+    doomed.extend(session_chunks);
     doomed.extend(observations);
     doomed.extend(artifact_owned);
     let (n, e) = detach_delete_ids(tx, &doomed).await?;

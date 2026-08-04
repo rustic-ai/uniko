@@ -148,13 +148,13 @@ Mapped 1:1 unless a lifetime forces the flattening from §2.2. Async unless mark
 - `query(cypher)` · `query_in(cypher, scope)`
 - `define_rule(name, source)` · `run_rule(name, return_cols, params)`
 - `assume(block) -> AssumeBuilder` *(sync; terminal `.query()` async)* · `abduce(program, params)`
-- `delete_session(session_id)` · `forget_participant(participant_id)`
+- `delete_session(session_id)` · `finalize_session(session_id)` · `unfinalized_session_ids()` · `forget_participant(participant_id)`
 - `session(session_id) -> Session` *(sync)*
 - `data -> Data` *(sync property; §2.2 flatten)* · `goals -> Goals` *(sync property; §2.2 flatten)*
 
 ### `uniko.Session` (handle)
 - `session_id` *(property)*
-- `observe(turn)` · `submit(turn)` · `submit_source(source)` · `flush()` · `ingest(source)` · `summarize()`
+- `observe(turn)` · `submit(turn)` · `submit_source(source)` · `flush()` · `ingest(source)` · `finalize()` · `summarize()`
 - `forget_turn(id)` · `delete_turn(id)` · `delete_document(id)`
 
 ### `uniko.Turn` (sync builder)

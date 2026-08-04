@@ -79,7 +79,7 @@ Layer 3, depending on `uniko-pipes` and `uniko-store` (plus `uni-db` and `uni-xe
 - `embedding` — embedding computation.
 - `nlp` — NLP processing (present under the `onnx` feature).
 
-`uniko-extract` implements the `Step` trait from `uniko-pipes` so its work slots into the pipeline. The headline entry point is `IngestStep`, which dispatches on the `ingest_type` metadata key to `ingest_message_atomic` or `ingest_artifact`.
+`uniko-extract` implements the `Step` trait from `uniko-pipes` so its work slots into the pipeline. The headline entry point is `IngestStep`, which dispatches on the `ingest_type` metadata key to `ingest_message_atomic` (`"message"`), `ingest_artifact` (`"artifact"`), `ingest_pdf` (`"pdf"`), or the MIME-routed `ingest_source` (`"source"`); an unknown value is skipped rather than failed.
 
 ### uniko-memory — memory management & orchestration
 
@@ -119,21 +119,23 @@ The architecture's other axis is *latency*. uniko keeps the LLM out of the write
 ```mermaid
 sequenceDiagram
     participant Agent
+    participant IA as ingest_message_atomic
     participant PS as PipelineSystem
     participant IW as Ingest worker
-    participant CW as Consolidation worker
-    participant CTX as cortex sweep
 
-    Agent->>PS: submit IngestTask (Message)
+    Agent->>IA: session.observe(turn) — direct call
+    Note over IA: atomic ingest — single tx<br/>Message + edges + chunks +<br/>Entities + MENTIONS +<br/>Observations + OBSERVED_IN + ABOUT
+    IA-->>Agent: persisted (all-or-nothing)
+
+    Agent->>PS: session.submit(turn) — only with streaming(true)
     PS->>IW: bounded channel
-    Note over IW: atomic ingest — single tx<br/>Message + edges + chunks +<br/>Entities + MENTIONS +<br/>Observations + OBSERVED_IN + ABOUT
-    IW-->>Agent: persisted (all-or-nothing)
-    IW->>CW: ObservationsReady
-    Note over CW: triggers on 20 observations<br/>OR 15-min timer
-    CW->>CW: derive Facts, contradiction, drift
-    CW->>CTX: after successful cycle (throttled)
-    Note over CTX: P5 promote_procedures_once<br/>P6 detect_topics_once
+    IW->>IA: IngestStep → same atomic ingest
 ```
+
+!!! warning "The default path does not go through `PipelineSystem`"
+    `session.observe()` calls `ingest_message_atomic` directly and commits before
+    returning. `PipelineSystem` is constructed **only** when the instance was built with
+    `.streaming(true)`, and is reachable only via `submit()` / `submit_source()`.
 
 ### Part 1 — atomic ingest (synchronous)
 
@@ -146,15 +148,33 @@ The semantics are **all-or-nothing**: any error during extraction or in-transact
 
 ### Part 2 — async post-ingest workers
 
-Once a message lands, slower and accumulation-dependent work happens in background workers owned by `PipelineSystem`:
+Slower, accumulation-dependent work is designed to run in background workers owned by
+`PipelineSystem`:
 
-- The **consolidation worker** receives `ObservationsReady` signals and triggers a consolidation cycle on a threshold (default 20 observations) **or** a periodic timer (default 15 minutes). A cycle derives Facts from Observations, reinforces or invalidates them, and detects drift.
-- After every *successful* consolidation cycle, that same worker drives the **cortex sweep** — P5 procedure promotion and P6 topic detection — gated by two independent throttles: a per-agent cycle counter (`cortex_cycle_every_n_consolidations`, default 4) and a per-sweep wall-clock minimum (`cortex_min_interval_secs`, default 600s). P5 is keyed per agent; P6 is global. Cortex failures are logged and dropped — they never destabilise consolidation.
+- The **consolidation worker** consumes `ConsolidationTask`s. On `ObservationsReady` it
+  accumulates a per-agent observation counter and fires a cycle at a threshold (default 20)
+  or on a periodic timer (default 15 minutes). A cycle derives Facts from Observations,
+  reinforces or invalidates them, and detects drift.
+- After every *successful* cycle, that same worker drives the **cortex sweep** — P5 procedure
+  promotion and P6 topic detection — gated by a per-agent cycle counter
+  (`cortex_cycle_every_n_consolidations`, default 4) and a per-sweep wall-clock minimum
+  (`cortex_min_interval_secs`, default 600s). P5 is keyed per agent; P6 is global. Cortex
+  failures are logged and dropped.
 
-This split is why uniko can keep ingest cheap while still building compiled knowledge: the agent never blocks on fact derivation, procedure mining, or topic detection.
+!!! tip "Two ways consolidation runs"
+    **Explicitly** — `agent.consolidate()` runs one cycle on the calling task and returns
+    `CycleStats`. Always available, no streaming required. This is the path to use when you
+    want to decide the moment (end of a conversation, before a report, in a batch job).
+
+    **Automatically** — an instance built with `.streaming(true)` owns a consolidation
+    worker. Ingest notifies it as Observations land, and it fires on a per-agent threshold
+    (20 new Observations) or a periodic timer (15 minutes), then runs the cortex sweep.
+
+    A default (non-streaming) instance has no worker, so `consolidate()` is the only path
+    there.
 
 !!! tip "Offline-capable by default"
-    The LLM is optional at every layer. Local NER, rule-based observation extraction, and the NL-to-Cypher fallback keep the full system running offline — this is the default path that produces uniko's benchmark numbers. LLM enhancements (triple refinement, topic naming) are optional and asynchronous, never required for ingest.
+    The LLM is optional at every layer. Local NER and rule-based observation extraction keep ingest and recall running fully offline — this is the default path that produces uniko's benchmark numbers. The LLM-dependent extras are opt-in: triple refinement and topic naming degrade transparently to their local paths when the LLM is unavailable, but NL-to-Cypher has no offline fallback and errors instead. LLM enhancements (triple refinement, topic naming) are optional and asynchronous, never required for ingest.
 
 ## Where to go next
 

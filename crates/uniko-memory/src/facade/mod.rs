@@ -36,7 +36,9 @@ mod uniko;
 
 pub use data::{ArtifactView, Data, MessageView};
 pub use goals::{GoalContext, GoalPhase, GoalView, Goals, TaskPhase, TaskView};
-pub use session::{ObserveResult, Session, Turn};
+pub use session::{FinalizeReport, ObserveResult, Session, Turn};
+// Shared by `Agent::finalize_session`; the module itself stays private.
+pub(crate) use session::finalize_session;
 pub use uniko::{LlmSpec, Uniko, UnikoBuilder};
 
 use crate::policy::Viewer;

@@ -13,7 +13,7 @@ the whole thing together. The names here are the real ones, registered by `uniko
 
 ## The shape of the graph
 
-uniko's schema registers **24 node types and 53 edge types** with the underlying uni-db
+uniko's schema registers **25 node types and 54 edge types** with the underlying uni-db
 graph. They are organised into layers that map onto a cognitive-memory model — episodic
 (what happened), semantic (what we know), procedural (what works), and the meta-memory that
 tracks how knowledge was derived.
@@ -140,7 +140,7 @@ a `Fact`, which knows the `Rule` that derived it and the `Fact` it replaced.
 
 ## Node types
 
-A representative subset of the 24 registered node types. Each is registered by a module under
+A representative subset of the 25 registered node types. Each is registered by a module under
 `crates/uniko-store/src/schema/`.
 
 | Node | Layer | What it represents | Key properties |
@@ -166,16 +166,17 @@ A representative subset of the 24 registered node types. Each is registered by a
 | `Organization` / `Team` | Organization | Participant grouping | `org_id` / `team_id`, `name` |
 | `KnowledgeBaseStats` | KB metadata | Singleton KB-level metadata (modality presence, blob backend) | `stats_id`, `modality_presence` |
 
-!!! note "Four more nodes round out the 24"
+!!! note "Five more nodes round out the 25"
     Beyond the table, the schema also registers `DeadLetter` (failed-pipeline-task tracking),
-    `KnowledgeBaseStats`, `Page` (a single PDF page in the document-IR model), and `Block`
-    (an atomic content block within a `Page`). The full
+    `KnowledgeBaseStats`, `Page` (a single PDF page in the document-IR model), `Block`
+    (an atomic content block within a `Page`), and `Pattern` (a recurring episode pattern
+    surfaced by the `episode_pattern_detector` stdlib rule). The full
     property and index list for every node type is in the
     [Schema reference](../reference/schema.md).
 
 ## Edge types
 
-A representative subset of the 53 registered edge types. The full list, with source/target
+A representative subset of the 54 registered edge types. The full list, with source/target
 labels and edge properties, is in the [Schema reference](../reference/schema.md).
 
 | Edge | From → To | Meaning |
@@ -186,7 +187,7 @@ labels and edge properties, is in the [Schema reference](../reference/schema.md)
 | `NEXT` | `Message → Message` | Chronological next turn (carries `gap_ms`) |
 | `PARTICIPATED_IN` | `Participant → Session` | Who was in the session |
 | `MENTIONS` | `Message`, `Chunk`, `Action`, `Artifact`, `Episode → Entity` | References a named entity |
-| `HAS_CHUNK` | `Artifact`, `Message`, `Session → Chunk` | Retrievable slices of content |
+| `HAS_CHUNK` | `Artifact`, `Message`, `Session`, `Block → Chunk` | Retrievable slices of content |
 | `HAS_CONTENT` | `Artifact → ArtifactContent` | Link to the deduped blob |
 | `OBSERVED_IN` | `Observation → Message`, `Chunk` | Source of an observation |
 | `OBSERVED_DURING` | `Observation → Episode` | Episode in which it was observed |

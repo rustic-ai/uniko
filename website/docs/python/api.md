@@ -57,7 +57,9 @@ have a `_sync` twin in the **Sync** column; assume the async signature shown and
 the name for the blocking form.
 
 !!! tip "`__version__`"
-    `uniko.__version__` is `"0.1.0"` during the v1 line.
+    `uniko.__version__` tracks the crate version (currently `0.2.0`), single-sourced from Cargo
+    via `env!("CARGO_PKG_VERSION")` rather than hardcoded. It falls back to the deliberately
+    invalid sentinel `"0+unknown"` if the native module fails to expose it.
 
 ---
 
@@ -203,6 +205,9 @@ builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoni
 | --- | --- | --- | --- |
 | `session` | `session(session_id: str) -> Session` | — (sync) | Open a conversation thread. |
 | `delete_session` | `delete_session(session_id: str) -> Awaitable[DeletionReport]` | `delete_session_sync` | Hard-delete a session and cascade. |
+| `finalize_session` | `finalize_session(session_id: str) -> Awaitable[FinalizeReport]` | `finalize_session_sync` | Build/refresh a session's retrieval surfaces without its `Session` handle. |
+| `consolidate` | `consolidate() -> Awaitable[CycleStats]` | `consolidate_sync` | Run one consolidation cycle now: Observations → Facts. |
+| `unfinalized_session_ids` | `unfinalized_session_ids() -> Awaitable[list[str]]` | `unfinalized_session_ids_sync` | Sessions with no session-level chunks yet — drives a backfill loop. |
 | `forget_participant` | `forget_participant(participant_id: str) -> Awaitable[DeletionReport]` | `forget_participant_sync` | Forget a participant. |
 
 ---
@@ -234,12 +239,35 @@ assert result.message_node_id > 0
 | `submit` | `submit(turn: Turn) -> Awaitable[None]` | `submit_sync` | Fire-and-forget streaming turn. |
 | `submit_source` | `submit_source(source: IngestSource) -> Awaitable[None]` | `submit_source_sync` | Fire-and-forget streaming doc/blob. |
 | `flush` | `flush() -> Awaitable[None]` | `flush_sync` | Wait for the streaming pipeline to drain. |
+| `finalize` | `finalize() -> Awaitable[FinalizeReport]` | `finalize_sync` | Build/refresh the session-level retrieval surfaces. |
 | `summarize` | `summarize() -> Awaitable[int \| None]` | `summarize_sync` | New summary node id, or `None` if nothing new. |
 
 !!! note "Streaming lane requires `streaming(True)`"
     `submit` / `submit_source` are fire-and-forget — they return immediately and process in the
     background. They require the instance was built with `.streaming(True)`. Use `flush()` to wait
     for the backlog to clear.
+
+!!! tip "Or just use `async with`"
+    `Session` is a context manager — the exit calls `finalize()` for you, best-effort:
+
+    ```python
+    async with agent.session("conversation-1") as session:
+        await session.observe(uniko.Turn("alice", "..."))
+    # finalized here
+    ```
+
+    A synchronous `with` block works the same way. Exit never suppresses an exception
+    already propagating out of the block.
+
+!!! tip "Call `finalize()` at the end of a conversation"
+    `finalize()` chunks the whole transcript and aggregates the session's observations into dense
+    chunks wired to the entities and participants they mention. These are what session-scoped
+    recall and the Phase 1 session boost retrieve — a session that is never finalized contributes
+    only its per-turn chunks.
+
+    It is cheap and idempotent when the session has not grown (nothing is rewritten or
+    re-embedded), so calling it periodically during a long conversation is fine. `summarize()`
+    calls it for you on a best-effort basis. When streaming is on, `finalize()` flushes first.
 
 ### Forget & delete
 
@@ -521,6 +549,29 @@ Returned by every delete/forget/purge verb.
 | `nodes_redacted` | `int` |
 | `root_existed` | `bool` |
 
+### `FinalizeReport`
+
+Returned by `Session.finalize` and `Agent.finalize_session`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `transcript_chunks` | `list[int]` | Node ids of the transcript chunks (`chunk_type = "session"`). |
+| `observation_chunks` | `list[int]` | Node ids of the observation chunks (`chunk_type = "observation"`). |
+| `rebuilt` | `bool` | `True` when this call wrote to the graph; `False` when the surfaces were already current. |
+| `ended_at` | `datetime \| None` | The Session's latest message time, stamped by `finalize`. A Session is *open* while this is null, so finalizing removes it from the inactivity auto-close sweep. |
+
+### `CycleStats`
+
+Returned by `Agent.consolidate`.
+
+| Field | Type |
+| --- | --- |
+| `observations_processed` | `int` |
+| `facts_created` | `int` |
+| `facts_reinforced` | `int` |
+| `facts_invalidated` | `int` |
+| `drift_alerts` | `int` |
+
 ### `MessageView`
 
 Returned by `Data.message`.
@@ -618,6 +669,41 @@ result = await agent.abduce("ABDUCE reachable WHERE a.kind = 'query'")
 for mod in result.modifications:
     print(mod["modification"], mod["validated"], mod["cost"])
 ```
+
+---
+
+## `uniko.models` — the Pydantic overlay
+
+The native classes above are frozen PyO3 snapshots: fast, immutable, and not Pydantic models. For
+codebases that want validation, JSON Schema, or FastAPI response models, the package also ships a
+pure-Python overlay in the `uniko.models` namespace. `pydantic>=2` is an unconditional runtime
+dependency, so it is always available — nothing extra to install.
+
+The overlay never shadows the native names: `uniko.ContextBundle` stays the native class,
+`uniko.models.ContextBundle` is the Pydantic mirror.
+
+```python
+from uniko.models import TypedUniko, ContextBundle
+
+memory = await TypedUniko.open("./memory.db")
+agent = memory.agent("assistant")
+
+bundle: ContextBundle = await agent.recall("hiking")   # a real BaseModel
+print(bundle.model_dump_json())                        # serializable
+print(ContextBundle.model_json_schema())               # OpenAPI-ready
+```
+
+| Module | What it holds |
+| --- | --- |
+| `uniko.models.outputs` | Pydantic mirrors of the frozen snapshots — `ContextBundle`, `RecallItem`, `Answer`, `ObserveResult`, `FinalizeReport`, `DeletionReport`, the views, and more. Each has a `from_native(native)` classmethod. |
+| `uniko.models.inputs` | Validated input payloads (`extra="forbid"`) — `GoalSpec`, `TaskSpec`, `ScopeSpec`, `TurnSpec`, `IngestSourceSpec`, `LlmSpecModel` — each with `to_native()`. |
+| `uniko.models.config` | `UnikoConfigModel`, mirroring the subset `Uniko.config()` returns. |
+| `uniko.models.adapters` | Free functions (`observe`, `ingest`, `recall_in`, `answer_in`, …) that take a native handle, accept specs, and return models. Each has a `*_sync` twin. |
+| `uniko.models.typed` | `TypedUniko`, `TypedUnikoBuilder`, `TypedAgent`, `TypedSession`, `TypedData`, `TypedGoals` — wrapper handles whose snapshot-returning methods hand back Pydantic models. |
+
+!!! note "Where the overlay passes through"
+    Surfaces with no fixed shape — Cypher result rows, rule parameters, raw artifact bytes — pass
+    through untyped. The overlay types what has a schema, not everything.
 
 ---
 

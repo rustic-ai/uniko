@@ -12,22 +12,38 @@ serializing your whole program. The examples below show both, side by side.
 
 ## Install
 
-The package is `uniko` (importable as `uniko`, native extension at `uniko._uniko`). Build it with
-[maturin](https://www.maturin.rs/) from the bindings crate:
+Prebuilt wheels ship on PyPI for CPython 3.10+ (abi3). Install **one** of the three distributions —
+they all provide the same `uniko` import and cannot coexist:
 
 ```bash
-# from the repo root
-cd bindings/uniko-py
-maturin develop --release
+pip install uniko          # CPU: Linux x86_64/aarch64, macOS arm64, Windows x64
+pip install uniko-cuda     # NVIDIA CUDA, Linux x86_64
+pip install uniko-metal    # Apple Silicon, macOS arm64
 ```
 
-That compiles the native extension into your active virtualenv. You need **Python ≥ 3.10**, a
-working **C/C++ toolchain**, and **`protoc`** (the Protocol Buffers compiler) on your `PATH`; the
-ONNX runtime is linked statically, so there is no separate install for the inference path.
+The package is `uniko` (importable as `uniko`, native extension at `uniko._uniko`). The ONNX
+runtime is linked statically into the wheel, so there is nothing else to install for the local
+inference path.
 
-!!! tip "Use a virtualenv"
-    `maturin develop` installs into the currently-activated environment. Create and activate a
-    venv (or use `uv`/`poetry`) first so the build lands where you expect.
+!!! tip "If a GPU wheel is too large for PyPI"
+    `uniko-cuda` and `uniko-metal` bundle GPU runtimes and may exceed PyPI's per-file limit. The
+    project publishes a PEP 503 index serving the same artifacts from GitHub Release assets:
+
+    ```bash
+    pip install uniko-cuda --extra-index-url https://rustic-ai.github.io/uniko/packages/
+    ```
+
+??? note "Building from source instead"
+    Contributors, or anyone on an unsupported platform, can build the extension with
+    [maturin](https://www.maturin.rs/):
+
+    ```bash
+    cd bindings/uniko-py
+    uv run maturin develop --release
+    ```
+
+    This needs a working **C/C++ toolchain** and **`protoc`** on your `PATH` (plus `mold` on
+    Linux). `maturin develop` installs into the currently-activated environment.
 
 !!! note "Ships typed"
     The package includes `py.typed` and a hand-written `_uniko.pyi` stub, so your editor and type
@@ -93,7 +109,7 @@ plain constructor, `Turn(sender_id, content)`, reusable and chainable.
     ```
 
 The returned `ObserveResult` tells you exactly what landed: `message_node_id`, `chunk_node_ids`,
-`session_node_id`, `extracted_entities` (a list of `(node_id, label)` tuples),
+`session_node_id`, `extracted_entities` (a list of `(node_id, entity_name)` tuples),
 `extracted_observations`, and `attachment_count`.
 
 !!! note "Sessions are serialized"

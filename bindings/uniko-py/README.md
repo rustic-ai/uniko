@@ -6,8 +6,17 @@ cognitive memory engine, built with [PyO3](https://pyo3.rs) and
 
 > **Status:** alpha. The full async surface (recall, answer, query, ingest,
 > goals/tasks, and the Locy logic surface), the synchronous `*_sync` skins, and
-> a complete `py.typed` type stub all ship today. Prebuilt wheels are not yet
-> published — build from source with `maturin` (below).
+> a complete `py.typed` type stub all ship today.
+
+## Install
+
+```bash
+pip install uniko          # CPU
+pip install uniko-cuda     # NVIDIA CUDA, Linux x86_64
+pip install uniko-metal    # Apple Silicon, macOS arm64
+```
+
+Install exactly one — all three provide the `uniko` import and cannot coexist.
 
 ## Building locally
 

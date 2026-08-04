@@ -93,6 +93,7 @@ The presets and their key properties, all defined in
 | `minilm`           | `minilm_l6_v2()`                  | `AllMiniLML6V2`                         | 384  | Legacy default for existing databases; no task prefixes. |
 | `embeddinggemma` / `gemma` | `embedding_gemma_300m()`  | `onnx-community/embeddinggemma-300m-ONNX` | 768  | 300M-param Gemma-3 retrieval embedder via the `local/onnx` HF-Hub fallback. |
 | `embeddinggemma-mistralrs` / `gemma-mistralrs` | `embedding_gemma_300m_mistralrs()` | `google/embeddinggemma-300m` | 768  | Same weights via `local/mistralrs` (candle) on GPU. |
+| `bge-m3`           | `bge_m3()`                        | `aapot/bge-m3-onnx`                     | 1024 | **Hybrid**: also emits a 250,002-dim learned-sparse vector and a 1024-dim ColBERT multi-vector. See [Sparse + ColBERT hybrid retrieval](#sparse-colbert-hybrid-retrieval). |
 
 !!! warning
     The embedding dimension is part of the on-disk vector index. The
@@ -183,7 +184,7 @@ let rr = RerankerConfig::default();
 | `model_id`           | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder ONNX export. |
 | `top_n`              | `50`    | Number of top RRF candidates re-scored. Must be `>= recall_limit` when enabled. |
 | `apply_sigmoid`      | `true`  | Map raw logits to `[0, 1]` via sigmoid. |
-| `style`              | `cross-encoder` | `"cross-encoder"` for BERT-family encoders; `"generative"` for decoder-LM rerankers (e.g. Qwen3-Reranker). |
+| `style`              | `cross-encoder` | `"cross-encoder"` for BERT-family encoders; `"generative"` for decoder-LM rerankers (e.g. Qwen3-Reranker); `"colbert"` for in-process ColBERT MaxSim (no reranker model — requires `multivector_dimensions`). |
 | `execution_providers`| `None`  | EP override, same semantics as the embedder. |
 
 `RerankerConfig` ships two presets:
@@ -225,7 +226,7 @@ from `UnikoConfig::default()`.
 | `recall_bm25_weight`        | `0.5`   | BM25 fulltext weight in hybrid fusion `[0.0–1.0]`. |
 | `rrf_k`                     | `60.0`  | `k` constant for reciprocal rank fusion across query variants; higher flattens top-rank weighting. |
 | `recall_per_variant_limit`  | `None`  | LIMIT applied to each per-variant Cypher query; `None` falls back to `recall_limit`. |
-| `query_variants`            | `[]`    | Multi-query reformulation labels. Empty uses the default 4-variant set (`keywords`, `original`, `declarative`, `type_anchored`). |
+| `query_variants`            | `[]`    | Multi-query reformulation labels. Empty (the default) selects the **single** `keywords` variant. Pass all four — `keywords`, `original`, `declarative`, `type_anchored` — to opt into multi-query. |
 
 ### Cascade phase gates
 
@@ -234,10 +235,17 @@ the query. Coverage gates and the Phase 1 strategy live here:
 
 | Field                          | Default   | Meaning |
 |--------------------------------|-----------|---------|
-| `phase1_coverage_threshold`    | `0.75`    | Coverage threshold for Phase 1 (Compact) early exit. |
 | `phase2_coverage_threshold`    | `0.65`    | Coverage threshold for Phase 2 (Expand) early exit. |
 | `phase1_strategy`              | `"boost"` | Phase 1 contribution strategy: `merge`, `boost`, or `off`. |
 | `phase1_boost_alpha`           | `0.6`     | Multiplicative weight for Fact scores in the session-chunk boost under `phase1_strategy = "boost"`. |
+
+!!! important "`boost` needs finalized sessions"
+    The `boost` strategy scores **session-level chunks**, which are built by
+    `Session::finalize()` (and, best-effort, by `Session::summarize()`). A
+    session that is never finalized has no such chunks, so Phase 1 contributes
+    nothing under the default strategy. Call `finalize()` at the end of a
+    conversation, or use `Agent::finalize_session` / `unfinalized_session_ids`
+    to backfill an existing knowledge base.
 | `phase2_mmr_lambda`            | `0.7`     | MMR relevance-vs-diversity for Phase 2 dedup (`1.0` = pure relevance, `0.0` = pure diversity). |
 | `phase2_mmr_duplicate_threshold` | `0.85`  | Token-overlap threshold above which a Phase 2 candidate is dropped as a hard duplicate. |
 | `phase2_temporal_enabled`      | `true`    | Temporal-interval channel; fires only when the query has a parsed temporal phrase. |
@@ -247,7 +255,7 @@ the query. Coverage gates and the Phase 1 strategy live here:
 | `phase2_graph_edge_weights`    | `{}`      | Per-edge-type weight multipliers for graph propagation; empty map uses the built-in `default_phase2_graph_edge_weights`. |
 
 !!! note
-    `phase1_coverage_threshold` and `phase2_coverage_threshold` must be
+    `phase2_coverage_threshold` must be
     in `(0.0, 1.0]`; `validate()` rejects values outside that range. The
     `phase1_strategy` is stored as a string (not an enum) so configs
     deserialised across feature flags stay compatible.
@@ -346,8 +354,95 @@ and `IvfRq` for different scale / recall / memory trade-offs.
 |---------------------------|----------------|---------|
 | `blob_storage`            | `BlobStorage::Lance` | Backend for `:ArtifactContent` bytes; persisted on first open. Reopening with a different variant is a hard error (no implicit migration). |
 | `catalog_path`            | `None`         | Override the built-in xervo model catalog with a JSON file. |
-| `schema_path`             | `None`         | Load the schema from a JSON file instead of the builder. |
+| `schema_path`             | `None`         | Load the schema from a JSON file instead of registering it programmatically. |
 | `observation_rules_path`  | `None`         | Load observation-extraction patterns from a YAML file instead of the bundled `english.yml`. |
+
+!!! warning "`schema_path` and the tracked snapshot"
+    `config/schema.json` in the repo is a **snapshot** produced by
+    `cargo run --bin export-schema`. Pointing `schema_path` at a snapshot
+    replaces the programmatic schema entirely, so a stale file silently
+    yields a graph missing whatever labels and edges were added since it was
+    generated. Regenerate it after any schema change, or leave `schema_path`
+    as `None` and let `register_schema` run.
+
+---
+
+## Sparse + ColBERT hybrid retrieval
+
+By default recall fuses dense vector search with BM25. A *hybrid* embedder
+adds two more channels: a **learned-sparse** vector (a term-weight
+distribution over the model vocabulary, better than BM25 at exact-term
+matching) and a **ColBERT multi-vector** (one vector per token, scored by
+late-interaction MaxSim). Both are off unless you choose a hybrid embedder.
+
+The `bge-m3` preset is the supported one:
+
+```rust
+use uniko_store::config::{EmbeddingConfig, RerankerConfig};
+
+let mut config = UnikoConfig::default();
+config.embedding = EmbeddingConfig::bge_m3();  // 1024-dim dense
+                                               // + 250,002-dim sparse
+                                               // + 1024-dim ColBERT
+config.recall_sparse_enabled = true;           // turn on the sparse channel
+config.reranker = RerankerConfig {
+    enabled: true,
+    style: "colbert".to_string(),              // MaxSim instead of a cross-encoder
+    ..Default::default()
+};
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `embedding.sparse_dimensions` | `None` | `Some(n)` adds a `SPARSE_VECTOR(n)` column on `:Chunk` and `:Observation`. |
+| `embedding.multivector_dimensions` | `None` | `Some(d)` adds a `List(Vector(d))` ColBERT column on the same labels. |
+| `recall_sparse_enabled` | `false` | Fan out an extra `uni.sparse.query` channel per variant, joining the existing RRF fusion. |
+| `reranker.style` | `cross-encoder` | Set to `"colbert"` to re-score the top `top_n` candidates by MaxSim instead of loading a reranker model. |
+
+Three `validate()` gates catch the invalid combinations at open time:
+
+- `recall_sparse_enabled` without `sparse_dimensions` is an error.
+- `reranker.style = "colbert"` without `multivector_dimensions` is an error.
+- `reranker.top_n` must be `>= recall_limit` whenever the reranker is enabled.
+
+!!! note "Cost"
+    Setting either hybrid dimension registers a second model alias,
+    `embed/hybrid`, alongside `embed/default`. The runtime caches by task, so
+    **the model loads twice** — budget roughly 2× embedder memory. The ColBERT
+    index uses an exact (flat) vector index because it only ever re-scores a
+    candidate window, never scans.
+
+    Neither channel is reachable from the Python builder today; configure them
+    from Rust.
+
+---
+
+## OCR for scanned PDFs
+
+`UnikoConfig::ocr` configures the OCR model behind *tiered* PDF extraction —
+the path that produces `:Page` / `:Block` document structure rather than a
+flat text dump.
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `enabled` | `false` | Register the `ocr/default` alias and take the tiered PDF path. |
+| `model_id` | `monkt/paddleocr-onnx` | HF repo holding the detection + recognition ONNX exports (English PP-OCRv5, Apache-2.0). |
+| `rec_artifact` | `languages/english/rec.onnx` | CRNN/CTC recognizer path within the repo. |
+| `char_dict_path` | `languages/english/dict.txt` | Character dictionary, one token per line. |
+| `det_artifact` | `detection/v5/det.onnx` | DBNet detector; enables detect → crop → recognize with real bounding boxes. |
+| `image_height` | `48` | Recognizer input height, pixels. |
+| `image_width` | `320` | Recognizer input width, pixels. |
+| `normalization` | `siglip` | `"imagenet"` or `"siglip"`; the PP-OCRv5 export expects `siglip`. |
+| `execution_providers` | `None` | ONNX execution providers; `None` is the feature-aware default. |
+
+!!! warning "Not reachable through the facade today"
+    Tiered PDF extraction needs **all three** of: the `pdf-ocr` Cargo feature,
+    `ocr.enabled = true`, and a live model runtime. `pdf-ocr` is declared only
+    on `uniko-extract` and is **not forwarded** by `uniko-memory`, `uniko-api`,
+    or the Python wheels — so setting `ocr.enabled` alone changes nothing
+    unless you depend on `uniko-extract` directly and enable the feature there.
+    Without the tiered path, PDFs still ingest via the pure-Rust, text-only
+    extractor.
 
 ---
 
@@ -365,6 +460,14 @@ offline build stays lean. Enable them per crate.
 | `uniko-memory`   | `onnx`        | off     | Pass-through that enables `uniko-extract/onnx`. |
 | `uniko-memory`   | `llm`         | off     | Adds an LLM-rewritten abstractive path for F59 Summaries. By default, summaries are deterministic, extractive, and fully offline. |
 | `uniko-cortex`   | `llm`         | off     | Backs `uniko-memory/llm`. |
+| `uniko-extract`  | `pdf-ocr`     | off     | Tiered PDF/OCR extraction via `uni-xervo-pdf`. Not forwarded by any higher crate — see [OCR](#ocr-for-scanned-pdfs). |
+| `uniko-store`    | `mistralrs`   | off     | uni-db's mistral.rs provider, for running a local LLM in-process. |
+| `uniko-store`    | `candle`      | off     | uni-db's candle provider, the other local-LLM backend. |
+| `uniko-store`    | `batch-record`| off     | Diagnostic only: captures bulk-write batches for benchmark replay. Never enable in production. |
+
+`uniko-api` forwards exactly five features — `onnx`, `gpu-cuda`, `gpu-metal`,
+`mistralrs`, `candle`. It does **not** forward `llm` or `pdf-ocr`; enable those
+on `uniko-memory` / `uniko-extract` directly.
 
 !!! tip
     The `execution_providers` field on `EmbeddingConfig`, `NlpConfig`,

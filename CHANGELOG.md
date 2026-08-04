@@ -5,6 +5,85 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Phase 1 of the recall cascade contributed nothing on any facade-ingested
+  knowledge base.** `phase1_strategy` defaults to `"boost"`, which scores
+  session-level chunks reached via
+  `Fact -SUPPORTED_BY-> Observation -OBSERVED_IN-> Message -IN_SESSION->
+  Session -HAS_CHUNK-> Chunk`. That walk returned nothing, for two independent
+  reasons:
+    - `fact_session_chunk_ids` traversed `SUPPORTED_BY` **inbound** from the
+      Fact, but the schema registers it `Fact → Observation`, so the pattern
+      could never match.
+    - No session-level chunks existed. `chunk_session` and
+      `chunk_session_observations` were only ever called by `uniko-bench`; no
+      facade path invoked them.
+  Session-scoped recall and the observation → entity `ABOUT` bridge were dark
+  for the same reason.
+- **`Agent::delete_session` orphaned session-anchored chunks**, leaving deleted
+  content live in the vector and full-text indexes and still recallable.
+- **Consolidation never triggered itself, so `Fact`s, `Procedure`s and `Topic`s
+  were never derived** for any library consumer. `ObservationsReady` — the
+  signal that advances the consolidation worker's per-agent counter — was
+  defined, re-exported and received, but nothing produced it, so neither the
+  threshold nor the periodic timer (which only sweeps agents with a non-zero
+  counter) ever fired. The ingest path now emits it, and `Agent::consolidate()`
+  provides an explicit path that needs no streaming pipeline.
+
+### Added
+
+- **`Session::finalize`** — builds (or refreshes) a session's transcript and
+  observation chunk surfaces, returning a `FinalizeReport`. Cheap and
+  idempotent when the session has not grown: nothing is rewritten and nothing
+  is re-embedded. Awaits the streaming pipeline first when streaming is on.
+  `Session::summarize` now calls it best-effort, so existing callers get the
+  fix without a code change.
+- **`Agent::finalize_session`** and **`Agent::unfinalized_session_ids`** — the
+  backfill path for knowledge bases ingested before the above fix. No automatic
+  migration runs at `open()`; backfill is an explicit, resumable loop.
+- **`ChunkMode`** on the session chunkers: `Once` keeps the previous
+  build-once semantics, `Refresh` rebuilds a grown session by deleting the old
+  generation and writing the replacement in a single transaction.
+- **`Agent::consolidate`** — run one consolidation cycle on demand, returning
+  `CycleStats`. Always available; no streaming pipeline required.
+- `Session` is a **context manager** in Python: `async with agent.session(id)`
+  (or a plain `with`) finalizes on exit, best-effort, without suppressing an
+  in-flight exception.
+- `FinalizeReport.ended_at` — `finalize` now stamps the Session's `ended_at`
+  from its latest message. Note a Session counts as *open* while `ended_at` is
+  null, so a finalized Session is skipped by the inactivity auto-close sweep.
+- Python parity for all of the above (`Session.finalize`,
+  `Agent.finalize_session`, `Agent.unfinalized_session_ids`,
+  `Agent.consolidate`, plus `*_sync` twins, `FinalizeReport`, `CycleStats`,
+  stubs, and the `uniko.models` mirror).
+
+### Removed
+
+- `UnikoConfig::phase1_coverage_threshold`. It was defaulted and range-validated
+  but never read — recall uses the hardcoded `COVERAGE_GATE_PHASE1` constant —
+  so setting it did nothing. Deserializing a config that still carries the key
+  is unaffected (unknown fields are ignored).
+
+### Changed
+
+- `config/schema.json` regenerated from the live schema (25 labels, 54 edge
+  types; the tracked snapshot had drifted to 22/48).
+- `config/catalog_minilm.json` regenerated: its `nlp/default` alias still used
+  the retired `task: "raw"` shape and would not load.
+- A `Refresh` of the session chunks is now **incremental** — chunks are compared
+  index by index and only the suffix from the first mismatch is rebuilt, so
+  appending turns re-embeds the tail rather than the whole transcript.
+- Documentation corrected against source across `docs/BLACKBOOK.md`, the
+  website, `README.md`, and `bindings/uniko-py/README.md` — most consequentially
+  the install story, which claimed uniko was unpublished and had no prebuilt
+  wheels. Also fixed the wrong `query_variants` doc-comments in
+  `uniko-store::config` and `uniko-memory::recall` (an empty vec selects the
+  single `keywords` variant, not all four), which the website had copied
+  verbatim.
+
 ## [0.2.0] - 2026-08-03
 
 Dependency and packaging release. The headline is a fix: the agent-facing Locy

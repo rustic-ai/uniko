@@ -1,9 +1,9 @@
 # Pipelines Overview
 
-uniko keeps your agent responsive while its knowledge compounds in the background. Writing a
-`Message` returns in milliseconds; the expensive intelligent work — deriving Facts, promoting
-Procedures, naming Topics — runs on its own cadence and never blocks the turn the agent is in the
-middle of. Every pipeline runs in-process: there is no separate service to deploy and no queue to
+uniko keeps your agent responsive while its knowledge compounds. Writing a `Message` returns
+in milliseconds with its Entities and Observations already extracted; the cross-message work —
+deriving Facts, promoting Procedures, naming Topics — runs on its own cadence and never blocks
+the turn the agent is in the middle of. Every pipeline runs in-process: there is no separate service to deploy and no queue to
 operate.
 
 uniko splits that work into three movements, each with a different cost profile and a different
@@ -59,10 +59,13 @@ flowchart TB
 ```
 
 !!! note "uniko is an embedded Rust library"
-    Every pipeline runs in-process inside your application. The orchestration
-    layer is [`PipelineSystem`](#orchestration-the-pipelinesystem) in
-    `uniko-memory`. There is no separate service to deploy — workers are Tokio
-    tasks spawned at construction time and torn down on shutdown.
+    Every pipeline runs in-process inside your application. There is no separate
+    service to deploy.
+
+    The orchestration layer is [`PipelineSystem`](#orchestration-the-pipelinesystem)
+    in `uniko-memory` — but it is constructed **only** when the instance was built
+    with `.streaming(true)`. On a default instance there are no background workers at
+    all: `session.observe()` does its work synchronously on the caller's task.
 
 ## What runs when
 
@@ -74,17 +77,29 @@ worker reacting to a trigger.
 |---|---|---|
 | **P1 Ingest** — store `Message`/`Artifact`, chunk, create edges | Synchronous (caller's task) | &lt; 10ms (message), &lt; 100ms (artifact) |
 | **P2 NER** — extract `Entity` nodes + `MENTIONS` edges | Synchronous (caller's task) | &lt; 100ms |
-| **P3 Observations** — extract factual statements | Spawned async task | &lt; 5s |
-| **P7a Auto-embed** — embed the `Message` | Spawned async task | continuous |
-| **P4 Consolidation** — derive `Fact`s, reinforce, invalidate, detect drift | Consolidation worker | background, threshold/timer |
-| **P5 Procedure promotion** — recurring sequences → `Procedure`s | Consolidation worker (cortex sweep) | background, post-consolidation |
-| **P6 Topic detection** — entity co-occurrence → `Topic`s | Consolidation worker (cortex sweep) | background, post-consolidation |
+| **P3 Observations** — extract factual statements | Synchronous (caller's task) | &lt; 5s |
+| **P7a Auto-embed** — embed the `Message` | Synchronous, inside the same write | continuous |
+| **P4 Consolidation** — derive `Fact`s, reinforce, invalidate, detect drift | `agent.consolidate()`, or the consolidation worker when streaming | on demand, or threshold/timer |
+| **P5 Procedure promotion** — recurring sequences → `Procedure`s | Cortex sweep, after a consolidation cycle | post-consolidation |
+| **P6 Topic detection** — entity co-occurrence → `Topic`s | Cortex sweep, after a consolidation cycle | post-consolidation |
 
-The ingest call returns after **P2** completes. **P3** and **P7a** are spawned as
-independent tasks — observation extraction and embedding finish in the
-background and notify the consolidation worker that new Observations exist. That split is
-what keeps your agent responsive: the caller gets a fast, durable write-confirmation while
-the expensive extraction work compounds knowledge off the hot path.
+P1, P2, P3 and P7a are not separate stages at runtime — they are phases of
+`ingest_message_atomic`, which runs all the CPU work first and then writes the Message,
+Chunks, Entities, `MENTIONS`, Observations, `OBSERVED_IN` and `ABOUT` in **one
+transaction**. `observe()` returns only after that transaction commits, which is what makes
+the write read-after-write consistent.
+
+!!! tip "Two ways consolidation runs"
+    **Explicitly** — `agent.consolidate()` runs one cycle on the calling task and returns
+    `CycleStats`. Always available, no streaming required. This is the path to use when you
+    want to decide the moment (end of a conversation, before a report, in a batch job).
+
+    **Automatically** — an instance built with `.streaming(true)` owns a consolidation
+    worker. Ingest notifies it as Observations land, and it fires on a per-agent threshold
+    (20 new Observations) or a periodic timer (15 minutes), then runs the cortex sweep.
+
+    A default (non-streaming) instance has no worker, so `consolidate()` is the only path
+    there.
 
 !!! tip "Compile once, query forever"
     Consolidation compiles raw Messages and Observations into Facts and Procedures once. The
@@ -93,15 +108,19 @@ the expensive extraction work compounds knowledge off the hot path.
 
 ## Atomic ingest
 
-P1 and P2 run as ordered steps inside the **IngestWorker**, in a single async
-task per item, with no queue between them. P1 creates the `Message` (or
-`Artifact`) node and its structural edges; P2 attaches the extracted entities.
-Because there is no queue between the steps, a message is either fully stored
-with its entities or not — there is no half-ingested state visible to a query.
+There are no separate P1/P2/P3 `Step`s at runtime. The workspace has exactly one
+production `Step` implementation — `IngestStep` — and the chain the facade builds is a
+one-element vector. The stage numbers describe *phases within*
+`ingest_message_atomic`: it does all NLP/NER/SRL and read-only lookups first, then opens a
+single transaction that writes the `Message` (or `Artifact`) with its structural edges,
+Chunks, Entities, `MENTIONS`, Observations, `OBSERVED_IN` and `ABOUT`, and commits once.
 
-Each item flows through a chain of `Step`s. Steps declare their own error policy
-via `StepErrorPolicy`, so a failure is contained to a single item and a single
-step:
+Because it is one transaction, a message is either fully stored with its entities and
+observations or not stored at all — there is no half-ingested state visible to a query.
+
+On the streaming path each item flows through a chain of `Step`s (today: just
+`IngestStep`). Steps declare their own error policy via `StepErrorPolicy`, so a failure is
+contained to a single item and a single step:
 
 - `Skip` — log and continue to the next step (e.g. NER failing still leaves a
   stored Message).
@@ -116,15 +135,24 @@ than growing an unbounded queue.
 
 ## Async post-ingest: consolidation and the cortex sweep
 
-When P3 finishes extracting Observations, it sends an `ObservationsReady`
-notification to the **ConsolidationWorker**. The worker keeps a per-agent
-counter and fires a consolidation cycle on a **threshold-OR-timer** rule:
+The **ConsolidationWorker** consumes `ConsolidationTask`s. Its designed trigger is a
+**threshold-OR-timer** rule driven by an `ObservationsReady` notification that increments a
+per-agent counter:
 
 - **20 new Observations** accumulate for an agent (`consolidation_threshold`), or
 - the periodic timer ticks (`consolidation_interval_secs`, default 900s / 15 min)
   with any pending Observations,
 
-whichever comes first. A `ForceConsolidate` task triggers a cycle immediately.
+whichever comes first. `ForceConsolidate` and `RunCycle` tasks trigger a cycle immediately.
+
+!!! note "Who sends `ObservationsReady`"
+    The ingest path emits it as Observations land: `Session::observe` sends it directly, and
+    the ingest worker sends it for streamed `submit`s (attributing them to the agent carried
+    on the task). Both are best-effort — a full consolidation queue is logged and dropped
+    rather than failing an ingest that already committed.
+
+    On a **non-streaming** instance there is no worker to receive it, so nothing accumulates;
+    use `agent.consolidate()` there.
 
 A consolidation cycle (P4) derives `Fact`s from unprocessed `Observation`s,
 reinforces or invalidates existing Facts, detects drift, and records a
@@ -134,8 +162,9 @@ the **cortex sweep** when both gates allow, governed by two independent throttle
 - a per-agent cycle counter (`cortex_cycle_every_n_consolidations`, default 4), and
 - a per-sweep wall-clock minimum (`cortex_min_interval_secs`, default 600s).
 
-When both gates allow, the sweep runs P5 procedure promotion (per agent), P6
-topic detection (global), F50 memory decay (prune age-decayed `Episode`s), and
+When both gates allow, the sweep runs six passes in order: P5 procedure promotion (per
+agent), P6 topic detection (global), F50 memory decay (prune age-decayed `Episode`s),
+stdlib rule execution, rule-confidence decay (globally throttled, not once per cycle), and
 session maintenance (auto-close inactive `Session`s and summarise them).
 
 !!! tip "Background reasoning is isolated"
@@ -158,13 +187,14 @@ that still answers the query. It runs a coverage-gated cascade:
 
 === "Phase 2 — Expand"
 
-    Episodic recall: `Episode`, `Observation`, `Session`, plus fulltext over
-    `Message` and `Observation` content, with MMR deduplication. Gated at a
+    Episodic recall: vector search over `Episode`, `Observation` and `Message`,
+    plus fulltext over `Message` and `Observation` content, with MMR
+    deduplication. Gated at a
     lower coverage threshold (default 0.65).
 
 === "Phase 3 — Broaden"
 
-    Raw content and graph traversal: `Chunk` and `Message` search plus
+    Raw content and graph traversal: `Chunk` and `Observation` search plus
     entity-link traversal. Phase 3 **always completes** — there is no early exit.
 
 !!! tip "Recall sharpens as you ingest"
@@ -227,9 +257,11 @@ println!("llm circuit: {:?}", health.llm_circuit);
 
 !!! tip "Offline operation"
     NER, observation extraction, consolidation, and recall all function without
-    an LLM. When the LLM provider fails, the circuit breaker opens and
-    LLM-dependent steps degrade to local fallbacks (rule-based NER, rule-based
-    observation extraction); the breaker probes and recovers automatically.
+    an LLM. When the LLM provider fails, the circuit breaker opens so
+    LLM-dependent work stops hammering a dead provider, and probes until it
+    recovers. Note NER and observation extraction are not LLM-dependent at all:
+    their rule-based fallbacks trigger when the ONNX cascade is unavailable, not
+    from the breaker.
 
 ## Dive deeper
 

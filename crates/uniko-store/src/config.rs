@@ -464,7 +464,8 @@ pub struct OcrConfig {
     pub image_height: u32,
     /// Recognizer input width in pixels.
     pub image_width: u32,
-    /// Recognizer normalization: `"imagenet"` or `"siglip"`.
+    /// Recognizer normalization: `"imagenet"` or `"siglip"`. Defaults to
+    /// `"siglip"`, which is what the PP-OCRv5 export expects.
     pub normalization: String,
     /// Optional override for ONNX execution providers. `None` → feature-aware
     /// default (cpu unless a GPU feature is enabled), same as the embedder.
@@ -738,11 +739,14 @@ pub struct UnikoConfig {
     /// unchanged. Requires a KB ingested with a hybrid embedder.
     #[serde(default)]
     pub recall_sparse_enabled: bool,
-    /// Variant labels for multi-query reformulation. Empty = use the
-    /// default 4-variant set (`keywords`, `original`, `declarative`,
-    /// `type_anchored`). Pass `vec!["keywords".into()]` to reproduce
-    /// the legacy single-query behaviour. See
-    /// `uniko_memory::recall::intent::QueryVariant` for the catalogue.
+    /// Variant labels to enable for multi-query reformulation.
+    ///
+    /// Empty (the default) selects the **single** POS-stripped `keywords`
+    /// variant. Opt into the full set explicitly with
+    /// `vec!["keywords", "original", "declarative", "type_anchored"]`.
+    /// Single-variant is the default because a measured A/B on full LoCoMo
+    /// showed multi-variant regressing evidence% and tripling per-query
+    /// latency; see `uniko_memory::recall::intent::build_intent_at`.
     #[serde(default)]
     pub query_variants: Vec<String>,
     /// `k` constant for reciprocal rank fusion across query variants.
@@ -770,8 +774,6 @@ pub struct UnikoConfig {
     pub prune_below: f64,
 
     // Recall cascade thresholds
-    /// Coverage threshold for Phase 1 (Compact) early exit.
-    pub phase1_coverage_threshold: f64,
     /// Coverage threshold for Phase 2 (Expand) early exit.
     pub phase2_coverage_threshold: f64,
     /// MMR lambda (relevance vs diversity) for Phase 2 deduplication.
@@ -877,7 +879,6 @@ impl Default for UnikoConfig {
             phase1_boost_alpha: 0.6,
             half_life_days: 30.0,
             prune_below: 0.05,
-            phase1_coverage_threshold: 0.75,
             phase2_coverage_threshold: 0.65,
             phase2_mmr_lambda: 0.7,
             phase2_mmr_duplicate_threshold: 0.85,
@@ -930,13 +931,6 @@ impl UnikoConfig {
             return Err(UnikoError::Config(format!(
                 "prune_below ({}) must be in [0.0, 1.0)",
                 self.prune_below,
-            )));
-        }
-
-        if self.phase1_coverage_threshold <= 0.0 || self.phase1_coverage_threshold > 1.0 {
-            return Err(UnikoError::Config(format!(
-                "phase1_coverage_threshold ({}) must be in (0.0, 1.0]",
-                self.phase1_coverage_threshold,
             )));
         }
 
@@ -1059,7 +1053,6 @@ mod tests {
         assert!((c.recall_bm25_weight - 0.5).abs() < f64::EPSILON);
         assert_eq!(c.half_life_days, 30.0);
         assert_eq!(c.prune_below, 0.05);
-        assert_eq!(c.phase1_coverage_threshold, 0.75);
         assert_eq!(c.phase2_coverage_threshold, 0.65);
     }
 
@@ -1102,13 +1095,6 @@ mod tests {
         // prune_below out of range
         let c = UnikoConfig {
             prune_below: 1.0,
-            ..UnikoConfig::default()
-        };
-        assert!(c.validate().is_err());
-
-        // phase1 threshold out of range
-        let c = UnikoConfig {
-            phase1_coverage_threshold: 0.0,
             ..UnikoConfig::default()
         };
         assert!(c.validate().is_err());

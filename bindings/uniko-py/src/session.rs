@@ -20,7 +20,7 @@ use crate::convert;
 use crate::errors::to_pyerr;
 use crate::ingest::PyIngestSource;
 use crate::macros::{bridge, bridge_sync};
-use crate::outputs::{PyDeletionReport, PyIngestOutcome, PyObserveResult};
+use crate::outputs::{PyDeletionReport, PyFinalizeReport, PyIngestOutcome, PyObserveResult};
 
 /// One conversation turn to feed into a [`PySession`].
 ///
@@ -213,6 +213,21 @@ impl PySession {
         })
     }
 
+    /// Build (or refresh) this session's session-level retrieval surfaces.
+    ///
+    /// Chunks the whole transcript and aggregates the session's observations
+    /// into dense chunks wired to the entities and participants they mention.
+    /// These are what session-scoped recall and the Phase 1 session boost
+    /// retrieve. Cheap and idempotent when the session has not grown.
+    /// Waits for streamed turns first when streaming is enabled.
+    fn finalize<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        bridge!(py, session = self.inner.clone(), {
+            let guard = session.lock().await;
+            let report = guard.finalize().await.map_err(to_pyerr)?;
+            Python::attach(|py| PyFinalizeReport::from_rust(py, &report))
+        })
+    }
+
     /// Generate and persist a summary of the session so far.
     ///
     /// Resolves to the new summary node id, or `None` when there was nothing
@@ -311,6 +326,67 @@ impl PySession {
             let guard = session.lock().await;
             guard.flush().await.map_err(to_pyerr)?;
             Ok(())
+        })
+    }
+
+    fn finalize_sync(&self, py: Python<'_>) -> PyResult<Py<PyFinalizeReport>> {
+        bridge_sync!(py, session = self.inner.clone(), {
+            let guard = session.lock().await;
+            let report = guard.finalize().await.map_err(to_pyerr)?;
+            Python::attach(|py| PyFinalizeReport::from_rust(py, &report))
+        })
+    }
+
+    // ── Context-manager support ────────────────────────────────────────
+    //
+    // `async with agent.session("s") as s:` finalizes on exit, so the
+    // session-level retrieval surfaces get built without the caller having
+    // to remember. Exit is best-effort: a chunking failure must not mask
+    // whatever exception is already propagating out of the block.
+
+    fn __aenter__<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let this: Py<Self> = slf.into();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(this) })
+    }
+
+    #[pyo3(signature = (exc_type=None, exc=None, tb=None))]
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        exc_type: Option<Py<PyAny>>,
+        exc: Option<Py<PyAny>>,
+        tb: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (_, _, _) = (exc_type, exc, tb);
+        bridge!(py, session = self.inner.clone(), {
+            let guard = session.lock().await;
+            if let Err(e) = guard.finalize().await {
+                eprintln!("uniko: session __aexit__ finalize failed: {e}");
+            }
+            // Never suppress an in-flight exception.
+            Ok(false)
+        })
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (exc_type=None, exc=None, tb=None))]
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        exc_type: Option<Py<PyAny>>,
+        exc: Option<Py<PyAny>>,
+        tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        let (_, _, _) = (exc_type, exc, tb);
+        bridge_sync!(py, session = self.inner.clone(), {
+            let guard = session.lock().await;
+            if let Err(e) = guard.finalize().await {
+                eprintln!("uniko: session __exit__ finalize failed: {e}");
+            }
+            Ok(false)
         })
     }
 

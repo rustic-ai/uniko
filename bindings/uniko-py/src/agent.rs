@@ -20,7 +20,9 @@ use crate::errors::to_pyerr;
 use crate::goals::PyGoals;
 use crate::logic::PyAssumeBuilder;
 use crate::macros::{bridge, bridge_sync};
-use crate::outputs::{PyAbductionResult, PyAnswer, PyContextBundle, PyDeletionReport};
+use crate::outputs::{
+    PyAbductionResult, PyAnswer, PyContextBundle, PyCycleStats, PyDeletionReport, PyFinalizeReport,
+};
 use crate::scope::PyScope;
 use crate::session::PySession;
 
@@ -342,6 +344,76 @@ impl PyAgent {
         bridge_sync!(py, agent = self.inner.clone(), {
             let report = agent.delete_session(&session_id).await.map_err(to_pyerr)?;
             Python::attach(|py| PyDeletionReport::from_rust(py, &report))
+        })
+    }
+
+    /// Build (or refresh) session-level retrieval surfaces for `session_id`
+    /// without holding its `Session` handle.
+    ///
+    /// The backfill entry point for knowledge bases ingested before session
+    /// chunking was wired into the facade. Unlike `Session.finalize()` this
+    /// does not wait for streamed turns first.
+    fn finalize_session<'py>(
+        &self,
+        py: Python<'py>,
+        session_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        bridge!(py, agent = self.inner.clone(), {
+            let report = agent
+                .finalize_session(&session_id)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| PyFinalizeReport::from_rust(py, &report))
+        })
+    }
+
+    fn finalize_session_sync(
+        &self,
+        py: Python<'_>,
+        session_id: String,
+    ) -> PyResult<Py<PyFinalizeReport>> {
+        bridge_sync!(py, agent = self.inner.clone(), {
+            let report = agent
+                .finalize_session(&session_id)
+                .await
+                .map_err(to_pyerr)?;
+            Python::attach(|py| PyFinalizeReport::from_rust(py, &report))
+        })
+    }
+
+    /// Run one consolidation cycle for this agent, now.
+    ///
+    /// Compiles unprocessed Observations into Facts, reinforcing or
+    /// invalidating prior beliefs and flagging entity drift. Always
+    /// available — no streaming pipeline required.
+    fn consolidate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        bridge!(py, agent = self.inner.clone(), {
+            let stats = agent.consolidate().await.map_err(to_pyerr)?;
+            Python::attach(|py| PyCycleStats::from_rust(py, &stats))
+        })
+    }
+
+    fn consolidate_sync(&self, py: Python<'_>) -> PyResult<Py<PyCycleStats>> {
+        bridge_sync!(py, agent = self.inner.clone(), {
+            let stats = agent.consolidate().await.map_err(to_pyerr)?;
+            Python::attach(|py| PyCycleStats::from_rust(py, &stats))
+        })
+    }
+
+    /// Session ids that have no session-level chunks yet.
+    ///
+    /// Drives the `finalize_session` backfill loop.
+    fn unfinalized_session_ids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        bridge!(py, agent = self.inner.clone(), {
+            let ids = agent.unfinalized_session_ids().await.map_err(to_pyerr)?;
+            Ok(ids)
+        })
+    }
+
+    fn unfinalized_session_ids_sync(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        bridge_sync!(py, agent = self.inner.clone(), {
+            let ids = agent.unfinalized_session_ids().await.map_err(to_pyerr)?;
+            Ok(ids)
         })
     }
 

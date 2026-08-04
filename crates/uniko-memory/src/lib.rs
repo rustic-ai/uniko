@@ -49,12 +49,14 @@ pub(crate) mod value_convert;
 pub use action::{RecordActionParams, RecordActionResult, record_action};
 #[doc(inline)]
 pub use agent::Agent;
+pub use consolidation::CycleStats;
 #[doc(inline)]
 pub use episode::{RecordEpisodeParams, record_episode};
 #[doc(inline)]
 pub use facade::{
-    ArtifactView, Data, GoalContext, GoalPhase, GoalView, Goals, LlmSpec, MessageView,
-    ObserveResult, RecallScope, Session, TaskPhase, TaskView, Turn, Uniko, UnikoBuilder,
+    ArtifactView, Data, FinalizeReport, GoalContext, GoalPhase, GoalView, Goals, LlmSpec,
+    MessageView, ObserveResult, RecallScope, Session, TaskPhase, TaskView, Turn, Uniko,
+    UnikoBuilder,
 };
 #[doc(inline)]
 pub use fact::{AssertFactParams, InvalidateFactParams, assert_fact, invalidate_fact};

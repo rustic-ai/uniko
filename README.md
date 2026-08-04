@@ -2,7 +2,7 @@
 
 **Embedded, Rust-native cognitive memory for AI agents — compiled knowledge in, fast recall out, zero infrastructure.**
 
-License: Apache-2.0 · Docs: https://rustic-ai.github.io/uniko/ · Crates: uniko-api, uniko-memory, uniko-store (crates.io)
+License: Apache-2.0 · Docs: https://rustic-ai.github.io/uniko/ · Crates: uniko-api, uniko-memory, uniko-cortex, uniko-extract, uniko-pipes, uniko-store (crates.io) · PyPI: uniko, uniko-cuda, uniko-metal
 
 ---
 
@@ -70,14 +70,34 @@ from crates.io:
 
 ```toml
 [dependencies]
-uniko-api = "*"      # public facade — re-exports the surface below
-uniko-memory = "*"   # recall cascade, consolidation, orchestration
-uniko-store = "*"    # graph storage / search over uni-db
-uniko-extract = "*"  # NER / observations / chunking / atomic ingest
+# The facade re-exports the whole surface; `onnx` turns on local NLP + embedding.
+uniko-api = { version = "0.2.0", features = ["onnx"] }
+```
+
+Or depend on a layer directly — all six crates are published:
+
+```toml
+[dependencies]
+uniko-memory  = "0.2.0"  # recall cascade, consolidation, orchestration
+uniko-cortex  = "0.2.0"  # procedure promotion, topic detection
+uniko-extract = "0.2.0"  # NER / observations / chunking / atomic ingest
+uniko-pipes   = "0.2.0"  # pipeline infrastructure
+uniko-store   = "0.2.0"  # graph storage / search over uni-db
 ```
 
 The `uni-db` dependency (`^3` — the latest 3.x) is pulled in transitively from
 crates.io — there is nothing external to install or run.
+
+### Python
+
+```sh
+pip install uniko          # CPU
+pip install uniko-cuda     # NVIDIA CUDA, Linux x86_64
+pip install uniko-metal    # Apple Silicon, macOS arm64
+```
+
+Install exactly one — all three provide the `uniko` import. If a GPU wheel exceeds PyPI's
+per-file limit, add `--extra-index-url https://rustic-ai.github.io/uniko/packages/`.
 
 ## Quick start
 
@@ -154,13 +174,13 @@ edge types), atomic ingest with local NLP extraction, async consolidation
 Locy reasoning (`sequence_detector` live).
 
 **Python bindings (alpha):** an async-first PyO3 SDK over the same in-process engine ships in
-`bindings/uniko-py` — full async surface plus blocking `*_sync` twins and type stubs. Build from
-source with `maturin` (no prebuilt wheels yet); see the
+`bindings/uniko-py` — full async surface plus blocking `*_sync` twins, type stubs, and a Pydantic
+overlay at `uniko.models`. Prebuilt wheels ship on PyPI; see the
 [Python SDK docs](https://rustic-ai.github.io/uniko/python/).
 
-**Not yet available** (do not depend on these): an HTTP / MCP server, a CLI, prebuilt Python
-wheels, and Phase 4–6 features (multimodal ingest, rule induction, MCTS planning, cross-agent
-sharing). See the docs for the honest roadmap.
+**Not yet available** (do not depend on these): an HTTP / MCP server, a CLI, and Phase 4–6
+features (multimodal ingest, rule induction, MCTS planning, cross-agent sharing). See the docs
+for the honest roadmap.
 
 ## License
 

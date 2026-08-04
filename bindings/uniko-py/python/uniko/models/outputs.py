@@ -147,6 +147,37 @@ class DeletionReport(BaseModel):
         return cls.model_validate(native)
 
 
+class FinalizeReport(BaseModel):
+    """What ``Session.finalize()`` built (native ``FinalizeReport``)."""
+
+    model_config = _OUT
+
+    transcript_chunks: list[int]
+    observation_chunks: list[int]
+    rebuilt: bool
+    ended_at: Optional[datetime.datetime] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "FinalizeReport":
+        return cls.model_validate(native)
+
+
+class CycleStats(BaseModel):
+    """What one consolidation cycle derived (native ``CycleStats``)."""
+
+    model_config = _OUT
+
+    observations_processed: int
+    facts_created: int
+    facts_reinforced: int
+    facts_invalidated: int
+    drift_alerts: int
+
+    @classmethod
+    def from_native(cls, native: Any) -> "CycleStats":
+        return cls.model_validate(native)
+
+
 class MessageView(BaseModel):
     """A stored message (native ``MessageView``)."""
 

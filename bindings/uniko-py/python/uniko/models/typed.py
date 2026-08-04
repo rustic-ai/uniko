@@ -30,6 +30,8 @@ from .outputs import (
     ArtifactView,
     ContextBundle,
     DeletionReport,
+    FinalizeReport,
+    CycleStats,
     GoalContext,
     GoalView,
     IngestOutcome,
@@ -257,6 +259,26 @@ class TypedSession:
     def flush_sync(self) -> None:
         self._inner.flush_sync()
 
+    async def __aenter__(self) -> "TypedSession":
+        await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return await self._inner.__aexit__(exc_type, exc, tb)
+
+    def __enter__(self) -> "TypedSession":
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return self._inner.__exit__(exc_type, exc, tb)
+
+    async def finalize(self) -> FinalizeReport:
+        return FinalizeReport.from_native(await self._inner.finalize())
+
+    def finalize_sync(self) -> FinalizeReport:
+        return FinalizeReport.from_native(self._inner.finalize_sync())
+
     async def summarize(self) -> Optional[int]:
         return await self._inner.summarize()
 
@@ -351,6 +373,26 @@ class TypedAgent:
 
     def delete_session_sync(self, session_id: str) -> DeletionReport:
         return DeletionReport.from_native(self._inner.delete_session_sync(session_id))
+
+    async def consolidate(self) -> CycleStats:
+        return CycleStats.from_native(await self._inner.consolidate())
+
+    def consolidate_sync(self) -> CycleStats:
+        return CycleStats.from_native(self._inner.consolidate_sync())
+
+    async def finalize_session(self, session_id: str) -> FinalizeReport:
+        return FinalizeReport.from_native(
+            await self._inner.finalize_session(session_id)
+        )
+
+    def finalize_session_sync(self, session_id: str) -> FinalizeReport:
+        return FinalizeReport.from_native(self._inner.finalize_session_sync(session_id))
+
+    async def unfinalized_session_ids(self) -> list[str]:
+        return await self._inner.unfinalized_session_ids()
+
+    def unfinalized_session_ids_sync(self) -> list[str]:
+        return self._inner.unfinalized_session_ids_sync()
 
     async def forget_participant(self, participant_id: str) -> DeletionReport:
         return DeletionReport.from_native(

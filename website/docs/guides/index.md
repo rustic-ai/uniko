@@ -5,12 +5,13 @@ These guides are the practical counterpart: they show how to drive the system fr
 Rust code — recording what an agent did, reasoning over compiled knowledge, and tuning the
 behaviour that pipelines automate.
 
-Once configured, uniko compounds your agent's knowledge automatically — with zero extra
-engineering on each turn. The ingest pipeline stores Messages, the NER and observation
-pipelines extract Entities and Observations, and the consolidation heartbeat derives Facts,
-promotes Procedures, and detects Topics in the background. The guides below cover the parts
-that remain *yours*: the knowledge only an agent can provide, the formal reasoning that runs
-inside the database, and the knobs that govern the pipelines.
+Every `observe` call does the compiling work for you with zero extra engineering per turn:
+one atomic transaction stores the Message, chunks it, and extracts Entities and Observations
+with local models — no LLM in the loop. Consolidation then compiles those Observations into
+Facts, Procedures and Topics — call `agent.consolidate()` when you want it, or build with
+`.streaming(true)` and let the worker schedule it. The guides below
+cover the parts that remain *yours*: the knowledge only an agent can provide, the formal
+reasoning that runs inside the database, and the knobs that govern the pipelines.
 
 !!! note
     Everything here is a Rust API. uniko links into your process like an embedded library;
@@ -65,8 +66,9 @@ over time.
 **Locy reasoning** is what makes consolidation more than aggregation. Three stdlib rules
 ship registered and run each cortex sweep (`sequence_detector`, `episode_pattern_detector`,
 `contradiction_detector`); a fourth, `relevance_decay`, runs in Rust. Procedure promotion
-invokes `sequence_detector` each consolidation cycle to turn recurring action sequences into
-Procedures.
+invokes `sequence_detector` during the cortex sweep — which fires once every
+`cortex_every_n` successful consolidation cycles (default 4), not on every cycle — to turn
+recurring action sequences into Procedures.
 
 !!! note
     Procedure promotion invokes the `sequence_detector` Locy rule by name via a `QUERY`

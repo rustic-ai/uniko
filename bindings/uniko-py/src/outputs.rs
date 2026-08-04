@@ -11,9 +11,9 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use uniko_api::tools::{
-    AbductionResult, Answer, ArtifactView, AtomicIngestResult, ContextBundle, DeletionReport,
-    GoalContext, GoalPhase, GoalView, IngestOutcome, MessageView, ObserveResult, RecallItem,
-    RecallKind, RecallSource, TaskPhase, TaskView,
+    AbductionResult, Answer, ArtifactView, AtomicIngestResult, ContextBundle, CycleStats,
+    DeletionReport, FinalizeReport, GoalContext, GoalPhase, GoalView, IngestOutcome, MessageView,
+    ObserveResult, RecallItem, RecallKind, RecallSource, TaskPhase, TaskView,
 };
 
 use crate::convert::{json_to_py, utc_datetime_to_py};
@@ -416,6 +416,101 @@ impl PyDeletionReport {
         format!(
             "DeletionReport(nodes_deleted={}, edges_deleted={}, facts_invalidated={}, root_existed={})",
             self.nodes_deleted, self.edges_deleted, self.facts_invalidated, self.root_existed
+        )
+    }
+}
+
+/// What `Session.finalize()` built or refreshed.
+#[pyclass(name = "FinalizeReport", module = "uniko", frozen)]
+pub struct PyFinalizeReport {
+    /// Transcript chunk node ids (`chunk_type = "session"`).
+    #[pyo3(get)]
+    transcript_chunks: Vec<i64>,
+    /// Observation chunk node ids (`chunk_type = "observation"`).
+    #[pyo3(get)]
+    observation_chunks: Vec<i64>,
+    /// Whether this call wrote to the graph.
+    #[pyo3(get)]
+    rebuilt: bool,
+    /// `ended_at` stamped on the Session (its latest message time), or
+    /// `None` when the session has no messages.
+    #[pyo3(get)]
+    ended_at: Option<Py<PyAny>>,
+}
+
+impl PyFinalizeReport {
+    /// Build the Python wrapper from a Rust [`FinalizeReport`].
+    pub fn from_rust(py: Python<'_>, report: &FinalizeReport) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                transcript_chunks: report.transcript_chunks.clone(),
+                observation_chunks: report.observation_chunks.clone(),
+                rebuilt: report.rebuilt,
+                ended_at: opt_datetime(py, report.ended_at)?,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyFinalizeReport {
+    fn __repr__(&self) -> String {
+        format!(
+            "FinalizeReport(transcript_chunks={}, observation_chunks={}, rebuilt={})",
+            self.transcript_chunks.len(),
+            self.observation_chunks.len(),
+            self.rebuilt
+        )
+    }
+}
+
+/// What one consolidation cycle derived.
+#[pyclass(name = "CycleStats", module = "uniko", frozen)]
+pub struct PyCycleStats {
+    /// Observations processed (PROCESSED edges emitted).
+    #[pyo3(get)]
+    observations_processed: usize,
+    /// Facts newly created.
+    #[pyo3(get)]
+    facts_created: usize,
+    /// Facts reinforced rather than created.
+    #[pyo3(get)]
+    facts_reinforced: usize,
+    /// Facts whose validity interval was closed by contradiction detection.
+    #[pyo3(get)]
+    facts_invalidated: usize,
+    /// Entities that flipped to `unstable` (drift alerts).
+    #[pyo3(get)]
+    drift_alerts: usize,
+}
+
+impl PyCycleStats {
+    /// Build the Python wrapper from a Rust [`CycleStats`].
+    pub fn from_rust(py: Python<'_>, stats: &CycleStats) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                observations_processed: stats.observations_processed,
+                facts_created: stats.facts_created,
+                facts_reinforced: stats.facts_reinforced,
+                facts_invalidated: stats.facts_invalidated,
+                drift_alerts: stats.drift_alerts,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyCycleStats {
+    fn __repr__(&self) -> String {
+        format!(
+            "CycleStats(observations_processed={}, facts_created={}, facts_reinforced={}, facts_invalidated={}, drift_alerts={})",
+            self.observations_processed,
+            self.facts_created,
+            self.facts_reinforced,
+            self.facts_invalidated,
+            self.drift_alerts
         )
     }
 }
@@ -827,6 +922,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAnswer>()?;
     m.add_class::<PyObserveResult>()?;
     m.add_class::<PyDeletionReport>()?;
+    m.add_class::<PyFinalizeReport>()?;
+    m.add_class::<PyCycleStats>()?;
     m.add_class::<PyMessageView>()?;
     m.add_class::<PyArtifactView>()?;
     m.add_class::<PyGoalView>()?;

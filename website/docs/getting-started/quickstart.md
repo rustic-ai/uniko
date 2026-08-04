@@ -79,8 +79,10 @@ async fn main() -> anyhow::Result<()> {
         println!("  source: {source:?}");
     }
 
-    // 5. Drain workers and close the store cleanly.
+    // 5. Drain workers and close the store cleanly. Every handle that clones
+    //    the store — `Session` *and* `Agent` — must be dropped first.
     drop(session);
+    drop(agent);
     memory.shutdown().await?;
     Ok(())
 }
@@ -144,8 +146,10 @@ println!("{}", answer.text);
 
 `agent.answer(...)` returns an [`Answer`](../reference/api.md): `answer.text` is the synthesized
 reply, `answer.context` is the ranked recall bundle that grounded it (`items`, `coverage`,
-`total_tokens`), and `answer.citations()` lists the messages/attachments the answer drew on. The
-model and token usage ride along (`answer.model`, `answer.output_tokens`).
+`total_tokens`), and `answer.citations()` lists the messages/attachments the answer drew on. `answer.model`
+carries the LLM *alias* you registered. Note `answer.input_tokens` and
+`answer.output_tokens` are always `None` on this path — they are populated only by callers that
+drive `answer_query` with their own usage accounting.
 
 Want just the context, no LLM? Call `agent.recall("the deadline").await?` — it returns the same
 `ContextBundle` for you to format into your own prompt. Each `RecallItem` carries its `kind`
@@ -156,11 +160,13 @@ Want just the context, no LLM? Call `agent.recall("the deadline").await?` — it
 
 ```rust
 drop(session);
+drop(agent);
 memory.shutdown().await?;
 ```
 
-`shutdown` consumes the instance and drains the workers within the configured timeout. Drop any
-outstanding `Agent`/`Session` handles first so it has sole ownership.
+`shutdown` consumes the instance and drains the workers within the configured timeout. Drop **every**
+outstanding `Agent` and `Session` handle first — each holds its own clone of the store, and
+`shutdown` errors if it is not the sole owner.
 
 ## Where to go next
 

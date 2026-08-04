@@ -100,6 +100,7 @@ impl PipelineSystem {
             dlq.clone(),
             ingest_health.clone(),
             config.dead_letter_max_retries,
+            consolidation_tx.clone(),
             ingest_inflight.clone(),
         );
         let ingest_handle = tokio::spawn(ingest_worker.run());

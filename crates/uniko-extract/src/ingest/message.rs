@@ -322,12 +322,15 @@ pub async fn create_chunks_in_tx(
         .batch_create_nodes_in_tx(tx, "Chunk", &chunk_props)
         .await?;
 
+    // Use the chunk's own index, not the position in this batch: a partial
+    // rebuild creates only a suffix, and the edge must still record the
+    // chunk's absolute position under the parent.
     let edges: Vec<(NodeId, NodeId, HashMap<String, Value>)> = chunk_nids
         .iter()
         .enumerate()
         .map(|(i, &cid)| {
             let mut props = HashMap::new();
-            props.insert("index".into(), Value::Int(i as i64));
+            props.insert("index".into(), Value::Int(chunks[i].index as i64));
             (parent_nid, cid, props)
         })
         .collect();

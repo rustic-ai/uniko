@@ -34,7 +34,7 @@ application-computed `embedding` vector for similarity recall.
 | `Session` | Episodic | A bounded interaction with a start and (optional) end. |
 | `Message` | Episodic | The atomic unit of communication — what someone said, when. |
 | `Action` | Episodic | Something a participant did beyond talking (tool call, file write, search). |
-| `Episode` | Episodic | A structured learning experience with an outcome — the unit consolidation operates on. |
+| `Episode` | Episodic | A structured learning experience with an outcome — the unit procedure promotion operates on. |
 | `Artifact` | Artifacts | A thing in the world: file, document, url, snippet, image, audio, video. |
 | `ArtifactContent` | Artifacts | Content-addressed blob metadata, deduplicated by `content_id` (SHA-256). |
 | `Chunk` | Artifacts | A segment of an `Artifact` or long `Message`, independently embedded and searchable. |
@@ -47,6 +47,7 @@ application-computed `embedding` vector for similarity recall.
 | `Summary` | Semantic | Generated text summarizing a session, task, goal, artifact, entity, or topic. |
 | `Procedure` | Procedural | A proven action sequence with effectiveness statistics. |
 | `Rule` | Procedural | A Locy rule used for formal reasoning and fact derivation. |
+| `Pattern` | Procedural | A recurring episode pattern surfaced by the `episode_pattern_detector` stdlib Locy rule, grouped by `(action_type, outcome)` with `support` and `mean_importance`. Upserted on a deterministic `pattern_id`. |
 | `ConsolidationCycle` | Meta-memory | A record of one consolidation run — what it processed, created, and invalidated. |
 | `DeadLetter` | Meta-memory | A failed pipeline task held for retry. |
 | `Organization` | Organization | A grouping that participants belong to. |
@@ -180,6 +181,7 @@ from five different node types into `Entity`). Those are noted inline.
 | `DERIVED_FROM` | `Fact`, `Procedure`, `Artifact` → `Episode`, `Action`, `Artifact` | Provenance: the episodes/actions a fact or procedure came from, or the artifact a derived artifact came from (carries `derivation_kind`, `derived_at`). |
 | `INVALIDATES` | `Fact` → `Fact` | A newer fact closes an older one (carries `reason`, `invalidated_at`). |
 | `SHARED_FROM` | `Fact` → `Fact` | A fact shared across agents (carries `shared_by`, `shared_at`). |
+| `CONTRADICTED_BY` | `Fact` → `Episode` | Provenance for a contradiction surfaced by the `contradiction_detector` rule; the fact is also BTIC-invalidated (carries `detected_at`). |
 | `BELONGS_TO` | `Entity`, `Fact` → `Topic` | Membership in a topic cluster. |
 | `SUMMARIZES` | `Summary` → `Session`, `Task`, `Goal`, `Artifact`, `Entity`, `Topic` | What a summary covers. |
 
@@ -214,8 +216,10 @@ from five different node types into `Entity`). Those are noted inline.
 
 ## Indexes at a glance
 
-Every id property carries a `Hash` scalar index for O(1) lookup. Beyond that,
-the schema leans on three index families:
+Most id properties carry a `Hash` scalar index for O(1) lookup — the exceptions
+are `Chunk.chunk_id`, which is unindexed because chunks are reached through
+`HAS_CHUNK` / vector / BM25 rather than by id, and `DeadLetter`, which has no id
+property at all. Beyond that, the schema leans on three index families:
 
 - **Hash** — exact-match columns like `Entity.name`, `Fact.subject`,
   `Fact.predicate`, `Episode.action_type`, `Entity.unstable`.

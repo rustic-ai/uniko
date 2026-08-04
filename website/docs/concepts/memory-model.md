@@ -23,7 +23,7 @@ see the [Data Model](data-model.md).
 
 uniko implements five memory types from cognitive science, plus a band of
 connective and infrastructure nodes that hold the others together. Every one of
-the schema's **24 node types** appears in exactly one family below:
+the schema's **25 node types** appears in exactly one family below:
 
 | Memory family | What it holds | Node types |
 |---|---|---|
@@ -105,8 +105,7 @@ uniko it is anchored by two node types:
 !!! tip "Working memory computes on demand — never stale"
     There is no stored `WorkingMemory` node. Working memory is a live view, computed on
     demand by traversing the graph outward from a `Goal`:
-    Goal → Tasks → Sessions → Messages → Facts → Entities, plus the proven
-    procedures used in those tasks. Change the goal and the view recomputes instantly —
+    Goal → Tasks → Sessions → Messages → Facts → Entities. Change the goal and the view recomputes instantly —
     always current, never a stale cache.
 
 This is what makes uniko goal-oriented rather than a chat log. Working memory
@@ -141,12 +140,16 @@ records it verbatim before it derives anything from it.
     grep"; an `Episode` is "I investigated the auth bug and found the root
     cause." It carries `state`, `delta`, `importance`, and an outcome, and it
     `INVOLVES` the actions taken. Episodes chain via `FOLLOWED_BY` and are the
-    unit consolidation operates on.
+    unit **procedure promotion** operates on.
 
 !!! tip "Episodes power procedural learning"
-    Consolidation learns proven patterns from episodes, not raw messages. Record episodes and
-    the system compounds reusable procedures over time; record only messages and you get a
+    Procedure promotion learns proven patterns from episodes, not raw messages. Record episodes
+    and the system compounds reusable procedures over time; record only messages and you get a
     searchable history.
+
+    Note this is a different sweep from fact consolidation, whose input unit is the
+    `Observation`: a cycle pulls unprocessed Observations, groups them by
+    `(subject, predicate)`, and records `PROCESSED` edges for idempotency.
 
 ---
 
@@ -175,9 +178,9 @@ to the message, chunk, or episode it came from.
 
 ```mermaid
 flowchart LR
-    M[Message] -->|OBSERVED_IN| O[Observation]
-    C[Chunk] -->|OBSERVED_IN| O
-    O -->|SUPPORTED_BY| F[Fact]
+    O[Observation] -->|OBSERVED_IN| M[Message]
+    O -->|OBSERVED_IN| C[Chunk]
+    F[Fact] -->|SUPPORTED_BY| O
     O -->|ABOUT| E[Entity]
     F -->|ABOUT| E
     F -->|INVALIDATES| F2[Fact superseded]
@@ -207,8 +210,9 @@ captures reusable competence proven by experience.
 - **`Rule`** — a Locy logic rule for formal reasoning, with `source` (Locy
   source code), a natural-language description, and a `source_type` of
   `stdlib`, `authored`, or `induced`. Rules carry precision/recall/confidence
-  scores and a lifecycle (active → demoted → pruned, or superseded). A Fact
-  records which rule derived it via `DERIVED_BY`.
+  scores and a lifecycle (active → demoted → pruned, or superseded). The schema reserves
+  `DERIVED_BY` for recording which rule produced a Fact, though no code path
+  writes that edge yet.
 
 !!! note "Rules run inside the database"
     Rules and procedures are first-class schema nodes with full provenance edges, and

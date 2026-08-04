@@ -230,7 +230,7 @@ candidate ──(success)──▶ active ──(repromote ≥ 0.60)──▶ ac
   leaves **no** `Rule` node behind), then persists a `Rule` in `status = "candidate"` with
   default confidence `0.5`. Passing `source_type = "stdlib"` is rejected — stdlib goes
   through `register_stdlib_rules`.
-- `apply_decay_cycle(kb, cfg)` runs once per consolidation cycle: it multiplies each
+- `apply_decay_cycle(kb, cfg)` runs from the cortex sweep (every `cortex_every_n` successful consolidation cycles, default 4) and is additionally globally throttled: it multiplies each
   non-stdlib rule's confidence by `decay_per_cycle`, bumps `missed_cycles`, and applies the
   state transitions — returning a `DecayReport { decayed, demoted, promoted, pruned }`.
 - `record_rule_match(kb, name, cfg)` resets `missed_cycles`, bumps `last_scored_at`, and

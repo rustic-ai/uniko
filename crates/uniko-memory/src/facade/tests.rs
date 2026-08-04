@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use uniko_store::config::UnikoConfig;
-use uniko_store::schema::constants::labels;
+use uniko_store::schema::constants::{edges, labels};
 use uniko_store::{KnowledgeBase, UnikoError, Value};
 
 use crate::{IngestOutcome, IngestSource, Turn, Uniko};
@@ -892,6 +892,649 @@ async fn unknown_goal_transitions_return_false() {
     assert!(!agent.goals().abandon("nope").await.expect("abandon"));
     assert!(agent.goals().get("nope").await.expect("get").is_none());
 
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+// ── Session-level chunking (`Session::finalize`) ────────────────────────
+
+/// Observe `turns` into a fresh session, skipping the test when the
+/// embedding model is unavailable. Returns `None` when skipped.
+async fn observe_all<'a>(
+    session: &mut crate::Session,
+    turns: impl IntoIterator<Item = &'a str>,
+) -> Option<()> {
+    for (i, text) in turns.into_iter().enumerate() {
+        let sender = if i % 2 == 0 { "alice" } else { "bob" };
+        match session.observe(Turn::new(sender, text)).await {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: embeddings unavailable");
+                return None;
+            }
+            Err(e) => panic!("observe failed: {e}"),
+        }
+    }
+    Some(())
+}
+
+/// Count a session's chunks of one `chunk_type`.
+async fn session_chunk_count(kb: &KnowledgeBase, session_id: &str, chunk_type: &str) -> i64 {
+    count_query(
+        kb,
+        &format!(
+            "MATCH (:Session {{session_id: '{session_id}'}})-[:HAS_CHUNK]->\
+             (c:Chunk {{chunk_type: '{chunk_type}'}}) RETURN count(c) AS c"
+        ),
+    )
+    .await
+}
+
+/// `finalize()` builds both session-level retrieval surfaces.
+#[tokio::test]
+async fn finalize_creates_session_chunks() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("fin-1");
+
+    let turns = [
+        "I love hiking in the Cascades every weekend.",
+        "Which trail is your favourite?",
+        "Rattlesnake Ledge, mostly for the view at the top.",
+    ];
+    if observe_all(&mut session, turns).await.is_none() {
+        return;
+    }
+
+    let report = match session.finalize().await {
+        Ok(r) => r,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("finalize failed: {e}"),
+    };
+    assert!(report.rebuilt, "first finalize writes the chunks");
+    assert!(
+        !report.transcript_chunks.is_empty(),
+        "a three-turn session must produce transcript chunks"
+    );
+    assert!(
+        session_chunk_count(agent.kb(), "fin-1", "session").await > 0,
+        "transcript chunks must hang off the Session via HAS_CHUNK"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Regression guard: `summarize()` refreshes the chunks for callers who
+/// never learn about `finalize()`. This is the path that silently produced
+/// no session chunks at all before session chunking was wired into the
+/// facade, leaving the Phase 1 session boost with nothing to walk.
+#[tokio::test]
+async fn summarize_builds_session_chunks() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("fin-2");
+
+    let turns = [
+        "We adopted a border collie named Pip last spring.",
+        "Does Pip get along with the cat?",
+    ];
+    if observe_all(&mut session, turns).await.is_none() {
+        return;
+    }
+
+    match session.summarize().await {
+        Ok(_) => {}
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("summarize failed: {e}"),
+    }
+
+    assert!(
+        session_chunk_count(agent.kb(), "fin-2", "session").await > 0,
+        "summarize() must leave the session with transcript chunks"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A second `finalize()` with no new turns rewrites nothing — and must not
+/// duplicate chunks. `chunk_id` carries no uniqueness constraint and chunk
+/// writes are plain inserts, so a rebuild that skipped the delete would
+/// silently double every chunk.
+#[tokio::test]
+async fn finalize_is_idempotent() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("fin-3");
+
+    if observe_all(&mut session, ["Sourdough needs a stiff starter."])
+        .await
+        .is_none()
+    {
+        return;
+    }
+
+    let first = match session.finalize().await {
+        Ok(r) => r,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("finalize failed: {e}"),
+    };
+    let second = session.finalize().await.expect("second finalize");
+
+    assert!(
+        !second.rebuilt,
+        "an unchanged session must not be rewritten"
+    );
+    assert_eq!(
+        first.transcript_chunks, second.transcript_chunks,
+        "unchanged session keeps the same chunk nodes"
+    );
+
+    let total = count_query(
+        agent.kb(),
+        "MATCH (:Session {session_id: 'fin-3'})-[:HAS_CHUNK]->(c:Chunk) RETURN count(c) AS c",
+    )
+    .await;
+    let distinct = count_query(
+        agent.kb(),
+        "MATCH (:Session {session_id: 'fin-3'})-[:HAS_CHUNK]->(c:Chunk) \
+         RETURN count(DISTINCT c.chunk_id) AS c",
+    )
+    .await;
+    assert_eq!(total, distinct, "chunk_id must not be duplicated");
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A session that grows after being finalized gets a refreshed transcript,
+/// not a permanently stale one.
+#[tokio::test]
+async fn finalize_after_more_turns_refreshes() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("fin-4");
+
+    if observe_all(&mut session, ["The first topic was budgeting."])
+        .await
+        .is_none()
+    {
+        return;
+    }
+    match session.finalize().await {
+        Ok(_) => {}
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("finalize failed: {e}"),
+    }
+
+    if observe_all(&mut session, ["Later we moved on to xylophones."])
+        .await
+        .is_none()
+    {
+        return;
+    }
+    let after = session.finalize().await.expect("refresh finalize");
+    assert!(after.rebuilt, "a grown session must be rebuilt");
+
+    // The later turn's distinctive token must now appear in some chunk.
+    let hits = count_query(
+        agent.kb(),
+        "MATCH (:Session {session_id: 'fin-4'})-[:HAS_CHUNK]->(c:Chunk) \
+         WHERE c.text CONTAINS 'xylophones' RETURN count(c) AS c",
+    )
+    .await;
+    assert!(hits > 0, "refreshed chunks must include the later turns");
+
+    let total = count_query(
+        agent.kb(),
+        "MATCH (:Session {session_id: 'fin-4'})-[:HAS_CHUNK]->(c:Chunk) RETURN count(c) AS c",
+    )
+    .await;
+    let distinct = count_query(
+        agent.kb(),
+        "MATCH (:Session {session_id: 'fin-4'})-[:HAS_CHUNK]->(c:Chunk) \
+         RETURN count(DISTINCT c.chunk_id) AS c",
+    )
+    .await;
+    assert_eq!(total, distinct, "a rebuild must not duplicate chunks");
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// `finalize()` on a session with no turns is a clean no-op.
+#[tokio::test]
+async fn finalize_unused_session_is_empty() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let session = agent.session("fin-empty");
+
+    match session.finalize().await {
+        Ok(report) => {
+            assert!(report.transcript_chunks.is_empty());
+            assert!(report.observation_chunks.is_empty());
+            assert!(!report.rebuilt);
+        }
+        Err(e) if is_model_unavailable(&e) => eprintln!("skipping: embeddings unavailable"),
+        Err(e) => panic!("finalize failed: {e}"),
+    }
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// `Agent::delete_session` must take the session-anchored chunks with it —
+/// otherwise deleted content stays live in the vector and full-text indexes
+/// and remains recallable.
+#[tokio::test]
+async fn delete_session_removes_session_chunks() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("fin-del");
+
+    if observe_all(&mut session, ["Quarterly numbers looked strong."])
+        .await
+        .is_none()
+    {
+        return;
+    }
+    match session.finalize().await {
+        Ok(_) => {}
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("finalize failed: {e}"),
+    }
+    assert!(session_chunk_count(agent.kb(), "fin-del", "session").await > 0);
+
+    drop(session);
+    agent
+        .delete_session("fin-del")
+        .await
+        .expect("delete_session");
+
+    assert_eq!(
+        session_chunk_count(agent.kb(), "fin-del", "session").await,
+        0,
+        "session-anchored chunks must be deleted with the session"
+    );
+
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// The bug this wiring fixes, end to end.
+///
+/// `session_boost_signals` — the Phase 1 contribution under the **default**
+/// `phase1_strategy = "boost"` — walks
+/// `Fact <-SUPPORTED_BY- Observation -OBSERVED_IN-> Message -IN_SESSION->
+/// Session -HAS_CHUNK-> Chunk`. Every hop but the last always existed on a
+/// facade-ingested graph; the last one did not, so the boost was a silent
+/// no-op. Asserts the walk directly, with a negative control, rather than
+/// depending on LLM ranking.
+#[tokio::test]
+async fn session_boost_walk_is_populated_only_after_finalize() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("boost-1");
+
+    let turns = [
+        "Dana works as a marine biologist in Monterey.",
+        "Dana studies kelp forest ecology there.",
+        "Dana has published on sea otter foraging.",
+    ];
+    if observe_all(&mut session, turns).await.is_none() {
+        return;
+    }
+
+    // Derive Facts so the walk has a starting node.
+    if let Err(e) = agent.consolidate().await {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("consolidation failed: {e}");
+    }
+
+    let fact_ids: Vec<i64> = agent
+        .kb()
+        .query_cypher(
+            "MATCH (f:Fact)-[:SUPPORTED_BY]->(:Observation)-[:OBSERVED_IN]->(:Message)\
+             -[:IN_SESSION]->(:Session {session_id: 'boost-1'}) RETURN DISTINCT id(f) AS fid",
+            &HashMap::new(),
+        )
+        .await
+        .expect("fact query")
+        .iter()
+        .filter_map(|r| match r.get("fid") {
+            Some(Value::Int(i)) => Some(*i),
+            _ => None,
+        })
+        .collect();
+    if fact_ids.is_empty() {
+        eprintln!("skipping: consolidation derived no facts in this environment");
+        return;
+    }
+
+    // Negative control: before finalize the last hop does not exist, so the
+    // boost has nothing to score with.
+    for fid in &fact_ids {
+        let chunks = agent
+            .kb()
+            .fact_session_chunk_ids(*fid)
+            .await
+            .expect("walk before finalize");
+        assert!(
+            chunks.is_empty(),
+            "without finalize the session boost walk must find nothing"
+        );
+    }
+
+    session.finalize().await.expect("finalize");
+
+    let mut any = false;
+    for fid in &fact_ids {
+        any |= !agent
+            .kb()
+            .fact_session_chunk_ids(*fid)
+            .await
+            .expect("walk after finalize")
+            .is_empty();
+    }
+    assert!(
+        any,
+        "after finalize the session boost walk must reach session chunks"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Deleting every turn behind a finalized session must not leave its chunks
+/// behind — they would stay live in the vector and full-text indexes and keep
+/// describing content that no longer exists.
+#[tokio::test]
+async fn finalize_drops_chunks_when_all_turns_are_deleted() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("fin-empty-after");
+
+    let turn = Turn::new("alice", "The launch slipped to November.").id("m-1");
+    match session.observe(turn).await {
+        Ok(_) => {}
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("observe failed: {e}"),
+    }
+    match session.finalize().await {
+        Ok(_) => {}
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("finalize failed: {e}"),
+    }
+    assert!(session_chunk_count(agent.kb(), "fin-empty-after", "session").await > 0);
+
+    session.delete_turn("m-1").await.expect("delete_turn");
+    let report = session.finalize().await.expect("finalize after delete");
+
+    assert!(report.transcript_chunks.is_empty());
+    assert_eq!(
+        session_chunk_count(agent.kb(), "fin-empty-after", "session").await,
+        0,
+        "chunks for a now-empty session must be dropped"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Regression guard for the `SUPPORTED_BY` traversal direction.
+///
+/// `SUPPORTED_BY` is registered `Fact → Observation` (`schema/facts.rs`), but
+/// `fact_session_chunk_ids` once walked it inbound — a pattern that can never
+/// match, so the Phase 1 session boost silently scored nothing on every call.
+/// The graph here is seeded directly so the guard runs without models or
+/// consolidation, and fails loudly if the arrow is ever flipped back.
+#[tokio::test]
+async fn fact_session_chunk_walk_follows_schema_edge_direction() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let kb = agent.kb();
+    let none: HashMap<String, Value> = HashMap::new();
+    let now = uniko_store::datetime_value(chrono::Utc::now());
+    let props = |pairs: &[(&str, Value)]| -> HashMap<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect()
+    };
+
+    // Session -HAS_CHUNK-> Chunk, and Message -IN_SESSION-> Session.
+    let session = kb
+        .merge_node(
+            labels::SESSION,
+            "session_id",
+            "walk-1",
+            &props(&[("started_at", now.clone())]),
+        )
+        .await
+        .expect("session");
+    let chunk = kb
+        .merge_node(
+            labels::CHUNK,
+            "chunk_id",
+            "walk-1-c0",
+            &props(&[
+                ("text", Value::String("transcript".into())),
+                ("chunk_type", Value::String("session".into())),
+            ]),
+        )
+        .await
+        .expect("chunk");
+    let message = kb
+        .merge_node(
+            labels::MESSAGE,
+            "message_id",
+            "walk-1-m0",
+            &props(&[
+                ("content", Value::String("hello".into())),
+                ("timestamp", now.clone()),
+            ]),
+        )
+        .await
+        .expect("message");
+    let observation = kb
+        .merge_node(
+            labels::OBSERVATION,
+            "observation_id",
+            "walk-1-o0",
+            &props(&[("content", Value::String("alice likes hiking".into()))]),
+        )
+        .await
+        .expect("observation");
+    let fact = kb
+        .merge_node(
+            labels::FACT,
+            "fact_id",
+            "walk-1-f0",
+            &props(&[
+                ("subject", Value::String("alice".into())),
+                ("predicate", Value::String("likes".into())),
+            ]),
+        )
+        .await
+        .expect("fact");
+
+    for (edge, from, to) in [
+        (edges::HAS_CHUNK, session, chunk),
+        (edges::IN_SESSION, message, session),
+        (edges::OBSERVED_IN, observation, message),
+        // The direction under test: Fact is the source.
+        (edges::SUPPORTED_BY, fact, observation),
+    ] {
+        kb.create_edge(edge, from, to, &none).await.expect(edge);
+    }
+
+    let reached = kb
+        .fact_session_chunk_ids(fact)
+        .await
+        .expect("fact_session_chunk_ids");
+    assert_eq!(
+        reached,
+        vec![chunk],
+        "the session-boost walk must follow SUPPORTED_BY outbound from the Fact"
+    );
+
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A refresh after new turns reuses the byte-identical leading chunks and
+/// only rebuilds the tail, so appending to a long session does not re-embed
+/// the whole transcript.
+#[tokio::test]
+async fn finalize_reuses_unchanged_chunk_prefix() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("prefix-1");
+
+    // Enough text that the transcript spans more than one chunk.
+    let filler: Vec<String> = (0..40)
+        .map(|i| {
+            format!(
+                "Turn {i}: the quarterly logistics review covered warehouse throughput, \
+             carrier performance, and the seasonal staffing plan in some detail."
+            )
+        })
+        .collect();
+    if observe_all(&mut session, filler.iter().map(String::as_str))
+        .await
+        .is_none()
+    {
+        return;
+    }
+    let first = match session.finalize().await {
+        Ok(r) => r,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("finalize failed: {e}"),
+    };
+    if first.transcript_chunks.len() < 2 {
+        eprintln!("skipping: transcript did not span multiple chunks");
+        return;
+    }
+
+    if observe_all(&mut session, ["One more turn about xylophones."])
+        .await
+        .is_none()
+    {
+        return;
+    }
+    let second = session.finalize().await.expect("refresh");
+    assert!(second.rebuilt, "a grown session must be rebuilt");
+
+    // The leading chunk nodes must be the *same nodes*, not recreated ones.
+    assert_eq!(
+        first.transcript_chunks[0], second.transcript_chunks[0],
+        "the unchanged leading chunk must be reused, not re-embedded"
+    );
+    let reused = first
+        .transcript_chunks
+        .iter()
+        .zip(&second.transcript_chunks)
+        .take_while(|(a, b)| a == b)
+        .count();
+    assert!(
+        reused >= 1,
+        "expected at least one reused chunk, got {reused}"
+    );
+
+    // And the new content is present exactly once.
+    let hits = count_query(
+        agent.kb(),
+        "MATCH (:Session {session_id: 'prefix-1'})-[:HAS_CHUNK]->(c:Chunk) \
+         WHERE c.text CONTAINS 'xylophones' RETURN count(c) AS c",
+    )
+    .await;
+    assert_eq!(
+        hits, 1,
+        "the appended turn must appear in exactly one chunk"
+    );
+
+    let total = count_query(
+        agent.kb(),
+        "MATCH (:Session {session_id: 'prefix-1'})-[:HAS_CHUNK]->(c:Chunk) RETURN count(c) AS c",
+    )
+    .await;
+    let distinct = count_query(
+        agent.kb(),
+        "MATCH (:Session {session_id: 'prefix-1'})-[:HAS_CHUNK]->(c:Chunk) \
+         RETURN count(DISTINCT c.chunk_id) AS c",
+    )
+    .await;
+    assert_eq!(
+        total, distinct,
+        "a partial rebuild must not duplicate chunks"
+    );
+
+    drop(session);
     drop(agent);
     memory.shutdown().await.expect("shutdown");
 }

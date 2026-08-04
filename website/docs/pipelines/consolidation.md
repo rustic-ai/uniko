@@ -2,10 +2,11 @@
 
 Consolidation is where stored experience becomes knowledge. Ingest captures raw Observations —
 single claims from single sources — but a claim echoed across five sessions is something stronger:
-a stable, queryable `Fact`. Consolidation runs that cross-Observation work in the background, on
-its own cadence, off the hot path: it votes on the canonical form, stamps each Fact with a
-bitemporal validity interval, and retires beliefs with provenance when newer evidence contradicts
-them.
+a stable, queryable `Fact`. Consolidation runs that cross-Observation work off the hot path: it
+votes on the canonical form, stamps each Fact with a bitemporal validity interval, and retires
+beliefs with provenance when newer evidence contradicts them. Run it on demand with
+`agent.consolidate()`, or let a streaming instance schedule it — see
+[How the worker schedules these passes](#how-the-worker-schedules-these-passes).
 
 That cross-Observation work is **consolidation**: a set of background passes that
 run *after* ingest, on their own cadence, off the hot path. They never block a
@@ -41,24 +42,37 @@ flowchart LR
 ## How the worker schedules these passes
 
 The `ConsolidationWorker` is a long-running Tokio actor with a single `select!`
-loop. Its receiver is a bounded channel (`mpsc`), so when the queue fills, the
-sender blocks and backpressure propagates back to the ingest path rather than
-growing an unbounded queue. The loop is `biased`, checking in strict priority
+loop. Its receiver is a bounded channel (`mpsc`). `submit_consolidation` uses
+`try_send`, so a full queue is rejected immediately as
+`UnikoError::Pipeline` rather than blocking the caller or growing without
+bound. The loop is `biased`, checking in strict priority
 order:
 
 1. **Shutdown** — a `CancellationToken` fires; the worker logs and breaks.
 2. **`ConsolidationTask`** — one of three triggers (below).
 3. **Periodic timer** — only fires when nothing else is ready.
 
-When P3 finishes extracting Observations for a Message batch, it sends a
-`ConsolidationTask::ObservationsReady(ObservationsReady { agent_id, observation_count, .. })`. The
-worker keeps a per-agent counter and runs a cycle on **threshold-OR-timer**:
+The ingest path sends `ConsolidationTask::ObservationsReady(ObservationsReady { agent_id,
+observation_count, .. })` as new Observations land. The worker keeps a per-agent counter and
+runs a cycle on **threshold-OR-timer**:
 
 | Trigger | Condition |
 |---|---|
 | `ObservationsReady` | per-agent counter reaches `consolidation_threshold` (default 20), then resets |
 | Periodic timer | every `consolidation_interval_secs` (default 900 = 15 min), for every agent with a non-zero counter |
 | `ForceConsolidate` / `RunCycle` | immediate, on explicit request |
+
+!!! tip "Two ways consolidation runs"
+    **Explicitly** — `agent.consolidate()` runs one cycle on the calling task and returns
+    `CycleStats`. Always available, no streaming required. This is the path to use when you
+    want to decide the moment (end of a conversation, before a report, in a batch job).
+
+    **Automatically** — an instance built with `.streaming(true)` owns a consolidation
+    worker. Ingest notifies it as Observations land, and it fires on a per-agent threshold
+    (20 new Observations) or a periodic timer (15 minutes), then runs the cortex sweep.
+
+    A default (non-streaming) instance has no worker, so `consolidate()` is the only path
+    there.
 
 Each cycle calls `run_consolidation_cycle`, which delegates to
 [`run_cycle`](#p4-fact-derivation). A failed cycle is **logged but never

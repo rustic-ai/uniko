@@ -651,8 +651,13 @@ impl KnowledgeBase {
     /// query failure.
     pub async fn fact_session_chunk_ids(&self, fact_node_id: NodeId) -> Result<Vec<NodeId>> {
         let session = self.db.session();
+        // `SUPPORTED_BY` is registered Fact → Observation
+        // (`schema/facts.rs`), so it is traversed outbound from the Fact.
+        // This previously read `(f)<-[:SUPPORTED_BY]-(:Observation)`, which
+        // can never match and silently returned no chunks — leaving the
+        // Phase 1 session boost with an empty boost map on every call.
         let cypher = "MATCH (f) WHERE id(f) = $nid \
-                      MATCH (f)<-[:SUPPORTED_BY]-(:Observation)-[:OBSERVED_IN]->(:Message) \
+                      MATCH (f)-[:SUPPORTED_BY]->(:Observation)-[:OBSERVED_IN]->(:Message) \
                            -[:IN_SESSION]->(:Session)-[:HAS_CHUNK]->(c:Chunk) \
                       RETURN DISTINCT id(c) AS chunk_id";
         let result = session

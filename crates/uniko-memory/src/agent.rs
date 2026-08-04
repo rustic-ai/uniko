@@ -18,7 +18,8 @@ use uniko_store::locy::{AbductionResult, AssumeBuilder, Record};
 use uniko_store::xervo::{GenerationOptions, Message};
 use uniko_store::{DeletionReport, KnowledgeBase, NodeId, UnikoError, Value};
 
-use crate::facade::{RecallScope, Session};
+use crate::consolidation::CycleStats;
+use crate::facade::{FinalizeReport, RecallScope, Session, finalize_session};
 use crate::nl_to_cypher::is_safe_read_only;
 use crate::pipeline::PipelineSystem;
 use crate::policy::Viewer;
@@ -314,6 +315,67 @@ impl Agent {
         self.kb.delete_session_cascade(session_id).await
     }
 
+    /// Build (or refresh) the session-level retrieval surfaces for
+    /// `session_id`, without holding its [`Session`](crate::Session) handle.
+    ///
+    /// Same work as [`Session::finalize`](crate::Session::finalize), and the
+    /// backfill entry point for knowledge bases ingested before session
+    /// chunking was wired into the facade:
+    ///
+    /// ```no_run
+    /// # async fn f(agent: &uniko_memory::Agent) -> Result<(), uniko_store::UnikoError> {
+    /// // Sessions that never got their chunks built.
+    /// for sid in agent.unfinalized_session_ids().await? {
+    ///     agent.finalize_session(&sid).await?;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Unlike [`Session::finalize`](crate::Session::finalize) this does not
+    /// quiesce the streaming pipeline first — there is no session-to-pipeline
+    /// binding at this level, so it chunks whatever is committed at call time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a read or write failure.
+    pub async fn finalize_session(&self, session_id: &str) -> Result<FinalizeReport, UnikoError> {
+        finalize_session(&self.kb, session_id).await
+    }
+
+    /// Run one consolidation cycle for this agent, now.
+    ///
+    /// Compiles unprocessed `Observation`s into `Fact`s — voting on the
+    /// canonical object, stamping each Fact with a bitemporal validity
+    /// interval, reinforcing or invalidating prior beliefs, and flagging
+    /// entity drift. Returns what the cycle did.
+    ///
+    /// This is the synchronous, always-available path: it needs no streaming
+    /// pipeline and runs on the calling task. A streaming instance also
+    /// consolidates on its own (a 20-observation threshold or a 15-minute
+    /// timer), so this is for callers that want to decide the moment — at the
+    /// end of a conversation, before a report, or in a batch job.
+    ///
+    /// Cheap when there is nothing to do: a cycle with no unprocessed
+    /// Observations returns zeroed [`CycleStats`] without writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a read, write, or embedding failure.
+    pub async fn consolidate(&self) -> Result<CycleStats, UnikoError> {
+        crate::consolidation::run_cycle(&self.kb, &self.agent_id, None).await
+    }
+
+    /// Session ids that have no session-level chunks yet.
+    ///
+    /// Drives the [`finalize_session`](Agent::finalize_session) backfill loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a read failure.
+    pub async fn unfinalized_session_ids(&self) -> Result<Vec<String>, UnikoError> {
+        self.kb.unfinalized_session_ids().await
+    }
+
     /// GDPR erasure: remove a participant and the data they authored.
     ///
     /// Deletes Messages they sent (each with its turn cascade) and
@@ -338,6 +400,7 @@ impl Agent {
             self.streaming.clone(),
             self.llm_alias.clone(),
             self.extractors.clone(),
+            self.agent_id.clone(),
         )
     }
 

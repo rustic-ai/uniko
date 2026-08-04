@@ -16,19 +16,20 @@ selection, and GPU acceleration — that you reach for only when you need them.
 
 ## Add the dependency
 
-uniko lives in a Cargo workspace and is not yet published to crates.io. Add the crates you need as
-path or git dependencies. The workspace uses `edition = "2024"`, so your consuming crate needs a
-stable toolchain that supports it.
+uniko publishes six crates to crates.io. Depend on the `uniko-api` facade and you get the whole
+stack; the lower layers are published too if you want to reach one directly.
 
-=== "Path dependency"
+Requires **Rust >= 1.91** (edition 2024) — the workspace's `rust-version`.
+
+=== "crates.io"
 
     ```toml
     # Cargo.toml
     [dependencies]
-    uniko-api = { path = "../uniko/crates/uniko-api" }
+    uniko-api = { version = "0.2.0", features = ["onnx"] }
     # ...or depend on a specific layer directly:
-    uniko-memory = { path = "../uniko/crates/uniko-memory" }
-    uniko-store  = { path = "../uniko/crates/uniko-store" }
+    uniko-memory = { version = "0.2.0", features = ["onnx"] }
+    uniko-store  = "0.2.0"
     ```
 
 === "Git dependency"
@@ -36,8 +37,58 @@ stable toolchain that supports it.
     ```toml
     # Cargo.toml
     [dependencies]
-    uniko-api = { git = "https://github.com/rustic-ai/uniko" }
+    uniko-api = { git = "https://github.com/rustic-ai/uniko", features = ["onnx"] }
     ```
+
+=== "Path dependency"
+
+    ```toml
+    # For working against a local checkout of the workspace.
+    [dependencies]
+    uniko-api = { path = "../uniko/crates/uniko-api", features = ["onnx"] }
+    ```
+
+### Build prerequisites
+
+Building uniko compiles ONNX Runtime and a large native dependency tree from source, so a
+few tools must be present before `cargo build`:
+
+| Requirement | Why |
+|---|---|
+| **Rust ≥ 1.91** (edition 2024) | the workspace `rust-version` |
+| **A C/C++ toolchain** | ONNX Runtime and other native crates |
+| **`protoc`** (protobuf-compiler) on `PATH` | `ort` needs it at build time |
+| **`mold`** — Linux only | `.cargo/config.toml` sets `-C link-arg=-fuse-ld=mold` unconditionally, so the link step fails without it |
+
+None of this applies if you install the Python wheels — they ship prebuilt.
+
+!!! important "`onnx` is not a default feature"
+    The local NLP cascade — NER, SRL, dependency parsing — compiles only under the `onnx`
+    feature, and it is **off by default** so a build that does not need local inference stays
+    lean. Without it, ingest falls back to rule-based extraction. Enable it unless you know
+    you want the lean build. The published Python wheels always have it on.
+
+    (Embedding itself is served by uni-xervo's own providers, so it does not depend on this
+    feature.)
+
+### Python
+
+Prebuilt wheels ship on PyPI for CPython 3.10+ (abi3). Install **one** of these — they all
+provide the same `uniko` import and cannot coexist:
+
+```sh
+pip install uniko          # CPU (Linux x86_64/aarch64, macOS arm64, Windows x64)
+pip install uniko-cuda     # NVIDIA CUDA, Linux x86_64
+pip install uniko-metal    # Apple Silicon, macOS arm64
+```
+
+The GPU variants are large and may exceed PyPI's per-file limit. If an install fails for that
+reason, use the project's own PEP 503 index, which serves the same artifacts from the GitHub
+Release assets:
+
+```sh
+pip install uniko-cuda --extra-index-url https://rustic-ai.github.io/uniko/packages/
+```
 
 ## Build a Uniko instance
 
@@ -80,12 +131,14 @@ let memory = Uniko::builder()
     or advanced use you can drive `uniko_store::KnowledgeBase` and `uniko_memory::PipelineSystem`
     directly — see [Engine internals](../reference/api.md#engine-internals).
 
-!!! tip "Runs fully offline by default"
-    Out of the box — BGE-small embeddings, the INT8 NLP cascade, the MiniLM reranker, and **no**
-    `llm` feature — uniko runs entirely on CPU with zero external API calls. That makes it a fit
-    for edge agents, air-gapped deployments, and privacy-sensitive workloads with no extra
-    configuration. Summary generation stays extractive and offline unless you opt into the `llm`
-    feature for LLM-rewritten summaries.
+!!! tip "Runs fully offline"
+    With `features = ["onnx"]` — BGE-small embeddings, the INT8 NLP cascade, the MiniLM reranker,
+    and **no** `llm` feature — uniko runs entirely on CPU with zero external API calls. That makes
+    it a fit for edge agents, air-gapped deployments, and privacy-sensitive workloads. Summary
+    generation stays extractive and offline unless you opt into the `llm` feature for
+    LLM-rewritten summaries.
+
+    Without `onnx`, extraction degrades to the rule-based path rather than failing.
 
 That is the whole standard install. The sections below are for when you want to understand the
 crate layering, accelerate on a GPU, or swap models.
@@ -104,7 +157,7 @@ never touch it directly.
 | `uniko-pipes` | 2 | Pipeline infrastructure — the `Step` trait, circuit breaker, retry, DLQ, metrics. |
 | `uniko-extract` | 3 | Content processing — NER, observations, chunking, ingest, embedding. |
 | `uniko-memory` | 4 | Memory management — pipelines, the recall cascade, rules, consolidation. |
-| `uniko-cortex` | 5 | Higher reasoning — procedures, topics, planning. |
+| `uniko-cortex` | 5 | Higher reasoning — procedure promotion (P5) and topic detection (P6). |
 | `uniko-api` | facade | Public facade: builders and re-exports, no logic of its own. |
 
 ```mermaid
@@ -157,6 +210,7 @@ uniko-extract = { path = "../uniko/crates/uniko-extract", features = ["onnx"] }
 |---------|---------|--------|
 | `code-parse` | **on** | Tree-sitter parsers (Python, Rust, JavaScript, TypeScript) for structure-aware code chunking. |
 | `onnx` | off | Pulls in `ort` (ONNX Runtime), `tokenizers`, and `ndarray` for the local ONNX inference path. |
+| `pdf-ocr` | off | Tiered PDF extraction via `uni-xervo-pdf` (rasterizer + OCR wiring), producing `:Page`/`:Block` document structure. Without it the PDF path is pure-Rust and text-only. |
 
 ### `uniko-memory`
 
@@ -164,6 +218,8 @@ uniko-extract = { path = "../uniko/crates/uniko-extract", features = ["onnx"] }
 |---------|---------|--------|
 | `onnx` | off | Forwards to `uniko-extract/onnx`. |
 | `llm` | off | Enables the abstractive (LLM-rewritten) path for session Summary generation. When absent, summary generation stays **deterministic / extractive and fully offline**. |
+| `gpu-cuda`, `gpu-metal` | off | Forward to the matching `uniko-store` feature. |
+| `mistralrs`, `candle` | off | Forward to the matching `uniko-store` feature. |
 
 ### `uniko-store`
 
@@ -171,7 +227,15 @@ uniko-extract = { path = "../uniko/crates/uniko-extract", features = ["onnx"] }
 |---------|---------|--------|
 | `gpu-cuda` | off | Enables NVIDIA CUDA acceleration in uni-db. Requires the CUDA toolkit at build time. |
 | `gpu-metal` | off | Enables Apple Metal / CoreML acceleration in uni-db (macOS only). |
+| `mistralrs` | off | Enables uni-db's mistral.rs provider, for running a local LLM in-process. |
+| `candle` | off | Enables uni-db's candle provider, the other local-LLM backend. |
 | `batch-record` | off | Diagnostic-only: captures bulk-write batches in a process-global buffer so benchmarks can replay them. Never enable in production. |
+
+### `uniko-api`
+
+The facade forwards exactly five features: `onnx`, `gpu-cuda`, `gpu-metal`, `mistralrs`, and
+`candle`. It does **not** forward `llm` or `pdf-ocr` — enable those on `uniko-memory` and
+`uniko-extract` directly if you need them.
 
 !!! warning "GPU features are build-time"
     `gpu-cuda` and `gpu-metal` are passthrough features that flip the corresponding uni-db
@@ -180,7 +244,9 @@ uniko-extract = { path = "../uniko/crates/uniko-extract", features = ["onnx"] }
 
 ## Advanced: models used at runtime
 
-uniko registers three model *aliases* in the uni-xervo catalog when a knowledge base opens. Each
+uniko registers up to five model *aliases* in the uni-xervo catalog when a knowledge base opens —
+two unconditionally (`embed/default`, `nlp/default`), three only when the matching capability is
+configured. Each
 resolves to a model that uni-xervo loads and runs in-process. With the default configuration the
 catalog warms models lazily on first use; `open` eagerly pre-warms them so the first query doesn't
 pay cold-start latency.
@@ -189,7 +255,9 @@ pay cold-start latency.
 |-------|------|---------------|-------|
 | `embed/default` | Embedding | `BAAI/bge-small-en-v1.5` | 384-dim, BERT-based MTEB-strong retriever. Query side uses the prefix `"Represent this sentence for searching relevant passages: "`; documents go in raw. |
 | `nlp/default` | NLP | `dragonscale-ai/kniv-deberta-nlp-base-en-xsmall` | Multi-task cascade loaded from the `onnx/cascade-int8.onnx` (INT8) artifact. xervo owns tokenization and POS / NER / DEP / SRL / CLS decode; uniko adapts the output. |
-| `rerank/default` | Rerank | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder reranker, **enabled by default**. 22M params; re-scores the top RRF candidates during recall. |
+| `rerank/default` | Rerank | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder reranker, **enabled by default**. 22M params; re-scores the top RRF candidates. Registered only when `reranker.enabled` and `style != "colbert"`. |
+| `embed/hybrid` | Hybrid embed | same model as `embed/default` | Registered **only** when `EmbeddingConfig` sets `sparse_dimensions` or `multivector_dimensions` (e.g. the `bge-m3` preset). Backs the learned-sparse and ColBERT channels — see [Hybrid retrieval](../guides/configuration.md#sparse-colbert-hybrid-retrieval). |
+| `ocr/default` | OCR | `monkt/paddleocr-onnx` | Registered **only** when `ocr.enabled` is set. Drives the OCR tier of tiered PDF extraction. |
 
 !!! note "Where these defaults live"
     These values come from `UnikoConfig`'s defaults: `EmbeddingConfig::bge_small_en_v15()`

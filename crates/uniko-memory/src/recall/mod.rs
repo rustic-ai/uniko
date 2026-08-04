@@ -386,9 +386,9 @@ pub struct RecallConfig {
     /// lookup per item — avoid scaling badly when limit is large).
     pub answer_type_top_n: usize,
     /// Variant labels to enable for multi-query reformulation. Empty
-    /// vec means "all default variants" (`keywords`, `original`,
-    /// `declarative`, `type_anchored`). To reproduce legacy
-    /// single-query behaviour, pass `vec!["keywords".into()]`.
+    /// vec (the default) means the **single** `keywords` variant, not all
+    /// of them; opt into multi-query explicitly with
+    /// `vec!["keywords", "original", "declarative", "type_anchored"]`.
     pub query_variants: Vec<String>,
     /// `k` constant for reciprocal rank fusion across variants. Higher
     /// values flatten the weight given to top ranks (k=60 is the
@@ -2030,8 +2030,12 @@ fn normalize_scores_in_place(hits: &mut [RankedHit]) {
 /// Phase C session-boost: walk each Phase 1 Fact to its containing
 /// session chunks and aggregate boost signals per chunk node id.
 ///
-/// Edge walk: `Fact <-[:SUPPORTED_BY]- Observation -[:OBSERVED_IN]->
+/// Edge walk: `Fact -[:SUPPORTED_BY]-> Observation -[:OBSERVED_IN]->
 /// Message -[:IN_SESSION]-> Session -[:HAS_CHUNK]-> Chunk`
+///
+/// The final hop needs the session-level chunks that
+/// [`Session::finalize`](crate::Session::finalize) builds; a session that
+/// was never finalized contributes no boost.
 ///
 /// Returns a map from chunk node id → score delta (`alpha · fact_score`,
 /// summed across all Facts whose evidence touches that session).  Empty

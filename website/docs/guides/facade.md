@@ -66,7 +66,7 @@ let memory = Uniko::builder()
 | `.llm(LlmSpec)` | A generation model — **required for `answer()`**. |
 | `.streaming(bool)` | Enables the fire-and-forget `submit`/`flush` lane. |
 | `.scope_to_agent()` / `.scope(RecallScope)` | Default read visibility. |
-| `.extractor(Arc<dyn ModalityExtractor>)` | A pluggable image/audio/video extractor. |
+| `.extractor(Arc<dyn ModalityExtractor>)` | A pluggable image/audio/video extractor — implement `modality()` and `extract()` on `uniko_extract::ingest::modality::ModalityExtractor` (`Send + Sync + Debug`). Without one, image/audio/video sources return `UnikoError::Unsupported`. |
 | `.raw_config(UnikoConfig)` | Drop in a fully-tuned config (see [Configuration](configuration.md)). |
 
 **`LlmSpec`** picks the generation model: `openai(alias, model, base_url)` (reads `OPENAI_API_KEY`),
@@ -114,6 +114,12 @@ let result = session
 A `Turn` is a builder: `Turn::new(sender, content)` plus `.id(...)` (idempotency), `.at(timestamp)`,
 `.addressed_to(...)`, `.metadata(k, v)`, `.attach(IngestSource)`, `.attachments(iter)`.
 
+!!! note "`sender_role` is a reserved metadata key"
+    `.metadata(...)` is free-form with one exception: `metadata["sender_role"]` is the only way
+    to set the `role` property on the `SENT_BY` edge, which is what makes role-scoped queries
+    ("what did the assistant say?") work. Set it with
+    `.metadata("sender_role", json!("assistant"))`.
+
 !!! tip "Attachments carry provenance"
     A document shared with `.attach(...)` is linked to the exact message and speaker that shared it —
     so later a recalled fact can cite *"per spec.pdf, shared by alice."* See
@@ -129,7 +135,10 @@ session.ingest(IngestSource::bytes(pdf).with_mime(Mime::parse("application/pdf")
 ```
 
 `IngestSource::{text, bytes, path}` builds the blob; `.with_mime(...)`, `.with_id(...)`,
-`.with_path(...)` override routing. `.with_mime(...)` takes a `Mime` (re-exported from
+`.with_path(...)` override routing. `IngestSource.metadata` is a public map with one reserved
+key of its own: `metadata["content_type"]` overrides the content type recorded on the
+resulting `:Artifact` (useful when, say, fetched bytes should be recorded as the source URL's
+type rather than the sniffed one). `.with_mime(...)` takes a `Mime` (re-exported from
 `uniko_memory`); build one with `Mime::parse("application/pdf")?` or `"application/pdf".parse()?`. The
 returned `IngestOutcome` tells you what it became (`Artifact` / `Pdf`) and carries the `artifact_id`
 for later retrieval. An unsupported modality surfaces as a `UnikoError::Unsupported` error, not an
@@ -145,6 +154,50 @@ session.submit(Turn::new("alice", "...")).await?;       // fire-and-forget
 session.submit_source(IngestSource::text("notes")).await?;
 session.flush().await?;                                  // barrier: drain the pipeline
 ```
+
+### End of conversation — `finalize`
+
+Whichever write lane you used, call `finalize()` when a conversation wraps up:
+
+```rust
+let report = session.finalize().await?;
+```
+
+It chunks the whole transcript and aggregates the session's observations into dense chunks wired
+`ABOUT` the entities and participants involved. Those are the surfaces that session-scoped recall
+and the Phase 1 session boost retrieve — without them a session contributes only its per-turn
+chunks, and the default `phase1_strategy = "boost"` has nothing to score.
+
+It is cheap and idempotent when the session has not grown (nothing is rewritten, nothing is
+re-embedded), so calling it periodically during a long conversation is fine. `summarize()` calls it
+for you on a best-effort basis, and `finalize()` flushes the streaming pipeline first.
+
+`finalize()` also stamps the Session's `ended_at` with its latest message time. Note a
+Session counts as *open* while `ended_at` is null, so finalizing takes it out of the
+inactivity auto-close sweep; finalizing again after more turns re-stamps it.
+
+To backfill a knowledge base ingested before this existed:
+
+```rust
+for sid in agent.unfinalized_session_ids().await? {
+    agent.finalize_session(&sid).await?;
+}
+```
+
+### Compile knowledge — `consolidate`
+
+`observe` extracts Entities and Observations. Turning those into `Fact`s — voting on the
+canonical claim, stamping bitemporal validity, retiring contradicted beliefs — is
+consolidation:
+
+```rust
+let stats = agent.consolidate().await?;
+println!("{} observations -> {} facts", stats.observations_processed, stats.facts_created);
+```
+
+It runs on the calling task and needs no streaming pipeline. An instance built with
+`.streaming(true)` also consolidates on its own, on a 20-observation threshold or a 15-minute
+timer, and runs the cortex sweep (procedure promotion, topic detection) afterwards.
 
 ---
 
@@ -366,6 +419,8 @@ async fn main() -> anyhow::Result<()> {
 | Build | `Uniko::open` / `builder().build()` | `Uniko` |
 | Identity | `memory.agent(id)` / `agent.session(id)` | `Agent` / `Session` |
 | Write | `session.observe(Turn)` / `session.ingest(IngestSource)` | `ObserveResult` / `IngestOutcome` |
+| Finalize | `session.finalize()` / `agent.finalize_session(id)` | `FinalizeReport` |
+| Compile | `agent.consolidate()` | `CycleStats` |
 | Read | `agent.recall` / `answer` / `query` (+ `_in`) | `ContextBundle` / `Answer` / `Vec<Record>` |
 | Retrieve | `agent.data().message` / `artifact` / `artifact_bytes` | `Option<…View>` / `Option<Vec<u8>>` |
 | Plan | `agent.goals()` (create / transition / read) | `GoalView` / `TaskView` / `GoalContext` |

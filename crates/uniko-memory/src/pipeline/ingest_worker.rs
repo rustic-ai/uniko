@@ -12,7 +12,9 @@ use uniko_pipes::dead_letter::DeadLetterQueue;
 use uniko_pipes::health::HealthTracker;
 use uniko_pipes::metrics;
 use uniko_pipes::step::{PipelineContext, Step};
-use uniko_pipes::types::{IngestTask, ItemResult, StepErrorPolicy, StepOutcome};
+use uniko_pipes::types::{
+    ConsolidationTask, IngestTask, ItemResult, ObservationsReady, StepErrorPolicy, StepOutcome,
+};
 use uniko_store::KnowledgeBase;
 
 /// Long-running ingest worker receiving tasks via a bounded channel.
@@ -26,6 +28,10 @@ pub(crate) struct IngestWorker {
     dlq: Arc<DeadLetterQueue>,
     health: Arc<Mutex<HealthTracker>>,
     dlq_max_retries: u32,
+    /// Sender for notifying the consolidation worker that a batch of
+    /// Observations landed. Without this the per-agent counter never
+    /// advances and neither the threshold nor the periodic timer fires.
+    consolidation_tx: mpsc::Sender<ConsolidationTask>,
     /// Count of submitted-but-not-yet-finished ingest items.
     ///
     /// Incremented at submit time and decremented when a spawned item
@@ -49,6 +55,7 @@ impl IngestWorker {
         dlq: Arc<DeadLetterQueue>,
         health: Arc<Mutex<HealthTracker>>,
         dlq_max_retries: u32,
+        consolidation_tx: mpsc::Sender<ConsolidationTask>,
         inflight: Arc<AtomicUsize>,
     ) -> Self {
         Self {
@@ -61,6 +68,7 @@ impl IngestWorker {
             dlq,
             health,
             dlq_max_retries,
+            consolidation_tx,
             inflight,
         }
     }
@@ -101,6 +109,7 @@ impl IngestWorker {
         let dlq = self.dlq.clone();
         let health = self.health.clone();
         let dlq_max = self.dlq_max_retries;
+        let consolidation_tx = self.consolidation_tx.clone();
         let inflight = self.inflight.clone();
 
         tokio::spawn(async move {
@@ -149,6 +158,23 @@ impl IngestWorker {
             let result = run_step_chain(&steps, &mut ctx, &dlq, dlq_max).await;
             let elapsed_ms = start.elapsed().as_millis() as f64;
 
+            // Tell the consolidation worker that new Observations landed, so
+            // its per-agent counter advances and the threshold / periodic
+            // timer can fire. Best-effort: a full or closed channel must not
+            // fail an ingest that already committed.
+            if !ctx.extracted_observations.is_empty()
+                && let Some(agent_id) = agent_id_for(&task)
+            {
+                let notice = ConsolidationTask::ObservationsReady(ObservationsReady {
+                    agent_id,
+                    observation_count: ctx.extracted_observations.len() as u32,
+                    source_node_ids: ctx.extracted_observations.clone(),
+                });
+                if let Err(e) = consolidation_tx.try_send(notice) {
+                    tracing::debug!(error = %e, "consolidation notify skipped");
+                }
+            }
+
             // Update health tracker.
             let mut tracker = health.lock().unwrap();
             if result.steps_failed.is_empty() {
@@ -162,6 +188,23 @@ impl IngestWorker {
             metrics::emit_ingest_duration(elapsed_ms);
         });
     }
+}
+
+/// The agent an ingest task should be consolidated under.
+///
+/// Carried as the reserved `agent_id` metadata key, set by
+/// [`Session::submit`](crate::Session::submit). Tasks submitted directly to
+/// [`PipelineSystem`](super::PipelineSystem) without it simply do not notify
+/// the consolidation worker.
+fn agent_id_for(task: &IngestTask) -> Option<String> {
+    let metadata = match task {
+        IngestTask::Message(m) => &m.metadata,
+        _ => return None,
+    };
+    metadata
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// Decrements the in-flight counter when a spawned ingest item finishes.

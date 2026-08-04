@@ -75,16 +75,19 @@ The Python SDK is in active development. Here's the honest state of the world:
     **Shipped:** the full async facade, the synchronous `*_sync` twins (GIL released across Rust
     work), `py.typed` + a complete type stub, and the structured exception hierarchy.
 
-    **Not yet:** prebuilt wheels. You build from source with `maturin` (a C/C++ toolchain and
-    `protoc` are required; ONNX is statically linked). The native module does **not** set
-    `__version__` — the package reports the literal `"0.1.0"`.
+    **Also shipped:** prebuilt wheels on PyPI (CPython 3.10+, abi3) across three distributions,
+    and a public Pydantic overlay at `uniko.models`.
 
-To build and install from the binding crate:
+Install one of the three distributions — they all provide the `uniko` import and cannot coexist:
 
 ```bash
-# from bindings/uniko-py/
-maturin develop
+pip install uniko          # CPU
+pip install uniko-cuda     # NVIDIA CUDA, Linux x86_64
+pip install uniko-metal    # Apple Silicon, macOS arm64
 ```
+
+`uniko.__version__` mirrors the native `_uniko.__version__`, which is single-sourced from the
+crate version (currently `0.2.0`) rather than hardcoded.
 
 A handful of design-doc surfaces did not ship in this alpha — notably a `UnikoConfig` object
 (`config()` returns a plain `dict`), Python-authored extractors, and visibility scoping on

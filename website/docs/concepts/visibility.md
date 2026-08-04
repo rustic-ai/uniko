@@ -3,8 +3,15 @@
 Memory you cannot scope is memory you cannot share. A single `KnowledgeBase` often holds claims
 belonging to many participants — some public, some private to one person, some scoped to a team or
 organization. uniko attaches a **visibility scope** to the memory types that carry sensitive
-claims and filters every recall against the identity of whoever is asking, so nothing leaves a
+claims, and can filter every recall against the identity of whoever is asking so nothing leaves a
 query that the caller is not entitled to see.
+
+!!! warning "Filtering is opt-in and fails open"
+    The default read scope is `RecallScope::Unrestricted`, which applies **no** visibility
+    filtering — recall returns everything it finds. Enforcement happens only when a viewer
+    identity is bound (`RecallScope::AsAgent`, or `ViewerScope::As(..)` on `RecallConfig`).
+    If you rely on visibility as an access-control boundary, you must set it explicitly;
+    treat the default as "single-tenant, trusted caller".
 
 ## Why visibility matters
 

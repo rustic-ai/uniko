@@ -117,9 +117,11 @@ impl IntentProfile {
 ///
 /// Runs the NLP cascade once on the question, then derives 1–4 query
 /// variants whose embeddings are computed concurrently via `join_all`.
-/// `enabled_variants` filters which variants get built — pass an empty
-/// slice to build the full default set
-/// (`keywords`, `original`, `declarative`, `type_anchored`).
+/// `enabled_variants` filters which variants get built. An empty slice is
+/// the legacy single-variant default and builds only `keywords` — see the
+/// rationale on the `want` closure below. Pass all four labels
+/// (`keywords`, `original`, `declarative`, `type_anchored`) to opt into
+/// full multi-query reformulation.
 ///
 /// # Errors
 ///
