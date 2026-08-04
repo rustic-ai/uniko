@@ -76,8 +76,8 @@ uniko-store = "*"    # graph storage / search over uni-db
 uniko-extract = "*"  # NER / observations / chunking / atomic ingest
 ```
 
-The `uni-db` 2.2.1 dependency is pulled in transitively from crates.io — there is nothing
-external to install or run.
+The `uni-db` dependency (`^3` — the latest 3.x) is pulled in transitively from
+crates.io — there is nothing external to install or run.
 
 ## Quick start
 

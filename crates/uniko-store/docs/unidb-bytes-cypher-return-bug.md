@@ -2,9 +2,11 @@
 
 **Component:** uni-db (`uni-store` arrow conversion + `uni-common` cypher value codec)
 **Severity:** High — silent data corruption / data loss for any binary property read through Cypher.
-**Status:** Verified with a standalone repro against the uni-db public API.
-**Repro test:** `crates/uniko-store/tests/unidb_bytes_return_repro.rs` (`#[ignore]`d; run with
-`cargo nextest run -p uniko-store --test unidb_bytes_return_repro --run-ignored all`).
+**Status:** **FIXED upstream** (verified 2026-08-02 on uni-db 3.0.1 and 3.2.0, so the fix
+landed in 3.0.0 or earlier). Originally verified with a standalone repro against the uni-db
+public API; the document is kept for the root-cause analysis.
+**Repro test:** `crates/uniko-store/tests/unidb_bytes_return_repro.rs` — no longer `#[ignore]`d;
+it now runs on every `cargo nextest run` as a regression guard.
 
 ## Summary
 

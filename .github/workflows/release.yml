@@ -75,10 +75,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install protobuf-compiler
+      - name: Install protobuf-compiler and mold
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          # `cargo publish --dry-run` runs a real verification build, and
+          # `.cargo/config.toml` forces `-fuse-ld=mold` on Linux — so mold must
+          # be present here even though this job ships no artifact.
+          sudo apt-get install -y protobuf-compiler mold
 
       - name: Dry-run publish the leaf crate
         # Only the leaf (no internal deps) can be FULLY dry-run published — it
@@ -88,8 +91,9 @@ jobs:
       - name: Package remaining crates (advisory manifest check)
         # ADVISORY — never fails the release. Downstream crates cannot be packaged
         # before their siblings exist on crates.io at the CURRENT version: e.g.
-        # `cargo package -p uniko-pipes` resolves `uniko-store = "^0.1.1"` against
-        # the index and errors until uniko-store 0.1.1 is published. (`--no-verify`
+        # `cargo package -p uniko-pipes` resolves `uniko-store = "^<version>"`
+        # against the index and errors until that exact uniko-store version is
+        # published. (Written version-agnostically on purpose. `--no-verify`
         # skips the compile, not the dependency resolution.) Full chain
         # verification happens during the real, ordered publish below, where each
         # crate is on the index before the next packages.
@@ -110,17 +114,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64, manylinux: manylinux_2_28 }
+          # `codegen_units` feeds CARGO_PROFILE_DIST_CODEGEN_UNITS, which lets a
+          # memory-constrained runner relax the `dist` profile's cgu=1 without
+          # forking the profile (see the `[profile.dist]` comment in the root
+          # Cargo.toml). Always set explicitly — an empty value would be handed
+          # to cargo as an unparseable config override. The 16 GB GitHub-hosted
+          # Linux/Windows runners take cgu=1; so does macOS, but only on the
+          # 14 GB larger runner selected below — not the free 7 GB one.
+          - { os: ubuntu-latest, target: x86_64, manylinux: manylinux_2_28, codegen_units: "1" }
           # aarch64 builds on a NATIVE ARM runner, not an x86_64 cross-build:
           # `ort` (ONNX Runtime) only links from pyke's prebuilt binaries, which
           # are fetched per host arch. A native runner pulls the aarch64 ORT
           # bundle inside the ARM manylinux container — no QEMU, no cross-link.
-          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: manylinux_2_28 }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: manylinux_2_28, codegen_units: "1" }
           # macOS is aarch64-only: ort rc.12 ships no x86_64-apple-darwin binary,
           # and our onnx feature is always-on, so an Intel-macOS wheel cannot
           # link. Intel Macs are EOL — drop x86_64 rather than build ORT from src.
-          - { os: macos-14, target: aarch64 }
-          - { os: windows-latest, target: x64 }
+          #
+          # `macos-15-xlarge` (5-core M2 / 14 GB arm64, billed per-minute even on
+          # public repos) rather than the free 3-core/7 GB standard runner: cgu=1
+          # thin LTO peaks around 11-12 GiB of rustc RSS on a cdylib this size,
+          # which 7 GB cannot hold. 14 GB is adequate but NOT roomy — uni-db
+          # OOM-killed this same runner class at 15.8 GiB when they tried fat LTO,
+          # and 14 GB is the ceiling for Apple Silicon (the 30 GB `-large` runners
+          # are Intel, which we cannot use: no x86_64-apple-darwin ort binary).
+          # If this job dies with exit 137 / "runner received a shutdown signal",
+          # raise codegen_units here (4, then 16) before investigating anything
+          # else. NOT `macos-14-xlarge`: macOS 14 runners are removed 2026-11-02.
+          - { os: macos-15-xlarge, target: aarch64, codegen_units: "1" }
+          - { os: windows-latest, target: x64, codegen_units: "1" }
     steps:
       - uses: actions/checkout@v6
 
@@ -144,16 +166,39 @@ jobs:
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
+        # `--profile dist` (thin LTO, cgu=1) instead of `--release`: see the
+        # `[profile.dist]` comment in the root Cargo.toml.
+        #
+        # maturin-action does NOT reliably forward step-level `env:` into the
+        # manylinux container, so anything the Linux legs depend on is ALSO
+        # exported in `before-script-linux` below. These entries are what the
+        # host-built macOS/Windows legs actually consume.
+        env:
+          CARGO_PROFILE_DIST_CODEGEN_UNITS: ${{ matrix.codegen_units }}
+          # Neutralize `.cargo/config.toml`'s `-fuse-ld=mold`: mold is not in the
+          # manylinux images, and an env RUSTFLAGS *replaces* the config file's
+          # rustflags rather than merging with them. No-op on macOS/Windows,
+          # where the linux-only config section never applies.
+          RUSTFLAGS: ""
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release --strip --out dist -m bindings/uniko-py/Cargo.toml
+          args: --profile dist --strip --out dist -m bindings/uniko-py/Cargo.toml
           sccache: "true"
           # Runs inside the manylinux container before the build. Each Linux
           # target now builds on a native runner (x86_64 and ubuntu-24.04-arm),
           # so protoc must match the container arch — select it from `uname -m`.
           before-script-linux: |
             set -eux
+            # Authoritative copies of the step-level env (see the note above):
+            # this runs in the same container shell as the cargo build, whereas
+            # step-level `env:` may not survive the hop into the container.
+            # Empty RUSTFLAGS drops the repo's mold linker flag, which the
+            # manylinux image cannot satisfy.
+            export RUSTFLAGS=""
+            # Static literal from this workflow's own matrix (not event input),
+            # kept interpolated so the matrix stays the single source of truth.
+            export CARGO_PROFILE_DIST_CODEGEN_UNITS="${{ matrix.codegen_units }}"
             PB_VERSION=29.3
             case "$(uname -m)" in
               x86_64)  PB_ARCH=x86_64 ;;
@@ -210,8 +255,11 @@ jobs:
   # auditwheel is skipped, then a manual `auditwheel repair` excludes the host
   # CUDA/cuDNN libs so they resolve at runtime instead of bloating the wheel.
   # NOTE: unrehearsed for uniko — validate via workflow_dispatch on a -rc tag;
-  # the candle+mistralrs CUDA compile is long (tens of minutes). The wheel likely
-  # exceeds PyPI's 100 MB/file limit — the github-release job is the fallback;
+  # the candle+mistralrs CUDA compile is long (tens of minutes). Measured
+  # 2026-08-03 on a dev host at CUDA_COMPUTE_CAP=80: 98.6 MiB *before* the
+  # repair below, which then bundles OpenSSL 3 and friends — so the published
+  # wheel is larger and PyPI's 100 MB/file limit is very likely exceeded;
+  # the github-release job is the fallback;
   # a PyPI project size increase for `uniko-cuda` may be needed (see RELEASING.md).
   build-cuda-linux:
     name: Wheel uniko-cuda (linux/x86_64, CUDA)
@@ -246,7 +294,16 @@ jobs:
         with:
           target: x86_64
           manylinux: "2_34"
-          args: --release --strip --auditwheel skip --out dist-raw -m bindings/uniko-cuda/Cargo.toml
+          # `--profile dist` (thin LTO + cgu=1) matters most here: this is the
+          # largest variant and is expected to brush PyPI's 100 MB/file limit,
+          # so a ~third off the cdylib may be the difference between publishing
+          # to PyPI and falling back to the GitHub release assets. cgu=1 comes
+          # from the profile itself — no env needed, which is just as well since
+          # maturin-action drops step-level `env:` on the way into the container.
+          # If this job is OOM-killed on the 16 GB runner, relax it by exporting
+          # CARGO_PROFILE_DIST_CODEGEN_UNITS=4 inside `before-script-linux`
+          # (alongside RUSTFLAGS), not here.
+          args: --profile dist --strip --auditwheel skip --out dist-raw -m bindings/uniko-cuda/Cargo.toml
           sccache: "true"
           before-script-linux: |
             set -eux
@@ -266,6 +323,10 @@ jobs:
             export CUDA_ROOT="/usr/local/cuda-13.0"
             export CUDA_PATH="/usr/local/cuda-13.0"
             export CUDA_COMPUTE_CAP="80"
+            # This RUSTFLAGS *replaces* `.cargo/config.toml`'s rustflags (env
+            # overrides config, it does not merge), which is also what keeps the
+            # repo's `-fuse-ld=mold` out of this container — mold is not in the
+            # manylinux image. Do not "restore" the mold flag here.
             export RUSTFLAGS="-Clink-arg=-static-libstdc++ -Clink-arg=-static-libgcc"
             nvcc --version
             # ── OpenSSL 3 staging: auditwheel repair runs on the HOST runner, so
@@ -313,11 +374,17 @@ jobs:
   # enables `provider-onnx`); CoreML is statically linked in pyke's macOS ORT
   # bundle, so no sidecar/auditwheel dance. The `mistralrs`+`candle` features
   # additionally compile candle's Metal kernels for local LLM inference — the
-  # macos-14 runner's Xcode/Metal SDK supplies that toolchain, so no extra
+  # macOS runner's Xcode/Metal SDK supplies that toolchain, so no extra
   # install is needed. macOS arm64 only (no x86_64-apple-darwin ORT prebuilt).
   build-metal:
     name: Wheel uniko-metal (macos/aarch64, Metal)
-    runs-on: macos-14
+    # `macos-15-xlarge` (5-core M2 / 14 GB, billed per-minute), not the free 7 GB
+    # standard runner: this is the heaviest variant (onnx + candle + mistralrs)
+    # and `--profile dist` links it as a single codegen unit. See the
+    # codegen_units note in the build-wheels matrix for the OOM symptom and the
+    # escape hatch. NOT `macos-14-xlarge` — macOS 14 runners are removed
+    # 2026-11-02 (brownouts from October), which would fail the release job.
+    runs-on: macos-15-xlarge
     needs: guard
     steps:
       - uses: actions/checkout@v6
@@ -334,9 +401,15 @@ jobs:
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
+        env:
+          # Explicit rather than inherited from the profile, so that relaxing it
+          # after an OOM is a one-token edit in the job that failed. No container
+          # here, so step-level env does reach cargo. Raise to 4, then 16, if the
+          # 14 GB runner is OOM-killed during the LTO link.
+          CARGO_PROFILE_DIST_CODEGEN_UNITS: "1"
         with:
           target: aarch64-apple-darwin
-          args: --release --strip --out dist -m bindings/uniko-metal/Cargo.toml
+          args: --profile dist --strip --out dist -m bindings/uniko-metal/Cargo.toml
           sccache: "true"
 
       - uses: actions/upload-artifact@v4
@@ -363,10 +436,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install protobuf-compiler
+      - name: Install protobuf-compiler and mold
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          # Each `cargo publish` runs a verification build, and
+          # `.cargo/config.toml` forces `-fuse-ld=mold` on Linux.
+          sudo apt-get install -y protobuf-compiler mold
 
       - name: Authenticate to crates.io (Trusted Publishing)
         id: auth
@@ -421,45 +496,93 @@ jobs:
             sleep 30
           done
 
-  # ── GATED + FLAGGED: publish wheels + sdist to PyPI (OIDC) ─────────────────
-  # Disabled until PyPI grants the per-project file-size-limit increases (all
-  # wheels exceed the 100 MB default; see RELEASING.md). Gated on the repository
-  # variable `PYPI_PUBLISH_ENABLED` — set it to `true` under Settings → Secrets
-  # and variables → Actions → Variables once the increases are approved. While
-  # disabled, wheels still BUILD and validate, and the `github-release` job below
-  # attaches them to the GitHub Release as the interim distribution channel.
-  # (A job-level `if:` can't read workflow `env:`, so this must be a `vars.*`.)
-  publish-pypi:
-    name: Publish to PyPI
+  # ── GATED: publish to PyPI (OIDC) — one job per PyPI project ──────────────
+  # `uniko`, `uniko-cuda` and `uniko-metal` are three separate PyPI projects
+  # with separate file-size limits, so they get three separate jobs. A single
+  # twine invocation over a merged `dist/` is all-or-nothing: one rejection
+  # would abort the upload and take the other two down with it.
+  #
+  # Splitting at the JOB level rather than scripting tolerance inside one job
+  # buys three things: failures are isolated by construction instead of by
+  # `continue-on-error`; a rejected variant shows up as a red job rather than a
+  # warning buried in a green one; and every project keeps `pypa/gh-action-pypi
+  # -publish`, so all three ship PEP 740 attestations. No classification logic
+  # is needed — the operator reads PyPI's actual error in the failed job.
+  #
+  # All three run AFTER crates.io: no point shipping wheels for a version whose
+  # crates failed to publish. Each needs `environment: release`, because the
+  # Trusted Publisher registrations name that environment and the OIDC claim
+  # must match — approval is per deployment.
+  publish-pypi-uniko:
+    name: PyPI — uniko (base + sdist)
     runs-on: ubuntu-latest
-    needs: [guard, build-wheels, build-sdist, build-cuda-linux, build-metal]
-    if: vars.PYPI_PUBLISH_ENABLED == 'true'
+    needs: [publish-crates, build-wheels, build-sdist]
     environment: release # manual-approval gate
     permissions:
       id-token: write # OIDC token exchange with PyPI
     steps:
-      - name: Download all distributions
+      - name: Download base wheels + sdist
         uses: actions/download-artifact@v4
         with:
-          pattern: "{wheels-*,sdist}"
+          # `wheels-uniko-cuda-*` / `wheels-uniko-metal-*` are excluded by name:
+          # the base matrix uploads `wheels-<os>-<target>`.
+          pattern: "{wheels-ubuntu*,wheels-macos*,wheels-windows*,sdist}"
           path: dist
           merge-multiple: true
 
-      - name: Publish to PyPI (Trusted Publishing)
+      - name: Publish uniko
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-pypi-cuda:
+    name: PyPI — uniko-cuda
+    runs-on: ubuntu-latest
+    needs: [publish-crates, build-cuda-linux]
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-uniko-cuda-linux-x86_64
+          path: dist
+
+      - name: Publish uniko-cuda
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-pypi-metal:
+    name: PyPI — uniko-metal
+    runs-on: ubuntu-latest
+    needs: [publish-crates, build-metal]
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-uniko-metal-macos-aarch64
+          path: dist
+
+      - name: Publish uniko-metal
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
 
   # ── GATED: attach artifacts to the GitHub Release ─────────────────────────
-  # Runs whenever crates.io publishing succeeded, EVEN IF publish-pypi was
-  # skipped (PyPI disabled via the flag) — while PyPI is off this is the primary
-  # channel for the wheels. `always()` is required so a skipped publish-pypi
-  # doesn't cascade-skip this job.
   github-release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [publish-crates, publish-pypi]
-    if: ${{ always() && needs.publish-crates.result == 'success' && needs.publish-pypi.result != 'failure' }}
+    needs:
+      [publish-crates, publish-pypi-uniko, publish-pypi-cuda, publish-pypi-metal]
+    # Runs on a successful crates.io publish regardless of how the PyPI jobs
+    # went. This is the fallback channel: a wheel PyPI rejects (size limit, or
+    # an exception that has not taken effect) still reaches users here, at
+    # 2 GB/asset. `always()` is required so a failed or skipped PyPI job does
+    # not cascade-skip this one.
+    if: ${{ always() && needs.publish-crates.result == 'success' }}
     permissions:
       contents: write # create the release + upload assets
     steps:

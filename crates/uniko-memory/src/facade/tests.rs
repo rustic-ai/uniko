@@ -422,19 +422,14 @@ async fn define_rule_registers() {
     };
     let agent = memory.agent("assistant");
 
-    match agent
+    let nid = agent
         .define_rule(
             "facade_rule",
             "CREATE RULE facade_rule AS MATCH (n:Episode) YIELD KEY n",
         )
         .await
-    {
-        Ok(nid) => assert!(nid > 0, "rule should get a node id"),
-        Err(UnikoError::Locy(_)) => {
-            eprintln!("skipping: Locy runtime rejected the test rule (allowed by spec)");
-        }
-        Err(e) => panic!("define_rule failed: {e}"),
-    }
+        .expect("define_rule");
+    assert!(nid > 0, "rule should get a node id");
 }
 
 /// `Agent::assume` is hypothetical: a mutation inside it is rolled back.
@@ -446,23 +441,29 @@ async fn assume_does_not_mutate_the_graph() {
     };
     let agent = memory.agent("assistant");
 
-    let assumed = agent
-        .assume("ASSUME { CREATE (:Fact {subject: 'srv', predicate: 'port', object: '9090'}) }")
+    // `fact_id` is NOT NULL in the schema, so the hypothetical CREATE must
+    // supply it — omitting it fails inside the ASSUME with a constraint
+    // violation rather than exercising the rollback this test is about.
+    let hypothetical = agent
+        .assume(
+            "ASSUME { CREATE (:Fact {fact_id: 'assume_probe', subject: 'srv', \
+             predicate: 'port', object: '9090'}) }",
+        )
         .then_query("MATCH (f:Fact {subject: 'srv'}) RETURN f")
         .run()
-        .await;
-    if let Err(UnikoError::Locy(_)) = assumed {
-        eprintln!("skipping: Locy runtime unavailable for ASSUME");
-        return;
-    }
-    assumed.expect("assume should run");
+        .await
+        .expect("assume should run");
+    assert_eq!(
+        hypothetical.len(),
+        1,
+        "the assumed Fact must be visible inside the ASSUME"
+    );
 
-    if let Ok(rows) = agent
+    let rows = agent
         .query("MATCH (f:Fact {subject: 'srv'}) RETURN f")
         .await
-    {
-        assert!(rows.is_empty(), "ASSUME mutation must be rolled back");
-    }
+        .expect("post-assume query");
+    assert!(rows.is_empty(), "ASSUME mutation must be rolled back");
 }
 
 /// `Session::summarize` on a session with no content returns `None`.
@@ -492,7 +493,7 @@ async fn message_count(kb: &KnowledgeBase) -> usize {
 
 /// Single-row read returning one i64 column named `c`, or 0.
 async fn count_query(kb: &KnowledgeBase, cypher: &str) -> i64 {
-    kb.db()
+    kb.db() // ALLOW: test-only assertion helper; the seal governs product code.
         .session()
         .query(cypher)
         .await

@@ -1,6 +1,8 @@
 //! Consolidation reads: pull unprocessed Observations carrying a
 //! structured triple. Backs `uniko_memory::consolidation`.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 
 use crate::error::Result;
@@ -66,6 +68,47 @@ impl KnowledgeBase {
             .iter()
             .filter_map(decode_unprocessed_obs)
             .collect())
+    }
+
+    /// Batched read of `Observation.embedding` for the given node ids.
+    ///
+    /// Observations are auto-embedded on `content` at ingest. An id whose
+    /// `embedding` column is null or does not decode as a float vector is
+    /// omitted from the map rather than reported — callers treat absence as
+    /// "no embedding" and fall back to a default weight. Read-only: runs on
+    /// a plain session, no transaction needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) when the
+    /// query itself fails.
+    pub async fn fetch_observation_embeddings(
+        &self,
+        ids: &[NodeId],
+    ) -> Result<HashMap<NodeId, Vec<f32>>> {
+        let mut out: HashMap<NodeId, Vec<f32>> = HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let id_list = ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        // UNWIND over an inline id-literal list mirrors the proven
+        // `fetch_entities_for_upsert_in_tx` pattern (ids are i64, injection-safe).
+        let cypher = format!(
+            "UNWIND [{id_list}] AS oid \
+             MATCH (o:Observation) WHERE id(o) = oid \
+             RETURN id(o) AS id, o.embedding AS emb"
+        );
+        let result = self.db.session().query_with(&cypher).fetch_all().await?;
+        for row in result.rows() {
+            if let (Ok(id), Ok(emb)) = (row.get::<i64>("id"), row.get::<Vec<f32>>("emb")) {
+                out.insert(id, emb);
+            }
+        }
+        Ok(out)
     }
 }
 

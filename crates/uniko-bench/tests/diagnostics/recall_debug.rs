@@ -5,9 +5,38 @@
 use crate::common::load_kb;
 use uniko_memory::recall::{RecallConfig, recall};
 
-#[tokio::test]
+/// libtest gives each test thread 2 MiB of stack. The recall cascade composes
+/// deeply nested async state machines, and in the *dev* profile — no inlining,
+/// no state-machine layout optimization — a single `recall()` call overflows
+/// that and aborts the whole process with `fatal runtime error: stack
+/// overflow`, which reads as a crash rather than a test failure. The release
+/// build is unaffected (the bench drives the same path over 105 questions), so
+/// this is a debug-build stack cost, not runaway recursion.
+///
+/// Run the body on a thread with an explicit 32 MiB stack — a virtual
+/// reservation, not committed memory. Kept here rather than in
+/// `.config/nextest.toml` so the requirement travels with the test: this
+/// nextest (0.9.124) ignores an `[env]` table, and a `RUST_MIN_STACK` that
+/// only lives in runner config silently stops applying if the test is run any
+/// other way.
+#[test]
 #[ignore]
-async fn debug_chunk_existence() {
+fn debug_chunk_existence() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(debug_chunk_existence_inner());
+        })
+        .expect("spawn big-stack thread")
+        .join()
+        .expect("diagnostic thread panicked");
+}
+
+async fn debug_chunk_existence_inner() {
     let kb = load_kb("data/kb/conv-30").await;
     let session = kb.db().session();
 

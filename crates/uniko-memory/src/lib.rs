@@ -94,6 +94,12 @@ pub use uniko_store::Value;
 pub use uniko_store::locy::{
     AbducedModification, AbductionResult, AssumeBuilder, DerivationNode, DerivationTree, Record,
 };
+// Decoding companion for the `Value::Temporal` arm: uni-db 3.2.0 dropped the
+// `TemporalValue::epoch_millis` accessor, so the conversion now lives in
+// `uniko_store` and is surfaced here for the bindings, which render temporal
+// rows as Python datetimes and must not re-derive it.
+#[doc(no_inline)]
+pub use uniko_store::temporal_epoch_millis;
 // Config presets surfaced so end users touch only the facade crate.
 #[doc(inline)]
 pub use observation::{AddObservationParams, add_observation};

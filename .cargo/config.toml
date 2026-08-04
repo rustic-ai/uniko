@@ -1,15 +1,31 @@
 # Cargo configuration.
 #
-# No build settings are forced here so that a fresh `git clone` builds with
-# the standard system linker on every platform (CI and external contributors
-# included).
+# ── Linux link backend: mold ──
+# Linking `_uniko.so` is the slowest single step of a build: ~500 statically
+# linked dependency crates (uni-db + Lance/Arrow/DataFusion + ONNX Runtime +
+# tokenizers) go through the linker on every incremental rebuild. mold cuts a
+# cold link of the workspace by ~20-60s over GNU ld.
 #
-# Optional local speed-up: install `mold` and uncomment the block below to
-# use it as the link backend (saves ~20-60s on a cold link of the workspace):
+# REQUIREMENT: this makes `mold` a build dependency on Linux. Install it before
+# your first build:
 #
-# [target.'cfg(target_os = "linux")']
-# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+#     sudo dnf install mold        # Fedora / RHEL
+#     sudo apt-get install mold    # Debian / Ubuntu
 #
+# Without it, every Linux build fails at the link step with
+# `error: linker 'cc' failed ... cannot find -fuse-ld=mold`.
+#
+# CI NOTE: the manylinux containers used by the wheel jobs do NOT ship mold, and
+# this file is inside the bind-mounted workspace, so cargo reads it in there too.
+# Those jobs must neutralize this by setting `RUSTFLAGS` (an env `RUSTFLAGS`
+# overrides all `rustflags` keys from config files, it does not merge with them).
+# See `.github/workflows/release.yml` — every containerized job either exports
+# `RUSTFLAGS=""` or sets its own value. Host-runner Linux jobs install mold
+# instead. If you add a new Linux job that compiles Rust, it must do one or the
+# other.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
 # Building the `gpu-cuda` feature on a machine with i386 multilib may pick up a
 # 32-bit `libcuda.so` under /usr/lib and fail with "incompatible with
 # elf64-x86-64". If you hit that, point `linker` at a small `cc` wrapper that

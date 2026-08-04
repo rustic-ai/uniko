@@ -48,8 +48,9 @@ mod onnx_dump {
         };
         config.nlp_srl_enabled = srl_enabled;
         let tmp = std::env::temp_dir().join(format!(
-            "uniko-srl-dump-{}",
-            if srl_enabled { "on" } else { "off" }
+            "uniko-srl-dump-{}-{}",
+            if srl_enabled { "on" } else { "off" },
+            std::process::id()
         ));
         std::fs::create_dir_all(&tmp).ok();
         let kb = KnowledgeBase::open_with_xervo(&tmp, config, Vec::<ModelAliasSpec>::new())

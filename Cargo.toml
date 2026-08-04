@@ -31,7 +31,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
@@ -44,19 +44,19 @@ categories = ["database", "text-processing"]
 
 [workspace.dependencies]
 # Internal crates (version required so `cargo publish` accepts the path deps)
-uniko-store = { path = "crates/uniko-store", version = "0.1.1" }
-uniko-pipes = { path = "crates/uniko-pipes", version = "0.1.1" }
-uniko-extract = { path = "crates/uniko-extract", version = "0.1.1" }
-uniko-memory = { path = "crates/uniko-memory", version = "0.1.1" }
-uniko-cortex = { path = "crates/uniko-cortex", version = "0.1.1" }
-uniko-api = { path = "crates/uniko-api", version = "0.1.1" }
-uniko-bench = { path = "crates/uniko-bench", version = "0.1.1" }
+uniko-store = { path = "crates/uniko-store", version = "0.2.0" }
+uniko-pipes = { path = "crates/uniko-pipes", version = "0.2.0" }
+uniko-extract = { path = "crates/uniko-extract", version = "0.2.0" }
+uniko-memory = { path = "crates/uniko-memory", version = "0.2.0" }
+uniko-cortex = { path = "crates/uniko-cortex", version = "0.2.0" }
+uniko-api = { path = "crates/uniko-api", version = "0.2.0" }
+uniko-bench = { path = "crates/uniko-bench", version = "0.2.0" }
 
 # Database — uni-db default features already include lance-backend,
 # provider-onnx (embeddings + NLP + reranker), and every remote provider.
 # GPU accelerators (gpu-cuda / gpu-metal) are opt-in via uniko-store /
 # uniko-bench passthrough features.
-# Tracks the latest 2.x release (^2 = >=2.0.0, <3.0.0); `cargo update -p uni-db`
+# Tracks the latest 3.x release (^3 = >=3.0.0, <4.0.0); `cargo update -p uni-db`
 # refreshes the lockfile to the newest compatible version.
 #
 # NOTE (2026-06-28): default-features disabled to drop `provider-candle` /
@@ -68,7 +68,7 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.1.1" }
 # bge-m3 GPU campaign is unaffected. To restore local LLMs, re-add
 # "provider-candle"/"provider-mistralrs" (needs a CUDA-compatible gcc<=15 +
 # matching glibc for a GPU build).
-uni-db = { version = "2", default-features = false, features = [
+uni-db = { version = "3", default-features = false, features = [
     "mimalloc",
     "lance-backend",
     "apoc-core",
@@ -87,7 +87,8 @@ uni-db = { version = "2", default-features = false, features = [
 # `KnowledgeBase::build_shared_runtime` / `open_with_runtime`. uni-db
 # uses uni-xervo internally but does not re-export the type. Version
 # pinned to whatever uni-db currently depends on (see
-# `../uni/Cargo.toml`). uni-db 2.5.0 depends on uni-xervo 0.17.0.
+# `../uni/Cargo.toml`). uni-db 3.2.0 depends on uni-xervo >=0.17.0, <1.0.0,
+# which still resolves to 0.17.0 (the newest published 0.x).
 uni-xervo = { version = "0.17.0", default-features = false }
 # Tiered PDF extraction (native text -> OCR -> doc-VLM). Pulls only traits +
 # the pure-Rust native (lopdf) + rasterizer (hayro) tiers; the inference
@@ -187,7 +188,44 @@ opt-level = 3
 # cdylib; stripping trims ~18 MiB off the compressed wheel. `symbols` drops
 # both the symbol table and debuginfo while preserving the dynamic symbols
 # (PyInit / abi3 exports) the extension module needs to load. Applies to
-# `cargo build --release`, maturin release wheels, and the uniko-cuda /
-# uniko-metal variant crates that reuse this workspace.
+# `cargo build --release`, to the `dist` profile below (which inherits it), and
+# to the uniko-cuda / uniko-metal variant crates that reuse this workspace.
+#
+# `panic` is deliberately left at the default (`unwind`): PyO3 catches Rust
+# panics at the FFI boundary and re-raises them as Python exceptions, so
+# `panic = "abort"` would take the whole interpreter down with the extension
+# module. Do not "optimize" it to abort.
 [profile.release]
 strip = "symbols"
+
+# ── Dist profile: what the published wheels are built with ──
+#
+# `--release` alone leaves `lto = false` — thin-local LTO *within* each codegen
+# unit only — at `codegen-units = 16`, so cross-crate inlining and dead-code
+# elimination never run across the ~500 dependency crates statically linked into
+# `_uniko.so` (uni-db + Lance/Arrow/DataFusion + ONNX Runtime + tokenizers).
+# Whole-graph thin LTO at a single codegen unit lets the linker drop the
+# unreachable monomorphizations that dominate that blob.
+#
+# rustic-ai/uni-db measured the knobs on `uni-python`, the closest comparable
+# cdylib (uniko statically contains all of uni-db, so ours is a superset).
+# Their baseline row is thin/cgu=16, i.e. already better than a bare
+# `--release`; the delta below is therefore a floor, not a ceiling:
+#
+#   thin, cgu=16   ~368 MiB   -            15m40s
+#   thin, cgu=4     289 MiB   11.0 GiB     12m37s
+#   thin, cgu=1     238 MiB   11.7 GiB     19m26s   <- this profile
+#   fat,  cgu=1     220 MiB   15.8+ GiB    36m48s   <- rejected: OOMs a 14 GB runner
+#
+# So `codegen-units` is the memory-hungry knob, and peak rustc RSS — not wall
+# time — is what actually constrains the choice. Runners too small to hold the
+# cgu=1 working set relax it per-job with `CARGO_PROFILE_DIST_CODEGEN_UNITS`
+# instead of forking the profile; see `.github/workflows/release.yml`. Note that
+# an EMPTY value for that variable is a hard cargo error ("cannot parse integer
+# from empty string"), so every job sets a real number.
+#
+# Named `dist`, not `publish` — Cargo reserves the latter as a profile name.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1

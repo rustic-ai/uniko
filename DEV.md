@@ -26,6 +26,13 @@ Install once, for any surface that touches the native stack:
 - **`protobuf-compiler` (`protoc`)** — must be on `PATH`. The stack statically
   links ONNX Runtime; the build shells out to `protoc`.
   - Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`
+- **`mold`** (Linux only) — **required, not optional.** `.cargo/config.toml`
+  forces `-C link-arg=-fuse-ld=mold` for every Linux build; linking the ~500
+  statically linked dependency crates is the slowest step of an incremental
+  rebuild and mold saves ~20-60s on a cold link. Without it the build fails at
+  link time with ``error: linker `cc` failed … cannot find -fuse-ld=mold``.
+  - Debian/Ubuntu: `sudo apt-get install -y mold`
+  - Fedora/RHEL: `sudo dnf install mold`
 - **[`uv`](https://docs.astral.sh/uv/)** — only for the Python bindings and the
   docs site (manages their virtualenvs and tooling).
 
@@ -55,8 +62,11 @@ Cargo workspace members (`Cargo.toml`):
 | `crates/uniko-bench` | Benchmark harness (`publish = false`). |
 | `bindings/uniko-py` | Async-first PyO3 Python SDK (alpha, `publish = false`). |
 
-`uni-db` (2.2.1) and `uni-xervo` (0.15.0) are pulled from crates.io — there is
-nothing external to install or run for them.
+`uni-db` (`^3` — the latest 3.x) and `uni-xervo` (`0.17.0`) are pulled from
+crates.io — there is nothing external to install or run for them. Those are the
+requirements declared in the workspace `Cargo.toml`; `Cargo.lock` pins the exact
+resolved versions. Refresh uni-db within the range with
+`cargo update -p uni-db`.
 
 ---
 
@@ -83,16 +93,20 @@ rg -n -e 'use uni_db' -e '\.db\(\)' \
   | grep -v 'ALLOW:'
 
 # 2. compile
-cargo check --workspace
+#    `uniko-cuda` / `uniko-metal` are workspace members for dependency
+#    inheritance only: `-cuda` downloads the ORT CUDA sidecar and `-metal`
+#    compiles solely on macOS (on Linux it fails in `objc2`). CI excludes
+#    both; so must you. They are covered by the release workflow's GPU jobs.
+cargo check --workspace --exclude uniko-cuda --exclude uniko-metal
 
 # 3. lint (warnings are errors)
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --exclude uniko-cuda --exclude uniko-metal -- -D warnings
 
 # 4. format check (use `cargo fmt --all` to auto-fix)
 cargo fmt --all --check
 
 # 5. tests
-cargo nextest run --workspace
+cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal
 
 # 6. dependency policy
 cargo deny check
@@ -232,8 +246,8 @@ reviewed before merge.
 
 ## 8. CI reference
 
-CI (`.github/workflows/ci.yml`, `ubuntu-latest`) installs `protobuf-compiler`
-and a Rust stable toolchain with `clippy` + `rustfmt`, then runs the uni-db seal,
+CI (`.github/workflows/ci.yml`, `ubuntu-xlarge`) installs `protobuf-compiler`
+and `mold` plus a Rust stable toolchain with `clippy` + `rustfmt`, then runs the uni-db seal,
 `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`,
 `cargo fmt --all --check`, and `cargo nextest run --workspace`. A separate job
 runs `cargo deny check`. Keeping the [§3 check loop](#the-local-check-loop-mirrors-ci-exactly)

@@ -26,6 +26,13 @@ path = "src/longmemeval_main.rs"
 name = "uniko-cypher"
 path = "src/cypher_main.rs"
 
+# Regenerates the tracked `config/schema.json`. A binary rather than a test:
+# its product is a side effect on a tracked file, so no test-selection flag
+# should be able to trigger it.
+[[bin]]
+name = "export-schema"
+path = "src/export_schema_main.rs"
+
 [[bin]]
 name = "nlp-compare"
 path = "src/nlp_compare_main.rs"

@@ -30,7 +30,13 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          # mold: required, not optional — `.cargo/config.toml` forces
+          # `-fuse-ld=mold` for every Linux build, so a runner without it fails
+          # at the link step.
+          # ripgrep: the uni-db seal below greps with `rg`, which the
+          # GitHub-hosted Ubuntu image does NOT ship. Without it the seal
+          # silently passed on every run from 2026-06-14 to 2026-08-02.
+          sudo apt-get install -y protobuf-compiler mold ripgrep
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
@@ -46,8 +52,19 @@ jobs:
           # Product crates (memory/extract/cortex/pipes) must reach the graph
           # only through uniko-store's typed API. Forbid `use uni_db` and the
           # `.db()` escape hatch in their src/. Comments are exempt, as are
-          # intentional uses tagged `// ALLOW:`. Tests and the bench crate are
+          # intentional uses tagged `// ALLOW:` (which must sit on the offending
+          # line — the filter is per-line). Tests and the bench crate are
           # intentionally out of scope.
+          #
+          # Assert the tool exists FIRST. The `|| true` below exists so that
+          # ripgrep's "no matches -> exit 1" is not fatal, but it equally
+          # swallows "rg: command not found" — an absent rg yields an empty
+          # `matches` and reads as a pass. That is exactly how this gate sat
+          # dead for seven weeks; do not remove this check.
+          if ! command -v rg >/dev/null 2>&1; then
+            echo "::error::ripgrep (rg) is missing — the uni-db seal cannot run"
+            exit 1
+          fi
           matches=$(rg -n -e 'use uni_db' -e '\.db\(\)' \
             crates/uniko-memory/src crates/uniko-extract/src \
             crates/uniko-cortex/src crates/uniko-pipes/src \

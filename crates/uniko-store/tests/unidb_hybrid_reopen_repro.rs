@@ -10,8 +10,10 @@
 //! Internal error: Uni-Xervo alias 'embed/hybrid' must be an embed task
 //! ```
 //!
-//! The test asserts the reopen SUCCEEDS, so it fails against uni-db 2.4.1. Run:
-//! `cargo nextest run -p uniko-store --test unidb_hybrid_reopen_repro --run-ignored all`
+//! **FIXED upstream.** The test asserts the reopen SUCCEEDS. It failed against
+//! uni-db 2.4.1 and ran as an `#[ignore]`d expected-failure; on 2026-08-02 it was
+//! found green on both 3.0.1 and 3.2.0, so the fix landed in 3.0.0 or earlier.
+//! The attribute is removed so it now guards against regression on every run.
 
 use uni_db::{
     DataType, EmbeddingCfg, IndexType, ModelAliasSpec, ModelTask, Uni, VectorAlgo, VectorIndexCfg,
@@ -50,7 +52,6 @@ fn hybrid_vector_index() -> VectorIndexCfg {
     }
 }
 
-#[ignore = "reproduces uni-db reopen validation rejecting a Vector index whose alias is a non-Embed task"]
 #[tokio::test]
 async fn vector_index_on_embedhybrid_alias_can_be_reopened() {
     let dir = tempfile::tempdir().unwrap();

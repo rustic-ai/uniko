@@ -23,7 +23,7 @@ mod onnx_tests {
             schema_path: Some(workspace_root.join("config/schema.json")),
             ..Default::default()
         };
-        let tmp = std::env::temp_dir().join("uniko-obs-miss-test");
+        let tmp = std::env::temp_dir().join(format!("uniko-obs-miss-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).ok();
         let kb = KnowledgeBase::open_with_xervo(&tmp, config, Vec::<ModelAliasSpec>::new())
             .await

@@ -25,7 +25,7 @@ mod onnx_tests {
             schema_path: Some(schema_path),
             ..Default::default()
         };
-        let tmp_dir = std::env::temp_dir().join("uniko-ner-test");
+        let tmp_dir = std::env::temp_dir().join(format!("uniko-ner-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp_dir).ok();
 
         let kb = KnowledgeBase::open_with_xervo(&tmp_dir, config, Vec::<ModelAliasSpec>::new())

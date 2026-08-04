@@ -9,16 +9,16 @@
   },
   {
     "alias": "nlp/default",
-    "task": "raw",
+    "task": "nlp",
     "provider_id": "local/onnx",
     "model_id": "dragonscale-ai/kniv-deberta-nlp-base-en-xsmall",
     "warmup": "lazy",
     "required": false,
     "options": {
-      "artifact": "onnx/cascade-int8.onnx",
-      "max_batch_size": 16,
-      "graph_optimization_level": "all",
-      "intra_op_num_threads": 4
+      "onnx_path": "onnx/cascade-int8.onnx",
+      "tokenizer_path": "tokenizer.json",
+      "label_maps_path": "label_maps.json",
+      "max_seq_len": 128
     }
   }
 ]

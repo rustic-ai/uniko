@@ -39,6 +39,46 @@ pub fn datetime_value(dt: chrono::DateTime<chrono::Utc>) -> uni_db::Value {
     })
 }
 
+/// Epoch milliseconds for a datetime-shaped temporal value.
+///
+/// Stands in for `TemporalValue::epoch_millis`, which uni-db removed in
+/// 3.2.0 as a dead accessor (rustic-ai/uni-db `c75b8384a`) while uniko was
+/// still a live caller. The original semantics are reproduced exactly: the
+/// `nanos_since_epoch` field of the two datetime variants divided by 1e6
+/// (truncating, so pre-1970 instants round toward the epoch), and `None`
+/// for every variant that pins no instant — a bare date, a time of day, a
+/// duration, or a BTIC interval.
+///
+/// Lives here rather than at each call site because this crate is the sole
+/// uni-db boundary: `uniko-bench` and the Python bindings decode the same
+/// `Value::Temporal` and must not each re-derive the conversion.
+///
+/// # Examples
+///
+/// ```
+/// use uniko_store::temporal::TemporalValue;
+/// use uniko_store::temporal_epoch_millis;
+///
+/// let dt = TemporalValue::LocalDateTime { nanos_since_epoch: 1_500_000_000 };
+/// assert_eq!(temporal_epoch_millis(&dt), Some(1_500));
+///
+/// // A date carries no time-of-day, so it pins no instant.
+/// assert_eq!(temporal_epoch_millis(&TemporalValue::Date { days_since_epoch: 0 }), None);
+/// ```
+#[must_use]
+pub fn temporal_epoch_millis(value: &uni_db::common::TemporalValue) -> Option<i64> {
+    use uni_db::common::TemporalValue;
+    match value {
+        TemporalValue::DateTime {
+            nanos_since_epoch, ..
+        }
+        | TemporalValue::LocalDateTime {
+            nanos_since_epoch, ..
+        } => Some(nanos_since_epoch / 1_000_000),
+        _ => None,
+    }
+}
+
 /// Decode a `Value::Temporal` into a UTC datetime, surfacing a precise
 /// [`UnikoError::Storage`] when it does not yield a valid timestamp.
 ///
@@ -59,8 +99,7 @@ pub fn datetime_from_value(
     use chrono::{DateTime, Utc};
     match value {
         uni_db::Value::Temporal(t) => {
-            let millis = t
-                .epoch_millis()
+            let millis = temporal_epoch_millis(t)
                 .ok_or_else(|| crate::UnikoError::Storage(format!("{context} has no epoch")))?;
             DateTime::<Utc>::from_timestamp_millis(millis).ok_or_else(|| {
                 crate::UnikoError::Storage(format!("epoch millis {millis} out of range"))
@@ -87,7 +126,7 @@ pub fn optional_datetime_from_row(
     let value = row.values().get(idx)?;
     match value {
         uni_db::Value::Temporal(t) => {
-            let millis = t.epoch_millis()?;
+            let millis = temporal_epoch_millis(t)?;
             DateTime::<Utc>::from_timestamp_millis(millis)
         }
         _ => None,

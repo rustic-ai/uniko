@@ -311,7 +311,7 @@ fn row_date(row: &uni_db::Row, column: &str) -> Option<String> {
     let idx = row.columns().iter().position(|c| c == column)?;
     match row.values().get(idx)? {
         Value::Temporal(t) => {
-            let millis = t.epoch_millis()?;
+            let millis = uniko_store::temporal_epoch_millis(t)?;
             chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis)
                 .map(|d| d.format("%Y-%m-%d").to_string())
         }

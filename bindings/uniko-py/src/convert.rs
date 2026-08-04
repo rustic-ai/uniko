@@ -13,16 +13,18 @@
 //! then a `{"id", "labels", "properties"}` dict, which is enough for the SDK's
 //! read surface.
 //!
-//! Binary payloads are best retrieved through `data.artifact_bytes(id)`: a known
-//! uni-db limitation means `Value::Bytes` cannot be read back through a Cypher
-//! `RETURN`, so the `Bytes` arm here exists for completeness only.
+//! Binary payloads are still best retrieved through `data.artifact_bytes(id)`,
+//! which reads through the blob backend. The `Bytes` arm here is nonetheless
+//! live: the uni-db limitation that prevented `Value::Bytes` from being read
+//! back through a Cypher `RETURN` is fixed as of uni-db 3.x (see
+//! `crates/uniko-store/tests/unidb_bytes_return_repro.rs`, which now passes).
 
 use chrono::{DateTime, Utc};
 use pyo3::IntoPyObjectExt;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use std::collections::HashMap;
-use uniko_api::tools::{Record, Value};
+use uniko_api::tools::{Record, Value, temporal_epoch_millis};
 
 /// Convert a `chrono::DateTime<Utc>` to a tz-aware Python `datetime` in UTC.
 ///
@@ -95,11 +97,12 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
             Ok(dict.into_any().unbind())
         }
         // `Value::Temporal` wraps uni-db's `TemporalValue`. We bridge via
-        // `epoch_millis()` (the same path `uniko_store::datetime_from_value`
-        // uses) to a tz-aware UTC datetime. Variants without an epoch (a bare
-        // date, a duration, a BTIC interval) have no clean datetime mapping and
-        // fall back to `None` rather than guessing.
-        Value::Temporal(t) => match t.epoch_millis() {
+        // `temporal_epoch_millis()` (the same path
+        // `uniko_store::datetime_from_value` uses) to a tz-aware UTC datetime.
+        // Variants without an epoch (a bare date, a duration, a BTIC interval)
+        // have no clean datetime mapping and fall back to `None` rather than
+        // guessing.
+        Value::Temporal(t) => match temporal_epoch_millis(t) {
             Some(millis) => match DateTime::<Utc>::from_timestamp_millis(millis) {
                 Some(dt) => Ok(utc_datetime_to_py(py, dt)?.unbind()),
                 None => Ok(py.None()),

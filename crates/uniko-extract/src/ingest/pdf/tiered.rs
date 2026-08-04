@@ -452,7 +452,8 @@ mod tests {
         assert_eq!(mat.block_node_ids.len(), 2);
         assert_eq!(mat.chunk_node_ids.len(), 2);
 
-        let session = kb.db().session();
+        // Test-only provenance assertions; the seal governs product code.
+        let session = kb.db().session(); // ALLOW: test-only
 
         // Page provenance + HAS_PAGE.
         let rows = session

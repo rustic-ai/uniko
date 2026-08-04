@@ -12,9 +12,11 @@
 //! `Embed`, one `EmbedHybrid`); the runtime cache keys on `task`, so the model
 //! loads twice.
 //!
-//! The test asserts the hybrid model CAN auto-embed a dense column (one model,
-//! multiple tasks), so it fails against uni-db 2.4.1. Run:
-//! `cargo nextest run -p uniko-store --test unidb_one_model_multi_task_repro --run-ignored all`
+//! **FIXED upstream.** The test asserts the hybrid model CAN auto-embed a dense
+//! column (one model, multiple tasks). It failed against uni-db 2.4.1 and ran as
+//! an `#[ignore]`d expected-failure; on 2026-08-02 it was found green on both
+//! 3.0.1 and 3.2.0, so the fix landed in 3.0.0 or earlier. The attribute is
+//! removed so it now guards against regression on every run.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -122,7 +124,6 @@ fn dense_index_on_hybrid_alias() -> VectorIndexCfg {
     }
 }
 
-#[ignore = "reproduces uni-db routing a lone-dense column away from a hybrid model"]
 #[tokio::test]
 async fn hybrid_model_serves_a_dense_only_column() {
     let calls = Arc::new(AtomicUsize::new(0));

@@ -19,7 +19,8 @@ uv run python -c "import uniko; print(uniko.__file__)"
 
 A C/C++ toolchain and `protobuf-compiler` (`protoc`) must be on `PATH` — the
 uniko stack statically links the ONNX runtime (via uni-db's `provider-onnx`)
-and several native dependencies.
+and several native dependencies. On Linux, `mold` is also required: the
+workspace's `.cargo/config.toml` forces it as the link backend.
 
 ## Example
 

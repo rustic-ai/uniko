@@ -75,6 +75,13 @@ pub mod temporal {
 /// Model-runtime value types used by the [`KnowledgeBase`] generation
 /// and NLP seams (see `model` module). Re-exported so callers building
 /// prompts never reach `uni_db::xervo` directly.
+///
+/// [`ModelAliasSpec`], [`ModelTask`] and [`WarmupPolicy`] describe a
+/// catalog entry. They are part of this crate's own surface already —
+/// [`KnowledgeBase::in_memory_with_xervo`] and its siblings take
+/// `Vec<ModelAliasSpec>` — so a caller registering an extra model (the
+/// facade's `LlmSpec`) has to be able to name them.
 pub mod xervo {
     pub use uni_db::xervo::{GenerationOptions, Message};
+    pub use uni_db::{ModelAliasSpec, ModelTask, WarmupPolicy};
 }

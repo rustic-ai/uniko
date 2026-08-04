@@ -4,10 +4,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use uni_db::{ModelAliasSpec, ModelTask, WarmupPolicy};
 use uniko_extract::ingest::{ModalityExtractor, ModalityRegistry};
 use uniko_pipes::config::PipelineConfig;
 use uniko_store::config::{EmbeddingConfig, UnikoConfig};
+use uniko_store::xervo::{ModelAliasSpec, ModelTask, WarmupPolicy};
 use uniko_store::{DeletionReport, KnowledgeBase, UnikoError};
 
 use super::RecallScope;

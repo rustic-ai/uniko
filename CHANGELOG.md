@@ -5,6 +5,90 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-03
+
+Dependency and packaging release. The headline is a fix: the agent-facing Locy
+surface (`assume` / `abduce` / `run_rule`) did not work at all through the
+`Uniko` facade — which is every Python SDK user.
+
+### Fixed
+
+- **`Agent::assume`, `Agent::abduce` and `Agent::run_rule` failed on every
+  facade-built instance** with `LocyRuntimeError: Sub-plan error: Unresolved
+  parameter: $agent_id`. uni-db resolves each *registered* rule as a sub-plan of
+  any Locy program — including one that references no rules
+  ([rustic-ai/uni-db#157](https://github.com/rustic-ai/uni-db/issues/157)) — and
+  `Uniko` registers four parameterized stdlib rules at construction, so their
+  parameters became mandatory for unrelated calls. The facade now binds them by
+  default; caller-supplied parameters still take precedence. `run_active_rules`
+  had always carried this union; the facade paths simply never did.
+
+  Only the facade was affected. Code driving `KnowledgeBase` directly never
+  registers the stdlib rules and was always fine.
+
+### Changed
+
+- **uni-db 2.5.0 → 3.2.0** (0.1.1 shipped on 2.5.0). Net **−24 dependency
+  crates**: 3.2.0 drops the `lancedb` wrapper and with it the CJK tokenizer
+  stack (lindera, jieba-rs, kanaria) and the rkyv zero-copy stack.
+- **`TemporalValue::epoch_millis` was removed upstream** in a minor release.
+  Replaced by `uniko_store::temporal_epoch_millis`, which reproduces the removed
+  semantics exactly. Anything that called it through uniko is unaffected; direct
+  callers of the uni-db accessor must migrate.
+- **Wheels are built with a `dist` profile** — release plus whole-graph thin LTO
+  at `codegen-units = 1`. The base `uniko` wheel is now **74.0 MiB** (197.4 MiB
+  uncompressed), down from over PyPI's 100 MB per-file limit, which is what made
+  PyPI publishing possible at all.
+- **Linux builds now require `mold`.** `.cargo/config.toml` forces it as the
+  link backend; install it before building from source.
+
+### Added
+
+- `uniko_store::temporal_epoch_millis` — epoch milliseconds from a
+  datetime-shaped `TemporalValue`.
+- `uniko_store::xervo` now re-exports `ModelAliasSpec`, `ModelTask` and
+  `WarmupPolicy`, which callers registering an extra model already needed to
+  name.
+- **PyPI publishing**, as one job per project, so a rejection of one wheel
+  cannot abort the others.
+- **A PEP 503 package index** on the docs site, generated from the GitHub
+  Release assets — a third install channel that does not depend on PyPI.
+- `export-schema` binary for regenerating `config/schema.json`.
+
+### Known limitations
+
+Unchanged from 0.1.1, with one correction: the base `uniko` wheel now fits
+under PyPI's default per-file limit, but **`uniko-cuda` and `uniko-metal` still
+may not**. Those install from the GitHub Release assets or the package index.
+
+### Installation
+
+Rust:
+
+```toml
+[dependencies]
+uniko-api = "0.2.0"
+```
+
+Python (CPU):
+
+```sh
+pip install uniko
+```
+
+GPU variants (install exactly one; all import as `uniko`):
+
+```sh
+pip install uniko-cuda    # NVIDIA CUDA, Linux x86_64
+pip install uniko-metal   # Apple Silicon, macOS arm64
+```
+
+If a GPU wheel is not on PyPI, install it from the package index:
+
+```sh
+pip install uniko-cuda --extra-index-url https://rustic-ai.github.io/uniko/packages/
+```
+
 ## [0.1.1] - 2026-07-08
 
 **First public release.**
@@ -152,4 +236,5 @@ pip install uniko-cuda    # NVIDIA CUDA, Linux x86_64
 pip install uniko-metal   # Apple Silicon, macOS arm64
 ```
 
+[0.2.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.2.0
 [0.1.1]: https://github.com/rustic-ai/uniko/releases/tag/v0.1.1

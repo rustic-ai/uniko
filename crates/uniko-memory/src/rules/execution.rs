@@ -125,7 +125,14 @@ async fn run_one_rule(
 /// `query_rule` call. When decay is disabled (`half_life_days <= 0`), the decay
 /// params are set so `relevance_decay` yields nothing (it is consumed by its own
 /// sweep anyway) while staying resolvable.
-fn stdlib_rule_params(
+///
+/// This is not specific to rule execution: uni-db resolves every *registered*
+/// rule as a sub-plan of **any** Locy program, including one that references no
+/// rules at all. So every Locy entry point uniko exposes has to supply this
+/// union, not just this module — see [`Agent::assume`](crate::Agent::assume),
+/// [`Agent::abduce`](crate::Agent::abduce) and
+/// [`Agent::run_rule`](crate::Agent::run_rule), which bind it as defaults.
+pub(crate) fn stdlib_rule_params(
     agent_id: &str,
     half_life_days: f64,
     prune_below: f64,

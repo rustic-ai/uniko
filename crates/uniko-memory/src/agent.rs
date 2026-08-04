@@ -233,6 +233,9 @@ impl Agent {
     /// `return_cols` names the rule's `YIELD` aliases; `params` injects
     /// rule body parameters (e.g. `("agent_id", Value::from(...))`).
     ///
+    /// The stdlib rule parameters are bound first (see
+    /// [`Agent::locy_params`]); anything in `params` wins on collision.
+    ///
     /// # Errors
     ///
     /// Returns [`UnikoError::Locy`] if the rule is unregistered or
@@ -243,7 +246,24 @@ impl Agent {
         return_cols: &[&str],
         params: HashMap<String, Value>,
     ) -> Result<Vec<Record>, UnikoError> {
-        self.kb.query_rule(name, return_cols, &params).await
+        let mut merged = self.locy_params();
+        merged.extend(params);
+        self.kb.query_rule(name, return_cols, &merged).await
+    }
+
+    /// The parameters every Locy program run through this agent must carry.
+    ///
+    /// uni-db resolves each *registered* rule as a sub-plan of any Locy
+    /// program — including one that references no rules at all
+    /// (rustic-ai/uni-db#157) — so an unresolved parameter in an unrelated
+    /// stdlib rule fails the whole run.
+    /// `Uniko` registers four parameterized stdlib rules at construction, so
+    /// without these bindings every `assume` / `abduce` / `run_rule` call on a
+    /// facade-built instance fails with `Unresolved parameter: $agent_id`.
+    /// See [`crate::rules::run_active_rules`], which carries the same union.
+    fn locy_params(&self) -> HashMap<String, Value> {
+        let cfg = self.kb.config();
+        crate::rules::stdlib_rule_params(&self.agent_id, cfg.half_life_days, cfg.prune_below)
     }
 
     /// Begin a hypothetical (`ASSUME`) query: fork state, apply mutations,
@@ -251,12 +271,22 @@ impl Agent {
     ///
     /// Finish with [`AssumeBuilder::then_query`] and
     /// [`AssumeBuilder::run`].
+    ///
+    /// The stdlib rule parameters are pre-bound (see [`Agent::locy_params`]);
+    /// [`AssumeBuilder::param`] overrides any of them.
     pub fn assume(&self, assume_block: &str) -> AssumeBuilder<'_> {
-        self.kb.assume(assume_block)
+        let mut builder = self.kb.assume(assume_block);
+        for (k, v) in self.locy_params() {
+            builder = builder.param(k, v);
+        }
+        builder
     }
 
     /// Run an abductive query: given a conclusion, find the minimal set of
     /// facts that support it.
+    ///
+    /// The stdlib rule parameters are bound first (see
+    /// [`Agent::locy_params`]); anything in `params` wins on collision.
     ///
     /// # Errors
     ///
@@ -266,7 +296,9 @@ impl Agent {
         program: &str,
         params: HashMap<String, Value>,
     ) -> Result<AbductionResult, UnikoError> {
-        self.kb.abduce(program, &params).await
+        let mut merged = self.locy_params();
+        merged.extend(params);
+        self.kb.abduce(program, &merged).await
     }
 
     /// Hard-delete an entire conversation and everything it owns.

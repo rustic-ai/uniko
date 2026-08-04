@@ -3,7 +3,12 @@
 **Component:** uni-db (`uni-query` aggregation / `collect()` projection + `uni-store` arrow conversion)
 **Severity:** High — silent data loss for any binary property read through a `collect()` aggregate.
 **Status:** Filed upstream as [rustic-ai/uni-db #100](https://github.com/rustic-ai/uni-db/issues/100). Verified with a standalone public-API repro against uni-db **2.2.4** (latest 2.x).
-**Relationship:** Residual of [#93](https://github.com/rustic-ai/uni-db/issues/93) (CLOSED, fixed scalar projection). The scalar path now round-trips; the **aggregation path does not**.
+**Relationship:** Residual of [#93](https://github.com/rustic-ai/uni-db/issues/93) (CLOSED, fixed scalar projection).
+
+> **UPDATE 2026-08-02 — FIXED.** The aggregation path round-trips too as of uni-db 3.x
+> (verified on 3.0.1 and 3.2.0). `crates/uniko-store/tests/unidb_bytes_residual_repro.rs`
+> is no longer `#[ignore]`d and runs as a regression guard. The analysis below describes
+> the original 2.2.4 behaviour.
 **Repro test:** `crates/uniko-store/tests/unidb_bytes_residual_repro.rs` (`#[ignore]`d; run with `cargo nextest run -p uniko-store --test unidb_bytes_residual_repro --run-ignored all`).
 
 ## Summary

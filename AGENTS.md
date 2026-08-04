@@ -19,10 +19,14 @@ cargo build
 
 - **Rust:** stable channel (pinned in `rust-toolchain.toml`), **edition 2024**,
   **MSRV `1.91`** (`rust-version` in the workspace `Cargo.toml`).
-- `cargo build` pulls `uni-db 2.2.1` and `uni-xervo 0.15.0` straight from
-  crates.io — **no token, private repo, or credentials required.**
-- **System deps:** `protobuf-compiler` (`protoc`) and a C/C++ toolchain (the
-  stack statically links ONNX Runtime via `ort`). CI installs `protobuf-compiler`.
+- `cargo build` pulls `uni-db` (`^3` — the latest 3.x) and `uni-xervo` (`0.17.0`)
+  straight from crates.io — **no token, private repo, or credentials required.**
+  Those are the requirements in the workspace `Cargo.toml`; `Cargo.lock` has the
+  exact resolved versions.
+- **System deps:** `protobuf-compiler` (`protoc`), a C/C++ toolchain (the stack
+  statically links ONNX Runtime via `ort`), and — on Linux — `mold`, which
+  `.cargo/config.toml` forces as the link backend. CI installs
+  `protobuf-compiler mold`.
 - First builds are slow (ONNX Runtime, tokenizers compile under `opt-level = 3`).
 
 ## Test
@@ -93,7 +97,7 @@ Plus `uniko-bench` (`publish = false`) and `bindings/uniko-py`.
 
 ### 3. uni-db is a SEPARATE project — never edit it
 
-uni-db is consumed from crates.io (`uni-db 2.2.1`). A local checkout exists at
+uni-db is consumed from crates.io (`uni-db = "3"`). A local checkout exists at
 `../uni/` for reference only. **Never edit `../uni/` directly.** When you hit a
 uni-db bug: build a *minimal isolated repro* (see
 `crates/uniko-store/tests/unidb_bytes_return_repro.rs` for the pattern), file it

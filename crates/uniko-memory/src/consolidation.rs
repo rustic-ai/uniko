@@ -691,38 +691,18 @@ async fn fetch_observation_embeddings(
     kb: &KnowledgeBase,
     ids: &[NodeId],
 ) -> HashMap<NodeId, Vec<f32>> {
-    let mut out: HashMap<NodeId, Vec<f32>> = HashMap::new();
-    if ids.is_empty() {
-        return out;
-    }
-    let id_list = ids
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    // UNWIND over an inline id-literal list mirrors the proven
-    // `fetch_entities_for_upsert_in_tx` pattern (ids are i64, injection-safe).
-    let cypher = format!(
-        "UNWIND [{id_list}] AS oid \
-         MATCH (o:Observation) WHERE id(o) = oid \
-         RETURN id(o) AS id, o.embedding AS emb"
-    );
-    match kb.db().session().query_with(&cypher).fetch_all().await {
-        Ok(result) => {
-            for row in result.rows() {
-                if let (Ok(id), Ok(emb)) = (row.get::<i64>("id"), row.get::<Vec<f32>>("emb")) {
-                    out.insert(id, emb);
-                }
-            }
-        }
-        Err(e) => {
+    // The query lives in `uniko_store` (the sole uni-db boundary); the
+    // degrade-on-failure policy stays here, where the fallback weight is
+    // defined.
+    kb.fetch_observation_embeddings(ids)
+        .await
+        .unwrap_or_else(|e| {
             tracing::warn!(
                 error = %e,
                 "fetch_observation_embeddings failed; SUPPORTED_BY weights fall back to 1.0"
             );
-        }
-    }
-    out
+            HashMap::new()
+        })
 }
 
 /// Assign each normalized key to a cluster id via single-pass greedy

@@ -50,9 +50,48 @@ there are **no API tokens stored in the repo**.
 | `validate-crates` | no | `cargo publish --dry-run` for the leaf crate; `cargo package --no-verify` for the rest. |
 | `build-wheels` | no | Builds abi3 wheels for Linux (x86_64, aarch64), macOS (arm64), Windows (x64). |
 | `build-sdist` | no | Builds the source distribution. |
+| `build-cuda-linux` | no | Builds the `uniko-cuda` wheel (Linux x86_64, CUDA 13 toolkit). |
+| `build-metal` | no | Builds the `uniko-metal` wheel (macOS arm64). |
 | `publish-crates` | **yes** | Publishes the 6 crates to crates.io via OIDC, in dependency order. |
-| `publish-pypi` | **yes** | Publishes all wheels + sdist to PyPI via OIDC. |
+| `publish-pypi-uniko` | **yes** | Publishes the base wheels + sdist to PyPI via OIDC. |
+| `publish-pypi-cuda` | **yes** | Publishes the `uniko-cuda` wheel. |
+| `publish-pypi-metal` | **yes** | Publishes the `uniko-metal` wheel. |
 | `github-release` | **yes** | Creates the GitHub Release and attaches all artifacts. |
+| `publish-package-index` | no | Rebuilds the PEP 503 index on the docs site from the Release assets. |
+
+### Build profile
+
+Every wheel job builds with `--profile dist`, not `--release`: the release
+profile plus whole-graph thin LTO at `codegen-units = 1`, defined in the root
+`Cargo.toml`. That materially shrinks the shipped `_uniko.so` — which matters
+because the wheels sit near PyPI's 100 MB/file limit — at the cost of a few
+extra minutes and a much larger peak rustc working set.
+
+Peak build memory, not build time, is what constrains `codegen-units`. Jobs on
+runners too small for cgu=1 relax it with `CARGO_PROFILE_DIST_CODEGEN_UNITS`
+rather than forking the profile. If a wheel job is killed with no error output
+(exit 137 / "The runner has received a shutdown signal"), suspect the LTO link
+being OOM-killed and raise that job's codegen-units — 4 first, then 16 — before
+investigating anything else. The variable must never be set to an empty string:
+cargo rejects it with `cannot parse integer from empty string`.
+
+> **The two macOS jobs run on `macos-15-xlarge`, a billed larger runner.**
+> The free Apple Silicon runner is 3-core/7 GB, too small to link a single
+> codegen unit. `macos-15-xlarge` is 5-core M2 / 14 GB at ~$0.102/min, billed
+> per-minute **even for public repositories** — there are no included minutes.
+> It also requires a Team or Enterprise Cloud plan, a card on file, and a
+> non-zero Actions spending limit; without those the job will not schedule at
+> all. 14 GB is the ceiling for Apple Silicon (the 30 GB `-large` runners are
+> Intel, which we cannot use — `ort` ships no `x86_64-apple-darwin` binary).
+>
+> Do not "modernize" these to `macos-14-xlarge`: macOS 14 runners are removed
+> on 2026-11-02, with failing brownout windows from October 2026.
+
+Linux builds link with `mold`, forced by `.cargo/config.toml`. The manylinux
+containers do not ship mold, so every containerized job clears or replaces
+`RUSTFLAGS` (an env `RUSTFLAGS` *replaces* the config file's rustflags rather
+than merging), and every host-runner Linux job installs mold via apt. A new
+Linux job that compiles Rust must do one or the other or it will fail at link.
 
 The publish order is fixed by the internal dependency graph:
 
@@ -135,26 +174,84 @@ On PyPI, for **each** of `uniko`, `uniko-cuda`, `uniko-metal`:
 (To rehearse against [TestPyPI], register the same publisher there and point
 `publish-pypi` at it temporarily.)
 
-#### File-size limit (required — all three variants exceed 100 MB)
+#### File-size limit (still required for the GPU variants)
 
-PyPI's default per-file limit is 100 MB, and every variant is over it: the base
-`uniko` wheel statically bundles ONNX Runtime (~113 MiB), and `uniko-cuda` /
-`uniko-metal` additionally embed candle+mistralrs GPU kernels. Request a
-file-size-limit increase for **each** project via
+PyPI's default per-file limit is 100 MB. Measured 2026-08-03, all built with
+`--profile dist` (thin LTO, `codegen-units = 1`):
+
+| Variant | Wheel | `_uniko.abi3.so` | vs 100 MB |
+| --- | --- | --- | --- |
+| `uniko` | **74.0 MiB** | 197.4 MiB | comfortably under |
+| `uniko-cuda` | **98.6 MiB** *(before `auditwheel repair`)* | 306.6 MiB | marginal — see below |
+| `uniko-metal` | not measured (macOS-only) | — | unknown |
+
+The base wheel no longer exceeds the limit. It did when this section was
+written, under a plain `--release` build; whole-graph thin LTO plus uni-db
+3.2.0 dropping the `lancedb` wrapper and 23 transitive crates brought it to
+74 MiB. **Do not treat that as clearance for the GPU variants.**
+
+`uniko-cuda` is not clear, for two compounding reasons. The 98.6 MiB figure is
+the **pre-repair** wheel — the same artifact CI puts in `dist-raw` — and the
+`auditwheel repair` step that follows bundles every non-excluded shared library
+(OpenSSL 3 is staged specifically so it gets picked up), so the published wheel
+is strictly larger. And the margin is already inside the ambiguity of "100 MB":
+103,364,283 bytes is 1.4 MiB *under* a 100 MiB limit but 3.4 MB *over* a
+decimal 100 MB one. Measure the repaired wheel from a real CI run before
+assuming it fits.
+
+Request a file-size-limit increase for **each** project via
 <https://pypi.org/help/#file-size-limit> (cite the bundled ONNX Runtime +
 candle/mistralrs kernels; rustic-ai/uni-db obtained the same increases for its
 `uni-db-cuda`/`-metal` variants). The `github-release` job attaches the wheels
 to the GitHub Release (2 GB/asset) as a fallback if a PyPI upload is still
 rejected.
 
-**PyPI publishing is disabled by a flag until those increases land.** The
-`publish-pypi` job is gated on the repository variable `PYPI_PUBLISH_ENABLED`
-and will not run while it is unset. Everything else still works — wheels build
-and validate, crates.io publishes, and `github-release` attaches the wheels
-(the interim distribution channel). **To enable PyPI once the size increases are
-approved:** Settings → Secrets and variables → Actions → **Variables** → set
-`PYPI_PUBLISH_ENABLED` = `true`. (It must be a repository *variable*, not an env
-value — a job-level `if:` can't read workflow `env`.)
+**PyPI publishing is enabled.** The `PYPI_PUBLISH_ENABLED` repository-variable
+flag has been removed now that the per-project file-size increases are
+requested; the `release` environment's manual approval is the only remaining
+gate, so nothing reaches PyPI without an explicit deployment approval.
+
+PyPI publishing is **three separate jobs**, one per project —
+`publish-pypi-uniko` (base + sdist), `publish-pypi-cuda`, `publish-pypi-metal`.
+`uniko`, `uniko-cuda` and `uniko-metal` are separate PyPI projects with separate
+file-size limits, and a single twine invocation over a merged `dist/` is
+all-or-nothing: one rejection would abort the upload and take the other two with
+it.
+
+Splitting at the job level, rather than scripting tolerance inside one job,
+means failures are isolated by construction. A wheel PyPI rejects — on size, or
+because an exception has not taken effect — shows up as one red job while the
+other two publish normally, and `github-release` still attaches every wheel
+(2 GB/asset). There is no classification logic and nothing is swallowed: read
+PyPI's actual error in the failed job's log.
+
+All three run **after** crates.io — no point shipping wheels for a version whose
+crates failed to publish — and each declares `environment: release`, because the
+Trusted Publisher registrations name that environment and the OIDC claim must
+match it. Approval is per deployment, so expect to approve each.
+
+### Three distribution channels
+
+Wheels reach users three ways, and only the first depends on PyPI:
+
+1. **PyPI** — `pip install uniko`. Per-project, per-job (above).
+2. **GitHub Release assets** — every wheel plus the sdist, 2 GB/asset.
+3. **PEP 503 index on the docs site** — generated by `publish-package-index`
+   from the Release assets:
+
+   ```sh
+   pip install uniko --extra-index-url https://rustic-ai.github.io/uniko/packages/
+   ```
+
+Channels 2 and 3 are **independent of PyPI**: `github-release` runs on
+`always() && publish-crates == 'success'` and attaches `dist/*`, so a wheel PyPI
+rejects — on size, or because a file-size exception has not taken effect — is
+still released and still installable through the index. `gen_package_index.py`
+groups by normalized project name, so `uniko`, `uniko-cuda` and `uniko-metal`
+each get their own index page.
+
+That is why a rejected PyPI upload fails one job rather than the release: the
+artifact is not lost, only one of its three routes is.
 
 ---
 

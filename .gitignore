@@ -44,3 +44,10 @@ locomo_results.json
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Built wheels (maturin --out dist)
+dist/
+
+# Diagnostic dumps written by the `#[ignore]`d nlp_diagnostics / bench
+# diagnostics tests (run with --run-ignored).
+data/*.txt

@@ -20,15 +20,15 @@
 //! applied to raw bytes — erroring when `byte[0]` is an unmapped tag, or
 //! silently corrupting when it is a valid one (0..=19).
 //!
-//! These tests assert the *correct, post-fix* behavior (a clean round-trip),
-//! so they FAIL against current uni-db. `#[ignore]`d to keep CI green; run with
-//! `cargo nextest run -p uniko-store --test unidb_bytes_return_repro \
-//! --run-ignored all`. Full write-up + suggested fix:
-//! `crates/uniko-store/docs/unidb-bytes-cypher-return-bug.md`.
+//! **FIXED upstream.** These tests assert the correct behavior (a clean
+//! round-trip) and now pass — verified on uni-db 3.0.1 and 3.2.0, so the fix
+//! landed in 3.0.0 or earlier. They ran as `#[ignore]`d expected-failures until
+//! 2026-08-02, when re-running the ignored set showed them green; the attribute
+//! is removed so they now guard against regression on every run. Full write-up
+//! of the original defect: `crates/uniko-store/docs/unidb-bytes-cypher-return-bug.md`.
 
 use uni_db::{DataType, Uni, Value};
 
-#[ignore = "uni-db bug: Bytes column can't be read via Cypher RETURN; see crates/uniko-store/docs/unidb-bytes-cypher-return-bug.md"]
 #[tokio::test]
 async fn bytes_column_round_trips_through_cypher_return() {
     let db = Uni::in_memory().build().await.expect("open in-memory db");
@@ -78,7 +78,6 @@ async fn bytes_column_round_trips_through_cypher_return() {
 /// The same root cause, but worse: when the payload's first byte *is* a valid
 /// CypherValue tag (here `0x00` = TAG_NULL), the decode succeeds and **silently
 /// returns the wrong value** — no error is logged. Any binary blob is at risk.
-#[ignore = "uni-db bug: Bytes column can't be read via Cypher RETURN; see crates/uniko-store/docs/unidb-bytes-cypher-return-bug.md"]
 #[tokio::test]
 async fn bytes_with_tag_valued_first_byte_silently_corrupts() {
     let db = Uni::in_memory().build().await.expect("open in-memory db");

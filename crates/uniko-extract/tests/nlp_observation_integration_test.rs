@@ -49,20 +49,24 @@ mod onnx_tests {
             ..Default::default()
         };
 
-        let tmp_dir = std::env::temp_dir().join("uniko-nlp-test");
+        let tmp_dir = std::env::temp_dir().join(format!("uniko-nlp-test-{}", std::process::id()));
         std::fs::create_dir_all(&tmp_dir).ok();
 
         let kb = KnowledgeBase::open_with_xervo(&tmp_dir, config, Vec::<ModelAliasSpec>::new())
             .await
             .expect("KB with xervo + catalog");
 
-        // Try to get the runner directly to surface any error.
-        match kb.db().xervo().raw_tensor_model("nlp/default").await {
-            Ok(_) => eprintln!("ONNX runner loaded successfully"),
-            Err(e) => {
-                eprintln!("ONNX runner error: {e}");
-                panic!("NLP pipeline unavailable: {e}");
-            }
+        // Resolve the alias directly first: `NlpPipeline::try_new` collapses
+        // every failure into `None`, so without this the panic below would say
+        // only "NLP pipeline" and hide why. Ask for the same `NlpModel` the
+        // pipeline needs — probing `raw_tensor_model` here was a leftover from
+        // before the 2026-06 migration of `nlp/default` from `Raw` to `Nlp`,
+        // and reported a missing `RawTensorModel` capability once the alias was
+        // registered correctly.
+        let runtime = kb.model_runtime().expect("xervo runtime");
+        match runtime.nlp_model("nlp/default").await {
+            Ok(_) => eprintln!("NLP model resolved successfully"),
+            Err(e) => panic!("NLP model unavailable for alias 'nlp/default': {e}"),
         }
 
         NlpPipeline::try_new(&kb).await.expect("NLP pipeline")

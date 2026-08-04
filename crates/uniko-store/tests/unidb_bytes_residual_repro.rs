@@ -29,10 +29,11 @@
 //! `unknown CypherValue tag: 97` during a normal uniko bench ingest/recall,
 //! which uses `collect()` over LargeBinary-backed columns.
 //!
-//! The bug test asserts the *correct, post-fix* behaviour (a clean
-//! round-trip through `collect()`), so it FAILS on current uni-db; it is
-//! `#[ignore]`d to keep CI green. Run both with:
-//! `cargo nextest run -p uniko-store --test unidb_bytes_residual_repro --run-ignored all`
+//! **FIXED upstream.** Both tests assert the correct behaviour (a clean
+//! round-trip through `collect()`) and now pass — verified on uni-db 3.0.1 and
+//! 3.2.0, so the fix landed in 3.0.0 or earlier. They ran as `#[ignore]`d
+//! expected-failures until 2026-08-02; the attribute is removed so they now
+//! guard against regression on every run.
 
 use uni_db::{DataType, Uni, Value};
 
@@ -67,7 +68,6 @@ async fn db_with_one_blob() -> Uni {
 /// BUG: `collect()` over a `Bytes` column does not round-trip on uni-db
 /// 2.2.4 — the value is mis-decoded (logs `unknown CypherValue tag: 97`)
 /// and dropped, yielding an empty list.
-#[ignore = "uni-db residual #93 bug: collect() over a Bytes column loses data; see this file's header"]
 #[tokio::test]
 async fn collect_over_bytes_column_round_trips() {
     let db = db_with_one_blob().await;
@@ -99,7 +99,6 @@ async fn collect_over_bytes_column_round_trips() {
 /// CONTROL: the scalar projection path #93 fixed *does* round-trip on
 /// 2.2.4 — included to show the residual gap is specific to `collect()`
 /// (this test passes; the one above fails).
-#[ignore = "control for the residual #93 repro; passes on 2.2.4"]
 #[tokio::test]
 async fn scalar_return_of_bytes_column_round_trips_post_93() {
     let db = db_with_one_blob().await;

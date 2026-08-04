@@ -32,7 +32,7 @@ mod onnx_dump {
             schema_path: Some(ws.join("config/schema.json")),
             ..Default::default()
         };
-        let tmp = std::env::temp_dir().join("uniko-nlp-dump");
+        let tmp = std::env::temp_dir().join(format!("uniko-nlp-dump-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).ok();
         let kb = KnowledgeBase::open_with_xervo(&tmp, config, Vec::<ModelAliasSpec>::new())
             .await
