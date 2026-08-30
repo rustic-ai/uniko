@@ -214,8 +214,13 @@ strip = "symbols"
 #
 #   thin, cgu=16   ~368 MiB   -            15m40s
 #   thin, cgu=4     289 MiB   11.0 GiB     12m37s
-#   thin, cgu=1     238 MiB   11.7 GiB     19m26s   <- this profile
+#   thin, cgu=1     238 MiB   11.7 GiB     19m26s   <- LTO/CGU basis
 #   fat,  cgu=1     220 MiB   15.8+ GiB    36m48s   <- rejected: OOMs a 14 GB runner
+#
+# A uniko-py sweep on macOS arm64 found that `opt-level = "z"` reduces the
+# stripped thin-LTO dylib from 163.4 MiB (`opt-level = 3`) to 83.1 MiB, yielding
+# a 37.7 MiB wheel. Fat LTO reached 71.3 MiB but retains uni-db's CI memory risk,
+# so thin LTO remains the publishable-wheel default.
 #
 # So `codegen-units` is the memory-hungry knob, and peak rustc RSS — not wall
 # time — is what actually constrains the choice. Runners too small to hold the
@@ -227,5 +232,6 @@ strip = "symbols"
 # Named `dist`, not `publish` — Cargo reserves the latter as a profile name.
 [profile.dist]
 inherits = "release"
+opt-level = "z"
 lto = "thin"
 codegen-units = 1

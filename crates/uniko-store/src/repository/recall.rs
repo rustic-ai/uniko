@@ -244,7 +244,9 @@ impl KnowledgeBase {
             arms.push(a);
         }
         // Chunk — only under a session-only scope (no time/participant
-        // anchor on a chunk); owned by an in-scope Session or Message.
+        // anchor on a chunk); owned by an in-scope Session or Message, or
+        // by an Artifact attached directly to the Session / to one of its
+        // Messages.
         if want_session && !want_part && !want_time {
             arms.push(String::from(
                 "MATCH (sc:Session)-[:HAS_CHUNK]->(m:Chunk) \
@@ -253,6 +255,16 @@ impl KnowledgeBase {
             arms.push(String::from(
                 "MATCH (msg:Message)-[:HAS_CHUNK]->(m:Chunk) \
                  MATCH (msg)-[:IN_SESSION]->(sc:Session) \
+                 WHERE sc.session_id IN $sessions RETURN id(m) AS nid",
+            ));
+            arms.push(String::from(
+                "MATCH (a:Artifact)-[:HAS_CHUNK]->(m:Chunk) \
+                 MATCH (a)-[:ATTACHED_TO]->(sc:Session) \
+                 WHERE sc.session_id IN $sessions RETURN id(m) AS nid",
+            ));
+            arms.push(String::from(
+                "MATCH (a:Artifact)-[:HAS_CHUNK]->(m:Chunk) \
+                 MATCH (a)-[:ATTACHED_TO]->(:Message)-[:IN_SESSION]->(sc:Session) \
                  WHERE sc.session_id IN $sessions RETURN id(m) AS nid",
             ));
         }
@@ -701,7 +713,12 @@ impl KnowledgeBase {
     }
 
     /// Per-variant chunk hybrid (vector+BM25 over `session`/`observation`
-    /// chunks) plus the entity-scoped fan-out, max-merged per node id.
+    /// chunks and Artifact-owned chunks) plus the entity-scoped fan-out,
+    /// max-merged per node id.
+    ///
+    /// `session` and `observation` each receive `per_variant_limit` candidates;
+    /// the Artifact-owned arm receives twice that limit, preserving the former
+    /// combined `block` + `page` budget without enumerating Artifact types.
     ///
     /// Infallible by contract: individual sub-queries that fail are logged
     /// at debug and skipped (the cascade is best-effort). The structural
@@ -731,8 +748,10 @@ impl KnowledgeBase {
         let has_vec = !qvec.is_empty();
         let t_start = std::time::Instant::now();
 
-        // Hybrid (vector + BM25) over chunk types — same query shape, only
-        // the chunk_type filter differs.
+        // Hybrid (vector + BM25) over conversational chunks plus every chunk
+        // owned by an Artifact. Artifact chunk types are intentionally open:
+        // text, heading, PDF, code, structured, and future chunkers all flow
+        // through the HAS_CHUNK ownership boundary.
         let (sources, queries, fusion, needs_qvec, needs_qtxt) = if has_vec {
             (
                 "[m.embedding, m.text]",
@@ -745,10 +764,10 @@ impl KnowledgeBase {
             ("m.text", "$qtxt", String::new(), false, true)
         };
 
-        // "block" covers tiered-PDF doc-IR chunks (one per :Block); "page"
-        // covers the legacy text-only PDF path. Both were previously absent
-        // here, so PDF chunks were silently unrecallable.
-        for chunk_type in ["session", "observation", "block", "page"] {
+        // Preserve the historical per-type conversational budgets: a dense
+        // Artifact must not consume the slots reserved for session or
+        // observation chunks before RRF fusion.
+        for chunk_type in ["session", "observation"] {
             let cypher = format!(
                 "MATCH (m:Chunk) WHERE m.chunk_type = $ctype{allow_and} \
                  RETURN id(m) AS nid, labels(m)[0] AS lbl, \
@@ -756,9 +775,10 @@ impl KnowledgeBase {
                         similar_to({sources}, {queries}{fusion}) AS score \
                  ORDER BY score DESC LIMIT $lim"
             );
-            let mut builder = session.query_with(&cypher);
-            builder = builder.param("ctype", chunk_type);
-            builder = builder.param("lim", per_variant_limit);
+            let mut builder = session
+                .query_with(&cypher)
+                .param("ctype", chunk_type)
+                .param("lim", per_variant_limit);
             if let Some(v) = allow_param(allow) {
                 builder = builder.param("allow", v);
             }
@@ -772,6 +792,33 @@ impl KnowledgeBase {
                 Ok(result) => merge_scored_rows(result.rows(), &mut scored),
                 Err(e) => tracing::debug!(chunk_type, error = %e, "hybrid similar_to failed"),
             }
+        }
+
+        // The former block/page arms each had their own limit. Artifact
+        // ownership replaces both closed type checks, so retain their combined
+        // 2 × limit as one open-ended Artifact candidate budget.
+        let artifact_limit = per_variant_limit.saturating_mul(2);
+        let cypher = format!(
+            "MATCH (m:Chunk) \
+             WHERE (m)<-[:HAS_CHUNK]-(:Artifact){allow_and} \
+             RETURN id(m) AS nid, labels(m)[0] AS lbl, \
+                    m.text AS content, \
+                    similar_to({sources}, {queries}{fusion}) AS score \
+             ORDER BY score DESC LIMIT $lim"
+        );
+        let mut builder = session.query_with(&cypher).param("lim", artifact_limit);
+        if let Some(v) = allow_param(allow) {
+            builder = builder.param("allow", v);
+        }
+        if needs_qvec {
+            builder = builder.param("qvec", Value::Vector(qvec.to_vec()));
+        }
+        if needs_qtxt {
+            builder = builder.param("qtxt", qtxt);
+        }
+        match builder.fetch_all().await {
+            Ok(result) => merge_scored_rows(result.rows(), &mut scored),
+            Err(e) => tracing::debug!(error = %e, "Artifact hybrid similar_to failed"),
         }
         let chunk_ms = t_start.elapsed().as_millis() as u64;
 

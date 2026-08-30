@@ -77,6 +77,56 @@ async fn allow_set_filters_by_session() {
 }
 
 #[tokio::test]
+async fn session_scope_includes_attached_artifact_chunks() {
+    let kb = test_kb().await;
+    let s1 = mk_session(&kb, "s1").await;
+    let s2 = mk_session(&kb, "s2").await;
+    let m1 = mk_msg(&kb, "m1", "alpha one", "2024-01-01T00:00:00Z", s1).await;
+
+    let mut chunk_ids = Vec::new();
+    for (i, (attachment, target)) in [
+        ("direct-session", s1),
+        ("through-message", m1),
+        ("other-session", s2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut artifact_props = HashMap::new();
+        artifact_props.insert(
+            "artifact_id".into(),
+            Value::String(format!("scope-artifact-{i}")),
+        );
+        artifact_props.insert("kind".into(), Value::String("text".into()));
+        let artifact = kb.create_node("Artifact", &artifact_props).await.unwrap();
+
+        let mut chunk_props = HashMap::new();
+        chunk_props.insert("chunk_id".into(), Value::String(format!("scope-chunk-{i}")));
+        chunk_props.insert("text".into(), Value::String(attachment.into()));
+        chunk_props.insert("chunk_type".into(), Value::String("text".into()));
+        let chunk = kb.create_node("Chunk", &chunk_props).await.unwrap();
+        kb.create_edge("HAS_CHUNK", artifact, chunk, &HashMap::new())
+            .await
+            .unwrap();
+        kb.create_edge("ATTACHED_TO", artifact, target, &HashMap::new())
+            .await
+            .unwrap();
+        chunk_ids.push(chunk);
+    }
+
+    let filter = ScopeFilter {
+        sessions: Some(vec!["s1".into()]),
+        ..Default::default()
+    };
+    let allow = allow_set(&kb, &filter).await;
+    assert!(allow.contains(&chunk_ids[0]));
+    assert!(allow.contains(&chunk_ids[1]));
+    assert!(!allow.contains(&chunk_ids[2]));
+
+    kb.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn allow_set_filters_by_time() {
     let kb = test_kb().await;
     let s1 = mk_session(&kb, "s1").await;

@@ -311,7 +311,12 @@ fn decode_entities(s: &str) -> String {
         }
         // We're at '&'. Find the terminating ';' within a sane window.
         let rest = &s[i..];
-        let Some(semi) = rest[..rest.len().min(10)].find(';') else {
+        let Some(semi) = rest
+            .as_bytes()
+            .iter()
+            .take(10)
+            .position(|&byte| byte == b';')
+        else {
             out.push('&');
             i += 1;
             continue;
@@ -475,6 +480,13 @@ mod tests {
             combined.contains("—"),
             "hex entity not decoded: {combined:?}"
         );
+    }
+
+    #[test]
+    fn test_entity_scan_without_terminator_is_utf8_safe() {
+        for input in ["&12345678–", "&12345678¹", "&12345678×"] {
+            assert_eq!(decode_entities(input), input);
+        }
     }
 
     #[test]

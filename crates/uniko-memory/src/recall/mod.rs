@@ -760,48 +760,72 @@ async fn populate_sources(
     // tiered-PDF page→block chain). An Artifact that is `ATTACHED_TO` a
     // message is an Attachment; otherwise a standalone Document.
     if !chunk_ids.is_empty() {
-        let rows = kb
+        // Keep the ownership alternatives as separate MATCHes. Besides being
+        // easier to extend, this avoids a chain of OPTIONAL MATCHes turning a
+        // present Artifact owner into NULL when another ownership arm misses.
+        let message_rows = kb
             .query_cypher(
-                "MATCH (c:Chunk) WHERE id(c) IN $ids \
-                 OPTIONAL MATCH (m:Message)-[:HAS_CHUNK]->(c) \
-                 OPTIONAL MATCH (a:Artifact)-[:HAS_CHUNK]->(c) \
-                 OPTIONAL MATCH (ap:Artifact)-[:HAS_PAGE]->(:Page)-[:CONTAINS]->(:Block)-[:HAS_CHUNK]->(c) \
-                 RETURN id(c) AS cid, m.message_id AS mid, a.artifact_id AS aid, \
-                        ap.artifact_id AS aid2, c.chunk_id AS chid",
+                "MATCH (m:Message)-[:HAS_CHUNK]->(c:Chunk) WHERE id(c) IN $ids \
+                 RETURN id(c) AS cid, m.message_id AS mid, c.chunk_id AS chid",
                 &ids_param(&chunk_ids),
             )
             .await?;
-        let artifact_ids: Vec<String> = rows
+        let mut artifact_rows = kb
+            .query_cypher(
+                "MATCH (a:Artifact)-[:HAS_CHUNK]->(c:Chunk) WHERE id(c) IN $ids \
+                 RETURN id(c) AS cid, a.artifact_id AS aid, c.chunk_id AS chid",
+                &ids_param(&chunk_ids),
+            )
+            .await?;
+        artifact_rows.extend(
+            kb.query_cypher(
+                "MATCH (a:Artifact)-[:HAS_PAGE]->(:Page)-[:CONTAINS]->(:Block)-[:HAS_CHUNK]->(c:Chunk) \
+                 WHERE id(c) IN $ids \
+                 RETURN id(c) AS cid, a.artifact_id AS aid, c.chunk_id AS chid",
+                &ids_param(&chunk_ids),
+            )
+            .await?,
+        );
+
+        for r in &message_rows {
+            let (Some(cid), Some(message_id)) = (row_int(r, "cid"), row_str(r, "mid")) else {
+                continue;
+            };
+            let src = RecallSource::Message {
+                message_id,
+                chunk_id: row_str(r, "chid"),
+            };
+            let entry = sources.entry(cid).or_default();
+            if !entry.contains(&src) {
+                entry.push(src);
+            }
+        }
+
+        let artifact_ids: Vec<String> = artifact_rows
             .iter()
-            .filter_map(|r| row_str(r, "aid").or_else(|| row_str(r, "aid2")))
+            .filter_map(|r| row_str(r, "aid"))
             .collect();
         let attached = attachment_messages(kb, &artifact_ids).await?;
-        for r in &rows {
-            let Some(cid) = row_int(r, "cid") else {
+        for r in &artifact_rows {
+            let (Some(cid), Some(artifact_id)) = (row_int(r, "cid"), row_str(r, "aid")) else {
                 continue;
             };
             let chunk_id = row_str(r, "chid");
-            let src = if let Some(message_id) = row_str(r, "mid") {
-                RecallSource::Message {
-                    message_id,
+            let src = match attached.get(&artifact_id) {
+                Some(message_id) => RecallSource::Attachment {
+                    message_id: message_id.clone(),
+                    artifact_id,
                     chunk_id,
-                }
-            } else if let Some(artifact_id) = row_str(r, "aid").or_else(|| row_str(r, "aid2")) {
-                match attached.get(&artifact_id) {
-                    Some(message_id) => RecallSource::Attachment {
-                        message_id: message_id.clone(),
-                        artifact_id,
-                        chunk_id,
-                    },
-                    None => RecallSource::Document {
-                        artifact_id,
-                        chunk_id,
-                    },
-                }
-            } else {
-                continue;
+                },
+                None => RecallSource::Document {
+                    artifact_id,
+                    chunk_id,
+                },
             };
-            sources.entry(cid).or_default().push(src);
+            let entry = sources.entry(cid).or_default();
+            if !entry.contains(&src) {
+                entry.push(src);
+            }
         }
     }
 
