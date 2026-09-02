@@ -31,7 +31,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
@@ -44,13 +44,13 @@ categories = ["database", "text-processing"]
 
 [workspace.dependencies]
 # Internal crates (version required so `cargo publish` accepts the path deps)
-uniko-store = { path = "crates/uniko-store", version = "0.2.0" }
-uniko-pipes = { path = "crates/uniko-pipes", version = "0.2.0" }
-uniko-extract = { path = "crates/uniko-extract", version = "0.2.0" }
-uniko-memory = { path = "crates/uniko-memory", version = "0.2.0" }
-uniko-cortex = { path = "crates/uniko-cortex", version = "0.2.0" }
-uniko-api = { path = "crates/uniko-api", version = "0.2.0" }
-uniko-bench = { path = "crates/uniko-bench", version = "0.2.0" }
+uniko-store = { path = "crates/uniko-store", version = "0.2.1" }
+uniko-pipes = { path = "crates/uniko-pipes", version = "0.2.1" }
+uniko-extract = { path = "crates/uniko-extract", version = "0.2.1" }
+uniko-memory = { path = "crates/uniko-memory", version = "0.2.1" }
+uniko-cortex = { path = "crates/uniko-cortex", version = "0.2.1" }
+uniko-api = { path = "crates/uniko-api", version = "0.2.1" }
+uniko-bench = { path = "crates/uniko-bench", version = "0.2.1" }
 
 # Database — uni-db default features already include lance-backend,
 # provider-onnx (embeddings + NLP + reranker), and every remote provider.
