@@ -96,6 +96,17 @@ pub struct KnowledgeBase {
     /// key namespaces (`fact:…`, `entity:…`, `node:…`) so collisions
     /// across sites are themselves harmless.
     pub(crate) rmw_locks: Arc<crate::locks::StripedLocks>,
+    /// Per-key striped locks for the coarse session/sender *setup*
+    /// critical section ([`KnowledgeBase::lock_session_setup`]).
+    ///
+    /// Deliberately a SEPARATE table from [`Self::rmw_locks`]: the setup
+    /// guards are held across `merge_node`, which takes a `node:…` lock
+    /// on `rmw_locks`. Sharing one table lets a `session:…`/`participant:…`
+    /// key and the nested `node:…` key hash to the same stripe, and the
+    /// task then blocks forever on the non-reentrant mutex it already
+    /// holds (issue #36). Distinct tables make the nested acquisition
+    /// structurally independent of the outer one.
+    pub(crate) setup_locks: Arc<crate::locks::StripedLocks>,
 }
 
 impl KnowledgeBase {
@@ -136,6 +147,7 @@ impl KnowledgeBase {
             config,
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
+            setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
         }
         .finalize_init()
         .await
@@ -206,6 +218,7 @@ impl KnowledgeBase {
             config,
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
+            setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
         }
         .finalize_init()
         .await
@@ -293,6 +306,7 @@ impl KnowledgeBase {
             config,
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
+            setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
         }
         .finalize_init()
         .await
@@ -459,6 +473,17 @@ impl KnowledgeBase {
     /// scope. Keys are de-duplicated and sorted so concurrent callers
     /// acquire shared keys in the same order, preventing deadlock (mirrors
     /// [`KnowledgeBase::lock_entity_ids`]).
+    ///
+    /// These guards come from [`Self::setup_locks`], a lock table separate
+    /// from [`Self::rmw_locks`], because the caller holds them across
+    /// [`merge_node`](Self::merge_node), which itself takes a `node:…`
+    /// `rmw_locks` stripe. On a shared table an outer setup key and that
+    /// nested node key can hash to the same stripe and self-deadlock on a
+    /// non-reentrant `tokio::sync::Mutex` (issue #36). Callers must NOT
+    /// take an outer `rmw_locks` guard (e.g. via
+    /// [`lock_entity_ids`](Self::lock_entity_ids)) around these, so the
+    /// two domains stay strictly ordered setup-then-RMW and no AB/BA
+    /// cycle across domains is possible.
     pub async fn lock_session_setup(
         &self,
         session_id: &str,
@@ -471,7 +496,22 @@ impl KnowledgeBase {
         // `lock_many` dedups by stripe index: the session and participant
         // keys can hash to the same stripe, and acquiring that
         // non-reentrant stripe twice would self-deadlock.
-        self.rmw_locks.lock_many(&keys).await
+        self.setup_locks.lock_many(&keys).await
+    }
+
+    /// Rebuild both striped lock tables with `n` stripes each.
+    ///
+    /// Test-support only: `n == 1` forces every key in a domain onto one
+    /// stripe, which turns the probabilistic collisions behind issue #36
+    /// into a deterministic one so a regression test does not depend on
+    /// hash luck. Call it before any concurrent work on the KB — replacing
+    /// the tables drops any guards' backing mutexes for other clones.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_lock_stripes(mut self, n: usize) -> Self {
+        self.rmw_locks = Arc::new(crate::locks::StripedLocks::new(n));
+        self.setup_locks = Arc::new(crate::locks::StripedLocks::new(n));
+        self
     }
 
     /// Runtime configuration.

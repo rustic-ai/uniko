@@ -379,3 +379,72 @@ pub(crate) fn json_to_uni_value(v: &serde_json::Value) -> Value {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use uniko_pipes::types::IngestMessage;
+    use uniko_store::KnowledgeBase;
+    use uniko_store::config::UnikoConfig;
+
+    use super::ensure_session_and_sender;
+    use crate::ingest::context::SessionContext;
+
+    /// Regression for issue #36: `ensure_session_and_sender` holds the
+    /// session-setup guards across `ensure_participant`, which locks
+    /// again inside `merge_node`. When both acquisitions came from one
+    /// striped table, a session/participant key that hashed to the same
+    /// stripe as the nested `node:Participant\0participant_id\0…` key
+    /// deadlocked the task on a mutex it already held.
+    ///
+    /// One stripe per table makes that collision certain instead of
+    /// ~0.4% likely, so this fails deterministically on the old code
+    /// (hangs until the timeout) and passes on the separated domains.
+    #[tokio::test]
+    async fn session_setup_does_not_deadlock_on_nested_participant_merge() {
+        let kb = KnowledgeBase::in_memory(UnikoConfig::default())
+            .await
+            .expect("in-memory KB")
+            .with_lock_stripes(1);
+
+        let msg = IngestMessage {
+            message_id: "m-1".into(),
+            content: "hello".into(),
+            content_type: "text".into(),
+            sender_id: "assistant".into(),
+            session_id: "sharegpt_T1EiHWI_13".into(),
+            addressed_to: None,
+            timestamp: chrono::Utc::now(),
+            metadata: std::collections::HashMap::new(),
+        };
+        let mut ctx = SessionContext::new(msg.session_id.clone(), 0);
+
+        let (session_nid, participant_nid) = tokio::time::timeout(
+            Duration::from_secs(30),
+            ensure_session_and_sender(&kb, &msg, &mut ctx),
+        )
+        .await
+        .expect("session setup must not self-deadlock on a colliding stripe")
+        .expect("session setup must succeed");
+
+        assert_ne!(session_nid, 0, "session node must be created");
+        assert_ne!(participant_nid, 0, "participant node must be created");
+
+        // Second message on the same session/sender with a cold context
+        // re-enters the whole locked path (both rows now exist, so the
+        // merge takes its update branch under the same nesting).
+        let mut cold_ctx = SessionContext::new(msg.session_id.clone(), 0);
+        let (s2, p2) = tokio::time::timeout(
+            Duration::from_secs(30),
+            ensure_session_and_sender(&kb, &msg, &mut cold_ctx),
+        )
+        .await
+        .expect("repeat session setup must not self-deadlock")
+        .expect("repeat session setup must succeed");
+        assert_eq!(s2, session_nid, "session must not be duplicated");
+        assert_eq!(p2, participant_nid, "participant must not be duplicated");
+
+        kb.shutdown().await.unwrap();
+    }
+}

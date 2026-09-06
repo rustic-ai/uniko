@@ -25,8 +25,18 @@
 //!   probability at 10 concurrent keys.
 //! - Async-safe: holders may `.await` (uni-db tx commit is async), so
 //!   stripes are [`tokio::sync::Mutex`] rather than [`std::sync::Mutex`].
-//! - No reentrancy: no site currently re-enters with the same key.  If
-//!   a future site does, it must drop the outer guard first.
+//! - No reentrancy: stripes are non-reentrant `tokio::sync::Mutex`es, so
+//!   a task that acquires a stripe it already holds blocks forever. This
+//!   is not only about re-entering with the same *key*: two different
+//!   keys collide whenever they hash to the same stripe, so any nested
+//!   acquisition on one table is a latent self-deadlock (issue #36 —
+//!   `session:…` and `node:Participant\0participant_id\0…` landed on
+//!   stripe 149 of 256). A site that must hold a lock across a callee
+//!   that locks again therefore uses a SEPARATE `StripedLocks` table
+//!   (see [`crate::KnowledgeBase::lock_session_setup`] vs the
+//!   `rmw_locks` table), never a larger stripe count — more stripes only
+//!   lower the collision probability. Nested domains must be acquired in
+//!   a fixed global order (setup before RMW) to keep them AB/BA-free.
 //! - No timeout / no `try_lock`: RMW critical sections complete in
 //!   milliseconds; a timeout would introduce partial-success states.
 //!
@@ -182,6 +192,9 @@ pub(crate) fn content_lock_key(content_id: &str) -> Vec<u8> {
 /// Serializes the first-sight get-or-create of the Session node so
 /// concurrent ingests with independent `SessionContext`s don't race into
 /// a duplicate or an SSI antidependency conflict.
+///
+/// Hashed in the dedicated *setup* lock table, not the general RMW one —
+/// see [`crate::KnowledgeBase::lock_session_setup`].
 #[must_use]
 pub(crate) fn session_lock_key(session_id: &str) -> Vec<u8> {
     let mut k = Vec::with_capacity(8 + session_id.len());
@@ -194,6 +207,9 @@ pub(crate) fn session_lock_key(session_id: &str) -> Vec<u8> {
 ///
 /// Serializes the first-sight ensure of the Participant node and its
 /// `PARTICIPATED_IN` edge against the same antidependency race.
+///
+/// Hashed in the dedicated *setup* lock table, not the general RMW one —
+/// see [`crate::KnowledgeBase::lock_session_setup`].
 #[must_use]
 pub(crate) fn participant_lock_key(participant_id: &str) -> Vec<u8> {
     let mut k = Vec::with_capacity(12 + participant_id.len());

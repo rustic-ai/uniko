@@ -22,6 +22,7 @@ mod schema_completeness;
 mod schema_tests;
 mod scope_tests;
 mod search_tests;
+mod session_setup_lock_tests;
 mod storage_tests;
 mod traversal_tests;
 mod unwind_batch_test;
