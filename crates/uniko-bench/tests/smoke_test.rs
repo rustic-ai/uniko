@@ -54,41 +54,12 @@ fn msg(id: &str, content: &str, sender: &str) -> IngestMessage {
     }
 }
 
-/// Run an async test body on a thread with enough stack for recall.
-///
-/// An ingest-plus-recall pass needs more than the 2 MiB libtest gives a
-/// spawned thread (it passes at 2 MiB, overflows at 1 MiB), and under parallel
-/// load that margin vanishes — the process aborts with SIGABRT rather than
-/// failing an assertion, invalidating whatever else the run reported.
-///
-/// This is done per test rather than globally because there is no global lever:
-/// nextest 0.9.143 ignores a top-level `[env]` key in its config (it warns and
-/// carries on), and `RUST_MIN_STACK` in the environment also governs rustc's
-/// threads, so shrinking it breaks the build instead.
-///
-/// The depth is in the store's query execution, not uniko's frames — see
-/// `crates/uniko-store/tests/stack_depth_repro.rs`.
-pub fn with_recall_stack<F: std::future::Future<Output = ()> + Send + 'static>(body: F) {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime")
-                .block_on(body);
-        })
-        .expect("spawn test thread")
-        .join()
-        .expect("test thread panicked");
-}
-
-#[test]
-fn test_ingest_and_recall() {
-    with_recall_stack(ingest_and_recall_body());
-}
-
-async fn ingest_and_recall_body() {
+// Stack: an ingest-plus-recall pass needs more than the 2 MiB a spawned thread
+// gets by default. `RUST_MIN_STACK` is raised for every test in
+// `.cargo/config.toml` — see the note there for why it is global rather than
+// per test.
+#[tokio::test]
+async fn test_ingest_and_recall() {
     let kb = make_kb().await;
 
     eprintln!("--- Ingesting messages ---");

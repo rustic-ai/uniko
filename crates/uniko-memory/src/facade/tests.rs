@@ -523,36 +523,6 @@ async fn text_query(kb: &KnowledgeBase, cypher: &str) -> Vec<String> {
         .collect()
 }
 
-/// Run an async test body on a thread with enough stack for recall.
-///
-/// An ingest-plus-recall pass needs more than the 2 MiB libtest gives a
-/// spawned thread: it passes at 2 MiB and overflows at 1 MiB, so under
-/// parallel load the margin disappears and the process aborts with SIGABRT
-/// instead of failing an assertion — which invalidates everything else that
-/// run reported.
-///
-/// Per test rather than global, because there is no global lever here:
-/// nextest 0.9.143 silently ignores a top-level `[env]` key in its config
-/// (it warns and continues), and setting `RUST_MIN_STACK` in the environment
-/// also governs rustc's own threads, so shrinking it breaks the build.
-///
-/// The depth is in the store's query execution, not in uniko's frames — see
-/// `crates/uniko-store/tests/stack_depth_repro.rs` for what that rules out.
-fn with_recall_stack<F: std::future::Future<Output = ()> + Send + 'static>(body: F) {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime")
-                .block_on(body);
-        })
-        .expect("spawn test thread")
-        .join()
-        .expect("test thread panicked");
-}
-
 async fn seed_participant(kb: &KnowledgeBase, pid: &str) {
     let mut props = HashMap::new();
     props.insert("kind".to_string(), Value::String("agent".into()));
@@ -2933,12 +2903,8 @@ async fn reusing_a_revision_with_changed_content_is_rejected() {
 ///
 /// The deferred variant is resolved inside `recall` rather than only in the
 /// facade, so it cannot reach the fail-open arm.
-#[test]
-fn scope_as_participant_filters_private_facts() {
-    with_recall_stack(scope_as_participant_body());
-}
-
-async fn scope_as_participant_body() {
+#[tokio::test]
+async fn scope_as_participant_filters_private_facts() {
     let Ok(memory) = Uniko::in_memory().await else {
         eprintln!("skipping: in-memory instance unavailable (no model?)");
         return;

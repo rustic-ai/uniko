@@ -58,17 +58,17 @@ single store query is deep (see
 the overflow lands on uni-db's `uni-io` thread. So give it headroom rather
 than trying to shrink it:
 
-- a test that drives ingest + recall must run its body on an explicit
-  16 MiB thread. Both `crates/uniko-bench/tests/smoke_test.rs` and
-  `crates/uniko-memory/src/facade/tests.rs` define a `with_recall_stack`
-  helper for this; use it for any new test that calls `recall`.
+- `RUST_MIN_STACK` is raised to 16 MiB for every test via `[env]` in
+  `.cargo/config.toml`. Raising it is safe — it is a MINIMUM, so rustc's own
+  threads only benefit; *lowering* it is what aborts the compiler.
 
-  There is no global lever, and two attempts at one failed: nextest 0.9.143
-  **silently ignores** a top-level `[env]` key in `.config/nextest.toml` (it
-  emits `ignoring unknown configuration key: env` and carries on), and
-  `RUST_MIN_STACK` in the environment also governs rustc's threads, so
-  lowering it aborts the compiler instead. If you add a global mechanism,
-  verify it by shrinking the stack until a test that should fail does;
+  Two narrower attempts failed first, and both looked like they worked:
+  per-test threads only covered the tests that happened to fail locally, and
+  CI then aborted on two different ones; and a top-level `[env]` in
+  `.config/nextest.toml` is silently ignored by nextest 0.9.143, which prints
+  `ignoring unknown configuration key: env` and carries on. Verify any change
+  to this by setting the value LOW and confirming a recall test aborts — if it
+  still passes, the lever is not reaching the test process;
 - a host embedding uniko should size the thread that calls `recall` (for tokio,
   `Builder::thread_stack_size`), or call it from the main thread.
 
