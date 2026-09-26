@@ -66,6 +66,21 @@ impl PyScope {
         slf
     }
 
+    /// Scope visibility to a participant: filter the bundle to what they are
+    /// allowed to see (private / team / org visibility).
+    ///
+    /// Their team and org memberships are resolved from the graph at recall
+    /// time, so no store handle is needed here.
+    ///
+    /// Worth using deliberately: an unscoped read is **fail-open**
+    /// (`ViewerScope::Unrestricted`), so without this Python callers get no
+    /// Fact/Observation visibility filtering unless the instance was built
+    /// with `scope_to_agent()`.
+    fn as_participant<'py>(slf: PyRef<'py, Self>, participant_id: String) -> PyRef<'py, Self> {
+        slf.map(|s| s.as_participant(participant_id));
+        slf
+    }
+
     /// Include superseded revisions and retired sources — historical recall
     /// (issue #41).
     ///

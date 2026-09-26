@@ -54,39 +54,12 @@ fn msg(id: &str, content: &str, sender: &str) -> IngestMessage {
     }
 }
 
-/// Stack for the test thread.
-///
-/// The default is 2 MiB — libtest runs each test on a spawned thread, not the
-/// 8 MiB main thread — and an ingest-plus-recall pass sits right at that
-/// limit: it passes at 2 MiB and overflows deterministically at 1 MiB. Under
-/// full-suite load a slightly deeper call chain tipped it over in roughly
-/// half of runs, aborting the process with SIGABRT rather than failing an
-/// assertion, which silently invalidated whatever else that run reported.
-///
-/// The depth is inside the store's query execution (recursive query planning),
-/// not in uniko's own frames: boxing the large ingest/recall futures moved the
-/// 1 MiB threshold not at all. So this asks for headroom rather than
-/// pretending the requirement is smaller than it is.
-const TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
-
-#[test]
-fn test_ingest_and_recall() {
-    std::thread::Builder::new()
-        .stack_size(TEST_STACK_BYTES)
-        .name("test_ingest_and_recall".into())
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime")
-                .block_on(ingest_and_recall_body());
-        })
-        .expect("spawn test thread")
-        .join()
-        .expect("test thread panicked");
-}
-
-async fn ingest_and_recall_body() {
+// Stack: an ingest-plus-recall pass needs more than the 2 MiB a spawned thread
+// gets by default. `RUST_MIN_STACK` is raised for every test in
+// `.cargo/config.toml` — see the note there for why it is global rather than
+// per test.
+#[tokio::test]
+async fn test_ingest_and_recall() {
     let kb = make_kb().await;
 
     eprintln!("--- Ingesting messages ---");

@@ -256,6 +256,15 @@ pub enum ViewerScope {
     /// Filter the returned bundle to what this [`crate::policy::Viewer`]
     /// is allowed to see (private/team/org visibility).
     As(crate::policy::Viewer),
+    /// Filter as this participant, resolving their team/org memberships from
+    /// the graph at recall time.
+    ///
+    /// Equivalent to [`Self::As`] but deferred: building a
+    /// [`Viewer`](crate::policy::Viewer) is async and needs a store handle,
+    /// so a caller who only knows a participant id — notably any caller
+    /// coming through the Python bindings, which are given no store handle —
+    /// could not express viewer-scoped recall at all.
+    AsParticipant(String),
 }
 
 /// Dimensional hard-filters applied during recall candidate generation.
@@ -414,6 +423,20 @@ impl Scope {
     #[must_use]
     pub fn as_viewer(mut self, viewer: crate::policy::Viewer) -> Self {
         self.viewer = ViewerScope::As(viewer);
+        self
+    }
+
+    /// Scope visibility to a participant, resolving their memberships at
+    /// recall time.
+    ///
+    /// Use this when you have a participant id rather than a built
+    /// [`Viewer`](crate::policy::Viewer) — constructing one is async and
+    /// needs a store handle. Unscoped reads are fail-open
+    /// ([`ViewerScope::Unrestricted`]), so a caller serving a specific
+    /// participant should pass this rather than relying on the default.
+    #[must_use]
+    pub fn as_participant(mut self, participant_id: impl Into<String>) -> Self {
+        self.viewer = ViewerScope::AsParticipant(participant_id.into());
         self
     }
 }
@@ -802,6 +825,15 @@ pub async fn recall(
     match &config.viewer {
         ViewerScope::As(viewer) => {
             crate::policy::filter_bundle(kb, &mut bundle, viewer).await?;
+        }
+        // Resolve the deferred variant HERE rather than letting it reach the
+        // fail-open arm. Doing it inside `recall` rather than only in the
+        // facade means every caller is covered, and a future variant that
+        // forgets to resolve cannot silently skip access control — the match
+        // is exhaustive and `Unrestricted` is the only fail-open arm.
+        ViewerScope::AsParticipant(participant_id) => {
+            let viewer = crate::policy::Viewer::new(kb, participant_id).await?;
+            crate::policy::filter_bundle(kb, &mut bundle, &viewer).await?;
         }
         ViewerScope::Unrestricted => {
             if bundle

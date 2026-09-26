@@ -58,8 +58,17 @@ single store query is deep (see
 the overflow lands on uni-db's `uni-io` thread. So give it headroom rather
 than trying to shrink it:
 
-- a test that drives ingest + recall should run on an explicit thread — see
-  `crates/uniko-bench/tests/smoke_test.rs`, which uses 16 MiB;
+- `RUST_MIN_STACK` is raised to 16 MiB for every test via `[env]` in
+  `.cargo/config.toml`. Raising it is safe — it is a MINIMUM, so rustc's own
+  threads only benefit; *lowering* it is what aborts the compiler.
+
+  Two narrower attempts failed first, and both looked like they worked:
+  per-test threads only covered the tests that happened to fail locally, and
+  CI then aborted on two different ones; and a top-level `[env]` in
+  `.config/nextest.toml` is silently ignored by nextest 0.9.143, which prints
+  `ignoring unknown configuration key: env` and carries on. Verify any change
+  to this by setting the value LOW and confirming a recall test aborts — if it
+  still passes, the lever is not reaching the test process;
 - a host embedding uniko should size the thread that calls `recall` (for tokio,
   `Builder::thread_stack_size`), or call it from the main thread.
 

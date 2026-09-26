@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-26
+
 ### Breaking
 
 - **`ModalityExtractor::extract` is replaced by `prepare` + `apply_in_tx`,**
@@ -606,5 +608,6 @@ pip install uniko-cuda    # NVIDIA CUDA, Linux x86_64
 pip install uniko-metal   # Apple Silicon, macOS arm64
 ```
 
+[0.3.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.3.0
 [0.2.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.2.0
 [0.1.1]: https://github.com/rustic-ai/uniko/releases/tag/v0.1.1

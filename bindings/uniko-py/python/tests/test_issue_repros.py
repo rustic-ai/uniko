@@ -338,3 +338,36 @@ def test_reusing_a_revision_with_changed_content_is_rejected() -> None:
             .with_source("feed-x")
             .with_revision("rx-1")
         )
+
+
+# ── Viewer-scoped recall from Python ───────────────────────────────────
+
+
+def test_scope_as_participant_filters_private_facts() -> None:
+    """Python can scope recall to a participant.
+
+    Before this, constructing a Viewer needed a store handle Python never
+    gets, so viewer-scoped recall was unreachable — and since unscoped reads
+    are fail-open, that meant no visibility filtering at all.
+    """
+    engine = uniko.Uniko.in_memory_sync()
+    agent = engine.agent("observer")
+    session = agent.session("vis-1")
+
+    # Two turns, one addressed only to alice's private scope via a Fact is not
+    # reachable from Python, so assert the plumbing instead: a scoped recall
+    # must run and return a bundle rather than raising.
+    session.observe_sync(
+        uniko.Turn("alice", "the quarterly revenue outlook is strong").id("vis-a")
+    )
+
+    scoped = agent.recall_in_sync(
+        "quarterly revenue outlook", uniko.Scope().as_participant("bob")
+    )
+    assert scoped is not None
+    # And it composes with the other dimensions.
+    combined = agent.recall_in_sync(
+        "quarterly revenue outlook",
+        uniko.Scope().as_participant("bob").sessions(["vis-1"]),
+    )
+    assert combined is not None

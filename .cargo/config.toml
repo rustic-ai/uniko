@@ -30,3 +30,26 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 # 32-bit `libcuda.so` under /usr/lib and fail with "incompatible with
 # elf64-x86-64". If you hit that, point `linker` at a small `cc` wrapper that
 # drops `-L /usr/lib` from argv. See CONTRIBUTING.md for details.
+
+# ── Test thread stack ──────────────────────────────────────────────────
+# An ingest-plus-recall pass needs more than the 2 MiB a spawned thread gets
+# by default: it passes at 2 MiB and overflows deterministically at 1 MiB.
+# libtest runs each test on a spawned thread, so any test that drives recall
+# sits on that edge, and under parallel load it tips over — aborting the
+# process with SIGABRT rather than failing an assertion, which invalidates
+# whatever else the run reported.
+#
+# Raising the floor here is safe: `RUST_MIN_STACK` is a MINIMUM, and rustc's
+# own threads only benefit. (Lowering it is what breaks the build — at 1 MiB
+# the compiler itself aborts.)
+#
+# Set globally after two narrower attempts failed. Per-test threads only
+# covered the tests that happened to fail locally, and CI promptly aborted on
+# two different ones. A top-level `[env]` in `.config/nextest.toml` is NOT a
+# substitute: nextest 0.9.143 prints `ignoring unknown configuration key: env`
+# and carries on, so that attempt was a silent no-op.
+#
+# The depth is in the store's query execution, not uniko's frames — see
+# `crates/uniko-store/tests/stack_depth_repro.rs` for what that rules out.
+[env]
+RUST_MIN_STACK = "16777216"

@@ -2892,3 +2892,72 @@ async fn reusing_a_revision_with_changed_content_is_rejected() {
     drop(agent);
     memory.shutdown().await.expect("shutdown");
 }
+
+/// `Scope::as_participant` actually filters, and does not fail open.
+///
+/// This closes a real asymmetry: constructing a `Viewer` is async and needs a
+/// store handle, so before this the Python bindings could not express
+/// viewer-scoped recall at all — and because unscoped reads are fail-open,
+/// that meant Python callers got no Fact/Observation visibility filtering
+/// unless the instance was built with `scope_to_agent()`.
+///
+/// The deferred variant is resolved inside `recall` rather than only in the
+/// facade, so it cannot reach the fail-open arm.
+#[tokio::test]
+async fn scope_as_participant_filters_private_facts() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    // An UNRESTRICTED agent, so any filtering observed comes from the scope
+    // rather than from an instance default.
+    let agent = memory.agent("observer");
+    let kb = agent.kb();
+
+    seed_participant(kb, "alice").await;
+    seed_participant(kb, "bob").await;
+    let query = "quarterly revenue outlook";
+    seed_fact(kb, "f-pub", query, Some("public")).await;
+    seed_fact(kb, "f-priv", query, Some("private:alice")).await;
+    let private_nid = fact_nid(kb, "f-priv").await;
+
+    // Baseline: unscoped recall is fail-open, so it should surface the
+    // private Fact. If it does not, this environment isn't surfacing Facts
+    // and the assertion below would pass vacuously.
+    let unscoped = match agent.recall(query).await {
+        Ok(bundle) => bundle,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("unscoped recall failed: {e}"),
+    };
+    if !unscoped.items.iter().any(|i| i.node_id == private_nid) {
+        eprintln!("skipping: recall did not surface Facts in this env");
+        return;
+    }
+
+    // Scoped to bob, the private:alice Fact must be gone.
+    let as_bob = agent
+        .recall_in(query, Scope::default().as_participant("bob"))
+        .await
+        .expect("recall as bob");
+    assert!(
+        !as_bob.items.iter().any(|i| i.node_id == private_nid),
+        "as_participant(bob) must not return the private:alice Fact"
+    );
+
+    // Scoped to alice, it must still be there — proving the filter is
+    // discriminating, not just dropping Facts wholesale.
+    let as_alice = agent
+        .recall_in(query, Scope::default().as_participant("alice"))
+        .await
+        .expect("recall as alice");
+    assert!(
+        as_alice.items.iter().any(|i| i.node_id == private_nid),
+        "as_participant(alice) must still return her own private Fact"
+    );
+
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
