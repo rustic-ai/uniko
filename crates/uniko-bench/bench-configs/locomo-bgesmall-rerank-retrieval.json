@@ -1,0 +1,53 @@
+{
+  "models": {
+    "gen": {
+      "alias": "llm/gen",
+      "model_id": "gpt-4o-mini",
+      "provider": "remote/openai",
+      "base_url": null,
+      "use_default_options": null
+    },
+    "judge": {
+      "alias": "llm/judge",
+      "model_id": "gpt-4o-mini",
+      "provider": "remote/openai",
+      "base_url": null
+    },
+    "extract_triples": null,
+    "embedder": {
+      "preset": "bge-small"
+    },
+    "reranker": {
+      "enabled": true,
+      "model_id": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+      "style": "cross-encoder",
+      "top_n": 50,
+      "apply_sigmoid": false,
+      "execution_providers": null
+    },
+    "nlp": {
+      "model_id": "dragonscale-ai/kniv-deberta-nlp-base-en-xsmall",
+      "artifact": "onnx/cascade-int8.onnx",
+      "max_batch_size": 16,
+      "execution_providers": null
+    }
+  },
+  "recall": {
+    "limit": null,
+    "sparse_enabled": false,
+    "phase1_strategy": "boost",
+    "phase1_boost_alpha": 0.6,
+    "phase2_graph_enabled": true,
+    "phase2_temporal_enabled": true,
+    "variants": [],
+    "consolidation_cluster_objects": true,
+    "consolidation_date_augment_embedding": true
+  },
+  "judge_enabled": false,
+  "retrieval_only": true,
+  "cost": {
+    "pricing_csv": "crates/uniko-bench/pricing.csv",
+    "events_jsonl": null,
+    "no_events": false
+  }
+}

@@ -75,8 +75,39 @@ impl PyIngestSource {
     }
 
     /// Set an explicit artifact id.
+    ///
+    /// The id — not the content hash — is this artifact's identity, and is
+    /// what `agent.data().artifact(..)` fetches it back by. Re-ingesting an
+    /// id with identical content is idempotent; reusing it for different
+    /// content is rejected as an id conflict. Two ids over identical bytes
+    /// give two artifacts sharing one stored copy of the content, so a
+    /// second session that ingests the same document under its own id keeps
+    /// its own handle on it.
     fn with_id<'py>(slf: PyRef<'py, Self>, id: String) -> PyRef<'py, Self> {
         slf.map(|s| s.with_id(id));
+        slf
+    }
+
+    /// Tag this source with the caller's own record category (issue #39).
+    fn with_category<'py>(slf: PyRef<'py, Self>, category: String) -> PyRef<'py, Self> {
+        slf.map(|s| s.with_category(category));
+        slf
+    }
+
+    /// Attribute this source to a stable logical source id (issue #39).
+    fn with_source<'py>(slf: PyRef<'py, Self>, source_id: String) -> PyRef<'py, Self> {
+        slf.map(|s| s.with_source(source_id));
+        slf
+    }
+
+    /// Declare which revision of that source these bytes are (issue #41).
+    ///
+    /// The same revision with identical bytes is idempotent; the same
+    /// revision with changed bytes raises `IdConflictError`. A new revision
+    /// supersedes the previous one, which then stops grounding current
+    /// answers while remaining attributable to history.
+    fn with_revision<'py>(slf: PyRef<'py, Self>, revision_id: String) -> PyRef<'py, Self> {
+        slf.map(|s| s.with_revision(revision_id));
         slf
     }
 

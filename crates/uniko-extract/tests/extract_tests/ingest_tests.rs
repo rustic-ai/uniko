@@ -25,6 +25,9 @@ fn test_message(id: &str, content: &str, session: &str, sender: &str) -> IngestM
         addressed_to: None,
         timestamp: Utc::now(),
         metadata: HashMap::new(),
+        category: None,
+        source_id: None,
+        revision_id: None,
     }
 }
 
@@ -35,6 +38,8 @@ fn test_artifact(id: &str, content: &str, kind: &str, path: Option<&str>) -> Ing
         kind: kind.to_string(),
         path: path.map(String::from),
         metadata: HashMap::new(),
+        // Every `test_artifact` names its id, so the id is the identity.
+        caller_supplied_id: true,
         ..Default::default()
     }
 }
@@ -229,8 +234,107 @@ async fn test_ingest_artifact_creates_node_and_chunks() {
     );
 }
 
+/// With NO caller id, identical bytes dedup onto the existing artifact.
+/// Re-running a corpus load must not duplicate every document.
 #[tokio::test]
-async fn test_ingest_artifact_dedup_by_hash() {
+async fn test_ingest_artifact_without_caller_id_dedups_by_content() {
+    let kb = test_kb().await;
+
+    let mk = |id: &str| IngestArtifact {
+        artifact_id: id.to_string(),
+        content: "corpus document body".to_string(),
+        kind: "file".to_string(),
+        caller_supplied_id: false,
+        ..Default::default()
+    };
+
+    let r1 = uniko_extract::ingest::artifact::ingest_artifact(&kb, &mk("auto-1"))
+        .await
+        .unwrap();
+    assert!(!r1.was_deduplicated);
+
+    // A second load mints a different UUID for the same bytes.
+    let r2 = uniko_extract::ingest::artifact::ingest_artifact(&kb, &mk("auto-2"))
+        .await
+        .unwrap();
+    assert!(
+        r2.was_deduplicated,
+        "an unnamed re-ingest of identical bytes must dedup"
+    );
+    assert_eq!(
+        r1.artifact_node_id, r2.artifact_node_id,
+        "dedup must reuse the existing artifact node"
+    );
+    // The result reports the id the artifact actually lives under, not the
+    // throwaway UUID this call minted and never wrote.
+    assert_eq!(r2.artifact_id, "auto-1");
+    assert!(
+        kb.get_node_by_ext_id("Artifact", "artifact_id", "auto-2")
+            .await
+            .unwrap()
+            .is_none(),
+        "the discarded UUID must not resolve"
+    );
+}
+
+/// A dedup hit still wires THIS call's session, so a second session can
+/// recall a document it just ingested. Skipping the link on the dedup path
+/// is what made the second session's recall come back empty.
+#[tokio::test]
+async fn test_dedup_hit_still_links_the_new_session() {
+    let kb = test_kb().await;
+
+    for sid in ["sess-one", "sess-two"] {
+        let mut props = std::collections::HashMap::new();
+        props.insert(
+            "session_id".to_string(),
+            uniko_store::Value::String(sid.to_string()),
+        );
+        props.insert(
+            "started_at".to_string(),
+            uniko_store::types::datetime_value(Utc::now()),
+        );
+        kb.merge_node("Session", "session_id", sid, &props)
+            .await
+            .unwrap();
+    }
+
+    let mk = |id: &str, sid: &str| IngestArtifact {
+        artifact_id: id.to_string(),
+        content: "a document both sessions load".to_string(),
+        kind: "file".to_string(),
+        caller_supplied_id: false,
+        session_id: Some(sid.to_string()),
+        ..Default::default()
+    };
+
+    let r1 = uniko_extract::ingest::artifact::ingest_artifact(&kb, &mk("a-1", "sess-one"))
+        .await
+        .unwrap();
+    let r2 = uniko_extract::ingest::artifact::ingest_artifact(&kb, &mk("a-2", "sess-two"))
+        .await
+        .unwrap();
+    assert!(r2.was_deduplicated);
+    assert_eq!(r1.artifact_node_id, r2.artifact_node_id);
+
+    // Both sessions are attached to the one artifact.
+    let edges = kb
+        .get_edges(r1.artifact_node_id, "ATTACHED_TO", Direction::Outgoing)
+        .await
+        .unwrap();
+    assert_eq!(
+        edges.len(),
+        2,
+        "each ingesting session must get its own ATTACHED_TO edge, got {edges:?}"
+    );
+}
+
+/// Identical bytes under two ids stay addressable under both. The bytes are
+/// stored once — deduplication lives on `:ArtifactContent`, keyed by hash —
+/// but each id gets its own `:Artifact`, because the id is what the caller
+/// fetches back and scopes to a session.
+#[tokio::test]
+async fn test_ingest_artifact_shares_content_across_distinct_ids() {
     let kb = test_kb().await;
 
     let content = "deduplicated content here";
@@ -244,8 +348,93 @@ async fn test_ingest_artifact_dedup_by_hash() {
     let r2 = uniko_extract::ingest::artifact::ingest_artifact(&kb, &art2)
         .await
         .unwrap();
+    assert!(
+        !r2.was_deduplicated,
+        "a second id is a second artifact, not a dedup hit"
+    );
+    assert_ne!(
+        r1.artifact_node_id, r2.artifact_node_id,
+        "distinct ids must not collapse onto one node"
+    );
+
+    // Both ids resolve, and each resolves to its OWN node.
+    for (ext_id, expected_nid) in [
+        ("art-dup-1", r1.artifact_node_id),
+        ("art-dup-2", r2.artifact_node_id),
+    ] {
+        let (nid, _) = kb
+            .get_node_by_ext_id("Artifact", "artifact_id", ext_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{ext_id} must resolve"));
+        assert_eq!(nid, expected_nid, "{ext_id} resolved to the wrong node");
+    }
+
+    // The bytes themselves are stored once: both artifacts carry the same
+    // hash, which is the `:ArtifactContent` key they share.
+    let hash_of = async |ext_id: &str| -> String {
+        let (_, props) = kb
+            .get_node_by_ext_id("Artifact", "artifact_id", ext_id)
+            .await
+            .unwrap()
+            .unwrap();
+        match props.get("hash") {
+            Some(uniko_store::Value::String(h)) => h.clone(),
+            other => panic!("{ext_id} has no hash: {other:?}"),
+        }
+    };
+    assert_eq!(
+        hash_of("art-dup-1").await,
+        hash_of("art-dup-2").await,
+        "identical bytes must share one content hash"
+    );
+}
+
+/// Re-ingesting an id with identical bytes is idempotent; re-ingesting it
+/// with different bytes is a caller bug and is rejected, rather than
+/// silently keeping the original content.
+#[tokio::test]
+async fn test_ingest_artifact_rejects_reused_id_with_different_content() {
+    let kb = test_kb().await;
+
+    let first = test_artifact("art-conflict", "the original notes", "file", None);
+    let r1 = uniko_extract::ingest::artifact::ingest_artifact(&kb, &first)
+        .await
+        .unwrap();
+    assert!(!r1.was_deduplicated);
+
+    // Same id, same bytes → idempotent, same node, no error.
+    let replay = test_artifact("art-conflict", "the original notes", "file", None);
+    let r2 = uniko_extract::ingest::artifact::ingest_artifact(&kb, &replay)
+        .await
+        .expect("identical content must stay idempotent");
     assert!(r2.was_deduplicated);
     assert_eq!(r1.artifact_node_id, r2.artifact_node_id);
+
+    // Same id, different bytes → rejected.
+    let conflicting = test_artifact("art-conflict", "totally different notes", "file", None);
+    let err = uniko_extract::ingest::artifact::ingest_artifact(&kb, &conflicting)
+        .await
+        .expect_err("a reused id with different content must be rejected");
+    assert!(
+        matches!(err, uniko_store::UnikoError::IdConflict(_)),
+        "expected IdConflict, got {err:?}"
+    );
+    assert!(
+        !err.is_retriable(),
+        "an id conflict is a caller bug, not contention — retrying cannot fix it"
+    );
+
+    // The rejection changed nothing.
+    let (_, props) = kb
+        .get_node_by_ext_id("Artifact", "artifact_id", "art-conflict")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        props.get("artifact_id"),
+        Some(uniko_store::Value::String(s)) if s == "art-conflict"
+    ));
 }
 
 #[tokio::test]
@@ -308,6 +497,7 @@ async fn test_ingest_artifact_links_conversational_context() {
 
     let art = IngestArtifact {
         artifact_id: "art-ctx".into(),
+        caller_supplied_id: true,
         content: "contextual file body".into(),
         kind: "file".into(),
         path: Some("notes.txt".into()),
@@ -315,6 +505,9 @@ async fn test_ingest_artifact_links_conversational_context() {
         session_id: Some("sess-ctx".into()),
         triggered_by_message_id: Some("msg-ctx".into()),
         produced_by_action_id: Some("act-ctx".into()),
+        category: None,
+        source_id: None,
+        revision_id: None,
     };
     let result = uniko_extract::ingest::artifact::ingest_artifact(&kb, &art)
         .await

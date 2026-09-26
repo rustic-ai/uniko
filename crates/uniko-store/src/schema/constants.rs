@@ -56,7 +56,11 @@ pub mod labels {
     pub const KNOWLEDGE_BASE_STATS: &str = "KnowledgeBaseStats";
 
     /// Every node label in layer order.
+    /// Stable logical origin of a record (issue #39/#41).
+    pub const SOURCE: &str = "Source";
+
     pub const ALL: &[&str] = &[
+        SOURCE,
         PARTICIPANT,
         GOAL,
         TASK,
@@ -163,7 +167,11 @@ pub mod edges {
     pub const TEAM_IN_ORG: &str = "TEAM_IN_ORG";
 
     /// Every edge type name.
+    /// Record → the logical Source it came from (issue #39/#41).
+    pub const FROM_SOURCE: &str = "FROM_SOURCE";
+
     pub const ALL: &[&str] = &[
+        FROM_SOURCE,
         OWNED_BY,
         PARENT_GOAL,
         PART_OF,

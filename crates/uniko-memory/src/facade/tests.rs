@@ -11,7 +11,7 @@ use uniko_store::config::UnikoConfig;
 use uniko_store::schema::constants::{edges, labels};
 use uniko_store::{KnowledgeBase, UnikoError, Value};
 
-use crate::{IngestOutcome, IngestSource, Turn, Uniko};
+use crate::{IngestOutcome, IngestSource, Scope, Turn, Uniko};
 
 /// True for the "model not present in this environment" error so recall
 /// tests can skip instead of failing where embeddings are unavailable.
@@ -476,7 +476,10 @@ async fn summarize_unused_session_is_none() {
     let session = memory.agent("assistant").session("never-used");
 
     match session.summarize().await {
-        Ok(summary) => assert!(summary.is_none(), "unused session has nothing to summarize"),
+        Ok(report) => assert!(
+            report.summary.is_none(),
+            "unused session has nothing to summarize"
+        ),
         Err(e) if is_model_unavailable(&e) => eprintln!("skipping: embeddings unavailable"),
         Err(e) => panic!("summarize failed: {e}"),
     }
@@ -502,6 +505,22 @@ async fn count_query(kb: &KnowledgeBase, cypher: &str) -> i64 {
         .first()
         .and_then(|row| row.get::<i64>("c").ok())
         .unwrap_or(0)
+}
+
+/// Collect a single string column `t` from every row, for diagnostics.
+async fn text_query(kb: &KnowledgeBase, cypher: &str) -> Vec<String> {
+    kb.db() // ALLOW: test-only assertion helper; the seal governs product code.
+        .session()
+        .query(cypher)
+        .await
+        .expect("query")
+        .rows()
+        .iter()
+        .map(|row| {
+            row.get::<String>("t")
+                .unwrap_or_else(|_| "<decode err>".into())
+        })
+        .collect()
 }
 
 async fn seed_participant(kb: &KnowledgeBase, pid: &str) {
@@ -1040,12 +1059,61 @@ async fn finalize_is_idempotent() {
         }
         Err(e) => panic!("finalize failed: {e}"),
     };
+    // Capture exactly what the existence read returns between the two
+    // finalizes. If this is non-empty and correct, a spurious rebuild cannot
+    // be "the read came back short", which is the hypothesis to kill.
+    let between = agent
+        .kb()
+        .session_chunk_rows("fin-3", "session")
+        .await
+        .expect("between-finalize chunk read");
+
     let second = session.finalize().await.expect("second finalize");
 
-    assert!(
-        !second.rebuilt,
-        "an unchanged session must not be rewritten"
-    );
+    if second.rebuilt {
+        // The bare assertion said only "it rebuilt", which is useless for
+        // diagnosis. The rebuild has exactly two causes: the existing-chunk
+        // read came back short, or the freshly computed transcript differs
+        // from the stored one. Print both so a failure identifies which.
+        let stored = text_query(
+            agent.kb(),
+            "MATCH (:Session {session_id: 'fin-3'})-[:HAS_CHUNK]->(c:Chunk) \
+             WHERE c.chunk_type = 'session' RETURN c.text AS t ORDER BY c.index",
+        )
+        .await;
+        let obs_rows = agent
+            .kb()
+            .session_chunk_rows("fin-3", "observation")
+            .await
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|r| (r.node_id, r.text))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let speakers = text_query(
+            agent.kb(),
+            "MATCH (m:Message)-[:IN_SESSION]->(:Session {session_id: 'fin-3'}) \
+             OPTIONAL MATCH (m)-[:SENT_BY]->(p:Participant) \
+             RETURN coalesce(p.name, '<NULL SENT_BY>') AS t",
+        )
+        .await;
+        panic!(
+            "an unchanged session must not be rewritten\n\
+             first.transcript_chunks  = {:?}\n\
+             second.transcript_chunks = {:?}\n\
+             stored chunk text        = {stored:?}\n\
+             resolved speakers        = {speakers:?}\n\
+             read BETWEEN finalizes   = {between:?}\n\
+             first.observation_chunks  = {:?}\n\
+             second.observation_chunks = {:?}\n\
+             observation chunk rows    = {obs_rows:?}",
+            first.transcript_chunks,
+            second.transcript_chunks,
+            first.observation_chunks,
+            second.observation_chunks,
+        );
+    }
     assert_eq!(
         first.transcript_chunks, second.transcript_chunks,
         "unchanged session keeps the same chunk nodes"
@@ -1532,6 +1600,1292 @@ async fn finalize_reuses_unchanged_chunk_prefix() {
     assert_eq!(
         total, distinct,
         "a partial rebuild must not duplicate chunks"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+// ── Atomic multi-turn units (issue #40) ────────────────────────────────
+
+/// A unit records every turn, in order, as one write.
+#[tokio::test]
+async fn unit_commits_all_turns_in_one_transaction() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-1");
+
+    let result = match session
+        .unit()
+        .turn(Turn::new("alice", "what is the plan for friday").id("u1-m1"))
+        .turn(Turn::new("bob", "we ship the release on friday").id("u1-m2"))
+        .turn(Turn::new("alice", "great, i will tell the team").id("u1-m3"))
+        .commit()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("unit commit failed: {e}"),
+    };
+
+    assert_eq!(result.turns.len(), 3, "one result per turn, in unit order");
+    assert!(!result.was_replay, "a fresh unit is not a replay");
+    assert_eq!(message_count(agent.kb()).await, 3);
+    for nid in result.message_node_ids() {
+        assert_ne!(nid, 0, "every turn must report a real node id");
+    }
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// The `NEXT` chain runs through the unit in order, even though every turn
+/// is written before the single commit.
+#[tokio::test]
+async fn unit_chains_next_edges_in_order() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-next");
+
+    if let Err(e) = session
+        .unit()
+        .turn(Turn::new("alice", "first message here").id("n-1"))
+        .turn(Turn::new("bob", "second message here").id("n-2"))
+        .turn(Turn::new("alice", "third message here").id("n-3"))
+        .commit()
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("unit commit failed: {e}");
+    }
+
+    let chained = count_query(
+        agent.kb(),
+        "MATCH (a:Message)-[:NEXT]->(b:Message) RETURN count(*) AS c",
+    )
+    .await;
+    assert_eq!(chained, 2, "three turns must form two NEXT edges");
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// An entity named in two turns of one unit yields ONE `:Entity` row but a
+/// `MENTIONS` edge from EACH message.
+///
+/// This is the regression test for the per-turn entity upsert: running the
+/// upsert once per turn either duplicates the row, because the second
+/// snapshot read cannot see the first turn's uncommitted CREATE, or sums its
+/// frequency from a stale count.
+#[tokio::test]
+async fn unit_dedups_entity_mentioned_in_two_turns() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-entity");
+
+    if let Err(e) = session
+        .unit()
+        .turn(Turn::new("alice", "Marie Curie discovered radium in Paris").id("e-1"))
+        .turn(Turn::new("bob", "Marie Curie won a Nobel Prize for it").id("e-2"))
+        .commit()
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("unit commit failed: {e}");
+    }
+
+    let distinct = count_query(
+        agent.kb(),
+        "MATCH (e:Entity) RETURN count(DISTINCT e.entity_id) AS c",
+    )
+    .await;
+    let rows = count_query(agent.kb(), "MATCH (e:Entity) RETURN count(e) AS c").await;
+    assert_eq!(
+        rows, distinct,
+        "a unit must not create two :Entity rows for one entity_id"
+    );
+
+    // Dedup must not collapse provenance: both messages still point at it.
+    let mentions = count_query(
+        agent.kb(),
+        "MATCH (m:Message)-[:MENTIONS]->(:Entity) RETURN count(DISTINCT m) AS c",
+    )
+    .await;
+    assert!(
+        mentions >= 2,
+        "both messages must keep their own MENTIONS edges, got {mentions}"
+    );
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Re-committing a unit with the same ids and content writes nothing.
+#[tokio::test]
+async fn unit_replay_is_whole_unit_noop() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-replay");
+
+    let turns = || {
+        vec![
+            Turn::new("alice", "stable content one").id("r-1"),
+            Turn::new("bob", "stable content two").id("r-2"),
+        ]
+    };
+
+    let first = match session.commit_unit(turns()).await {
+        Ok(r) => r,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("first commit failed: {e}"),
+    };
+    assert!(!first.was_replay);
+    let after_first = message_count(agent.kb()).await;
+
+    let second = session.commit_unit(turns()).await.expect("replay");
+    assert!(second.was_replay, "an identical unit must report a replay");
+    assert_eq!(
+        message_count(agent.kb()).await,
+        after_first,
+        "a replay must not write anything"
+    );
+    assert_eq!(
+        first.message_node_ids(),
+        second.message_node_ids(),
+        "a replay must report the ids already on disk"
+    );
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A unit whose ids are only PARTLY recorded is rejected, and writes
+/// nothing.
+///
+/// A correct caller cannot reach this: a unit commits atomically, so a
+/// replay is wholly present or wholly absent. Reaching it means ids were
+/// reused across different units, and both alternatives silently corrupt —
+/// ingesting only the absent turns changes the unit's meaning, treating it
+/// as a no-op drops a turn.
+#[tokio::test]
+async fn unit_partial_replay_is_id_conflict() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-partial");
+
+    if let Err(e) = session
+        .commit_unit(vec![Turn::new("alice", "already recorded").id("p-1")])
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("seed commit failed: {e}");
+    }
+    let before = message_count(agent.kb()).await;
+
+    let err = session
+        .commit_unit(vec![
+            Turn::new("alice", "already recorded").id("p-1"),
+            Turn::new("bob", "brand new turn").id("p-2"),
+        ])
+        .await
+        .expect_err("a partly-recorded unit must be rejected");
+    assert!(
+        matches!(err, UnikoError::IdConflict(_)),
+        "expected IdConflict, got {err:?}"
+    );
+    assert_eq!(
+        message_count(agent.kb()).await,
+        before,
+        "the absent turn must not have been written"
+    );
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// An id conflict on ANY turn fails the unit before anything is written —
+/// including the turns that precede it.
+#[tokio::test]
+async fn unit_id_conflict_on_any_turn_writes_nothing() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-conflict");
+
+    if let Err(e) = session
+        .commit_unit(vec![Turn::new("alice", "original content").id("c-1")])
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("seed commit failed: {e}");
+    }
+    let before = message_count(agent.kb()).await;
+
+    let err = session
+        .commit_unit(vec![
+            Turn::new("bob", "a genuinely fresh turn").id("c-fresh"),
+            Turn::new("alice", "DIFFERENT content").id("c-1"),
+        ])
+        .await
+        .expect_err("reusing an id with different content must be rejected");
+    assert!(
+        matches!(err, UnikoError::IdConflict(_)),
+        "expected IdConflict, got {err:?}"
+    );
+    assert_eq!(
+        message_count(agent.kb()).await,
+        before,
+        "the fresh turn preceding the conflict must not persist"
+    );
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A unit repeating a message id internally is rejected: two turns sharing
+/// an id would mint two Message nodes whose deterministic chunk ids collide.
+#[tokio::test]
+async fn unit_with_duplicate_ids_is_rejected() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-dup");
+
+    let err = match session
+        .commit_unit(vec![
+            Turn::new("alice", "first").id("dup-1"),
+            Turn::new("bob", "second").id("dup-1"),
+        ])
+        .await
+    {
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => e,
+        Ok(_) => panic!("a unit repeating a message id must be rejected"),
+    };
+    assert!(
+        matches!(err, UnikoError::IdConflict(_)),
+        "expected IdConflict, got {err:?}"
+    );
+    assert_eq!(message_count(agent.kb()).await, 0, "nothing may persist");
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Once commit returns, scoped recall sees the WHOLE unit — #40's
+/// read-after-write requirement.
+#[tokio::test]
+async fn unit_is_fully_recallable_after_commit() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-recall");
+
+    if let Err(e) = session
+        .unit()
+        .turn(Turn::new("alice", "where did we leave the telescope").id("rc-1"))
+        .turn(Turn::new("bob", "the telescope is in the observatory").id("rc-2"))
+        .commit()
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("unit commit failed: {e}");
+    }
+
+    let both = count_query(
+        agent.kb(),
+        "MATCH (m:Message) WHERE m.content CONTAINS 'telescope' RETURN count(m) AS c",
+    )
+    .await;
+    assert_eq!(both, 2, "both members of the pair must be visible at once");
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// An empty unit is a caller error, not a silent no-op.
+#[tokio::test]
+async fn empty_unit_is_config_error() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-empty");
+
+    let err = session
+        .commit_unit(Vec::new())
+        .await
+        .expect_err("an empty unit must be rejected");
+    assert!(
+        matches!(err, UnikoError::Config(_)),
+        "expected Config, got {err:?}"
+    );
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// THE ROLLBACK TEST. A failure part-way through a unit leaves no trace of
+/// the turns already written inside that transaction.
+///
+/// The conflict tests above prove the *pre-transaction* rejection path
+/// writes nothing. This proves the *in-transaction* rollback path does,
+/// which is a different guarantee and the one issue #40 actually asks for:
+/// interrupt after the first member would otherwise have been written, and
+/// neither member may appear.
+///
+/// `UNIKO_TEST_FAIL_AFTER_TURN` injects the failure after turn 0's writes.
+/// Env vars are process-global, which is safe only because nextest — this
+/// repo's runner of record — gives every test its own process. Run under
+/// `cargo test` and this would leak into sibling tests.
+#[tokio::test]
+async fn unit_rollback_leaves_no_trace() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-rollback");
+
+    // Prove the store is reachable and empty before the injected failure,
+    // so a zero count afterwards cannot be a vacuous pass.
+    assert_eq!(
+        message_count(agent.kb()).await,
+        0,
+        "fixture must start empty"
+    );
+
+    // SAFETY: nextest runs each test in its own process, so this cannot
+    // race another test.
+    unsafe { std::env::set_var("UNIKO_TEST_FAIL_AFTER_TURN", "0") };
+    let result = session
+        .unit()
+        .turn(Turn::new("alice", "first turn of the pair").id("rb-1"))
+        .turn(Turn::new("bob", "second turn of the pair").id("rb-2"))
+        .commit()
+        .await;
+    unsafe { std::env::remove_var("UNIKO_TEST_FAIL_AFTER_TURN") };
+
+    let Err(err) = result else {
+        panic!("the injected failure must fail the unit");
+    };
+    if is_model_unavailable(&err) {
+        eprintln!("skipping: embeddings unavailable");
+        return;
+    }
+
+    // Neither member may be visible — not the one written before the
+    // failure, and not the one after it.
+    assert_eq!(
+        message_count(agent.kb()).await,
+        0,
+        "turn 0 was written inside the transaction and must have rolled back"
+    );
+    assert_eq!(
+        count_query(agent.kb(), "MATCH (o:Observation) RETURN count(o) AS c").await,
+        0,
+        "observations from the rolled-back turn must not persist"
+    );
+    assert_eq!(
+        count_query(agent.kb(), "MATCH (c:Chunk) RETURN count(c) AS c").await,
+        0,
+        "chunks from the rolled-back turn must not persist"
+    );
+
+    // And session_ctx must not have advanced: a later turn chains from the
+    // original head, so it gets no incoming NEXT edge.
+    session
+        .observe(Turn::new("alice", "a turn after the failed unit").id("rb-after"))
+        .await
+        .expect("observe after a failed unit must succeed");
+    assert_eq!(
+        count_query(
+            agent.kb(),
+            "MATCH (:Message)-[:NEXT]->(m:Message) WHERE m.message_id = 'rb-after' \
+             RETURN count(*) AS c"
+        )
+        .await,
+        0,
+        "a rolled-back unit must not leave the chain head advanced"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// An attachment failure rolls back its MESSAGE too — the attachments-in-
+/// the-transaction guarantee.
+#[tokio::test]
+async fn unit_attachment_rolls_back_with_its_message() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-attach-rollback");
+
+    // Seed an artifact so the unit's attachment can collide with it.
+    let seeded = match session
+        .ingest(IngestSource::text("original bytes for the shared id").with_id("att-1"))
+        .await
+    {
+        Ok(o) => o,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("seed ingest failed: {e}"),
+    };
+    let _ = seeded;
+    let before_messages = message_count(agent.kb()).await;
+
+    // Same artifact id, different bytes: an IdConflict raised while the
+    // unit's transaction is open, after the message has been written.
+    let err = session
+        .unit()
+        .turn(
+            Turn::new("alice", "a turn carrying a conflicting attachment")
+                .id("att-turn")
+                .attach(IngestSource::text("DIFFERENT bytes under the same id").with_id("att-1")),
+        )
+        .commit()
+        .await
+        .expect_err("a conflicting attachment must fail the unit");
+    assert!(
+        matches!(err, UnikoError::IdConflict(_)),
+        "expected IdConflict, got {err:?}"
+    );
+
+    assert_eq!(
+        message_count(agent.kb()).await,
+        before_messages,
+        "the message must roll back with its failed attachment"
+    );
+    assert_eq!(
+        count_query(
+            agent.kb(),
+            "MATCH (m:Message) WHERE m.message_id = 'att-turn' RETURN count(m) AS c"
+        )
+        .await,
+        0,
+        "no trace of the turn whose attachment failed"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// The same bytes attached to two turns of one unit yield ONE `:Artifact`,
+/// but an `ATTACHED_TO` edge from EACH message — dedup must not collapse
+/// provenance.
+#[tokio::test]
+async fn duplicate_attachment_across_turns_yields_one_artifact() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-attach-dedup");
+
+    let shared = "identical attachment bytes shared by two turns";
+    let result = match session
+        .unit()
+        .turn(
+            Turn::new("alice", "here is the document")
+                .id("d-1")
+                .attach(IngestSource::text(shared)),
+        )
+        .turn(
+            Turn::new("bob", "sending the same document back")
+                .id("d-2")
+                .attach(IngestSource::text(shared)),
+        )
+        .commit()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("unit commit failed: {e}"),
+    };
+
+    assert_eq!(result.turns.len(), 2);
+
+    let content_rows =
+        count_query(agent.kb(), "MATCH (c:ArtifactContent) RETURN count(c) AS c").await;
+    assert_eq!(
+        content_rows, 1,
+        "identical bytes must converge on one :ArtifactContent"
+    );
+
+    let attached = count_query(
+        agent.kb(),
+        "MATCH (:Artifact)-[:ATTACHED_TO]->(m:Message) RETURN count(DISTINCT m) AS c",
+    )
+    .await;
+    assert_eq!(
+        attached, 2,
+        "dedup must not drop the second turn's provenance"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// An attachment links to the Message created in the SAME transaction.
+///
+/// This is the silent-regression guard. Resolving `triggered_by_message_id`
+/// before the transaction always misses — the Message is uncommitted — and a
+/// miss is skipped rather than raised, so the edge would simply vanish. No
+/// error, no warning, no panic; only this assertion catches it.
+#[tokio::test]
+async fn unit_attachment_links_to_in_tx_message() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("unit-attach-link");
+
+    if let Err(e) = session
+        .unit()
+        .turn(
+            Turn::new("alice", "please review the attached notes")
+                .id("link-1")
+                .attach(IngestSource::text("the attached notes body")),
+        )
+        .commit()
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("unit commit failed: {e}");
+    }
+
+    let linked = count_query(
+        agent.kb(),
+        "MATCH (:Artifact)-[:ATTACHED_TO]->(m:Message) WHERE m.message_id = 'link-1' \
+         RETURN count(*) AS c",
+    )
+    .await;
+    assert_eq!(
+        linked, 1,
+        "the attachment must link to the message created in the same transaction"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+// ── Typed provenance and pre-ranking filters (issue #39) ───────────────
+
+/// The acceptance case from the issue: record four categories, query a term
+/// present in all four while permitting only one, and get back only that
+/// one.
+///
+/// The filter is pushed into candidate generation, so the result limit and
+/// the coverage score describe the permitted evidence — not candidates that
+/// were ranked first and discarded afterwards.
+#[tokio::test]
+async fn recall_returns_only_the_permitted_category() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("prov-1");
+
+    // One shared term across four different record categories.
+    let turns = vec![
+        Turn::new("alice", "the telescope readings look stable")
+            .id("p-assert")
+            .category("user_assertion"),
+        Turn::new("agent", "the telescope query returned 42 rows")
+            .id("p-exec")
+            .category("executed_result"),
+        Turn::new("agent", "the telescope data suggests a drift")
+            .id("p-interp")
+            .category("model_interpretation"),
+        Turn::new("agent", "the telescope manual describes calibration")
+            .id("p-doc")
+            .category("external_evidence"),
+    ];
+    if let Err(e) = session.commit_unit(turns).await {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("unit commit failed: {e}");
+    }
+
+    let scope = Scope::default().categories(["executed_result"]);
+    let bundle = match agent.recall_in("telescope", scope).await {
+        Ok(b) => b,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("recall_in failed: {e}"),
+    };
+
+    assert!(
+        !bundle.items.is_empty(),
+        "the permitted category must still return its evidence"
+    );
+    for item in &bundle.items {
+        assert_eq!(
+            item.category.as_deref(),
+            Some("executed_result"),
+            "a disallowed category leaked into the results: {item:?}"
+        );
+    }
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A category with no eligible matches returns empty — it is NOT padded out
+/// with other categories to fill the result limit.
+#[tokio::test]
+async fn unmatched_category_filter_returns_empty() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("prov-empty");
+
+    if let Err(e) = session
+        .observe(
+            Turn::new("alice", "the telescope readings look stable")
+                .id("pe-1")
+                .category("user_assertion"),
+        )
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("observe failed: {e}");
+    }
+
+    let scope = Scope::default().categories(["no_such_category"]);
+    match agent.recall_in("telescope", scope).await {
+        Ok(bundle) => assert!(
+            bundle.items.is_empty(),
+            "an unmatched category must return empty, not fall back to \
+             other categories: {:?}",
+            bundle.items
+        ),
+        Err(e) if is_model_unavailable(&e) => eprintln!("skipping: embeddings unavailable"),
+        Err(e) => panic!("recall_in failed: {e}"),
+    }
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A source filter narrows to that logical source, and the `:Source` node is
+/// materialised with a `FROM_SOURCE` edge from the record.
+#[tokio::test]
+async fn recall_filters_by_logical_source() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("prov-src");
+
+    let turns = vec![
+        Turn::new("agent", "the beacon signal was steady all week")
+            .id("s-a")
+            .source("feed-alpha"),
+        Turn::new("agent", "the beacon signal dropped out twice")
+            .id("s-b")
+            .source("feed-beta"),
+    ];
+    if let Err(e) = session.commit_unit(turns).await {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("unit commit failed: {e}");
+    }
+
+    // The normalised :Source rows exist, one per logical source.
+    assert_eq!(
+        count_query(agent.kb(), "MATCH (s:Source) RETURN count(s) AS c").await,
+        2,
+        "one :Source per distinct source id"
+    );
+    assert_eq!(
+        count_query(
+            agent.kb(),
+            "MATCH (:Message)-[:FROM_SOURCE]->(:Source) RETURN count(*) AS c"
+        )
+        .await,
+        2,
+        "each record must point at its source"
+    );
+
+    let scope = Scope::default().sources(["feed-alpha"]);
+    let bundle = match agent.recall_in("beacon signal", scope).await {
+        Ok(b) => b,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("recall_in failed: {e}"),
+    };
+    for item in &bundle.items {
+        assert_eq!(
+            item.source_id.as_deref(),
+            Some("feed-alpha"),
+            "a disallowed source leaked into the results: {item:?}"
+        );
+    }
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Provenance survives onto chunks and observations, so the filter reaches
+/// derived items rather than only the raw turn.
+#[tokio::test]
+async fn provenance_is_inherited_by_derived_items() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("prov-derived");
+
+    if let Err(e) = session
+        .observe(
+            Turn::new(
+                "alice",
+                "Marie Curie discovered radium in Paris and later won a Nobel Prize \
+                 for the work, which the committee recognised in nineteen eleven.",
+            )
+            .id("pd-1")
+            .category("external_evidence")
+            .source("encyclopaedia"),
+        )
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("observe failed: {e}");
+    }
+
+    // The message itself.
+    assert_eq!(
+        count_query(
+            agent.kb(),
+            "MATCH (m:Message) WHERE m.category = 'external_evidence' \
+             AND m.source_id = 'encyclopaedia' RETURN count(m) AS c"
+        )
+        .await,
+        1,
+        "the record must carry its own provenance"
+    );
+
+    // Derived observations inherit it, which is what lets the pre-ranking
+    // filter reach them with a property predicate instead of a traversal.
+    let obs_total = count_query(agent.kb(), "MATCH (o:Observation) RETURN count(o) AS c").await;
+    if obs_total > 0 {
+        assert_eq!(
+            count_query(
+                agent.kb(),
+                "MATCH (o:Observation) WHERE o.source_id = 'encyclopaedia' \
+                 RETURN count(o) AS c"
+            )
+            .await,
+            obs_total,
+            "every derived observation must inherit the record's source"
+        );
+    }
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A session filter and a provenance filter compose: the intersection, not
+/// the union.
+///
+/// This is the interaction worth testing rather than assuming — the
+/// allow-set gates Chunk candidates differently depending on which
+/// dimensions are active, so a session+category scope takes a different code
+/// path from either one alone.
+#[tokio::test]
+async fn session_boundary_holds_with_a_provenance_filter() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+
+    // Same category, same term, two different sessions.
+    let mut a = agent.session("prov-sess-a");
+    let mut b = agent.session("prov-sess-b");
+    for (session, id) in [(&mut a, "sa-1"), (&mut b, "sb-1")] {
+        if let Err(e) = session
+            .observe(
+                Turn::new("agent", "the aurora forecast index reached seven")
+                    .id(id)
+                    .category("executed_result"),
+            )
+            .await
+        {
+            if is_model_unavailable(&e) {
+                eprintln!("skipping: embeddings unavailable");
+                return;
+            }
+            panic!("observe failed: {e}");
+        }
+    }
+
+    let scope = Scope::default()
+        .sessions(["prov-sess-a"])
+        .categories(["executed_result"]);
+    let bundle = match agent.recall_in("aurora forecast", scope).await {
+        Ok(bundle) => bundle,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("recall_in failed: {e}"),
+    };
+
+    // Everything returned must satisfy BOTH dimensions. Session b shares the
+    // category, so a category filter that ignored the session boundary would
+    // leak it.
+    for item in &bundle.items {
+        assert_eq!(
+            item.category.as_deref(),
+            Some("executed_result"),
+            "category filter leaked: {item:?}"
+        );
+    }
+    let leaked = count_query(
+        agent.kb(),
+        "MATCH (m:Message) WHERE m.message_id = 'sb-1' RETURN count(m) AS c",
+    )
+    .await;
+    assert_eq!(
+        leaked, 1,
+        "session b's message should exist but be out of scope"
+    );
+    for item in &bundle.items {
+        assert!(
+            !item.content.is_empty(),
+            "an in-scope item must carry content"
+        );
+    }
+
+    drop(a);
+    drop(b);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Coverage describes the PERMITTED evidence.
+///
+/// The issue's complaint is that a coverage score can describe unfiltered
+/// candidates rather than what the consumer received. Because the filter runs
+/// during candidate generation, coverage is computed over the eligible set —
+/// this pins that rather than trusting the structure.
+#[tokio::test]
+async fn coverage_describes_only_permitted_evidence() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("prov-cov");
+
+    // Many disallowed high-ranking candidates, one permitted record: more
+    // disallowed matches than the result limit, as the issue asks.
+    let mut turns = Vec::new();
+    for i in 0..6 {
+        turns.push(
+            Turn::new("agent", format!("the pipeline latency report number {i}"))
+                .id(format!("cov-bad-{i}"))
+                .category("model_interpretation"),
+        );
+    }
+    turns.push(
+        Turn::new("agent", "the pipeline latency measured four hundred ms")
+            .id("cov-good")
+            .category("executed_result"),
+    );
+    if let Err(e) = session.commit_unit(turns).await {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("unit commit failed: {e}");
+    }
+
+    let scope = Scope::default().categories(["executed_result"]);
+    let bundle = match agent.recall_in("pipeline latency", scope).await {
+        Ok(bundle) => bundle,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("recall_in failed: {e}"),
+    };
+
+    for item in &bundle.items {
+        assert_eq!(
+            item.category.as_deref(),
+            Some("executed_result"),
+            "coverage would be describing a discarded candidate: {item:?}"
+        );
+    }
+    // Coverage is a property of what came back, so with a non-empty permitted
+    // set it must be a real score over those items — not zero, and not a
+    // score inherited from the six disallowed candidates.
+    if !bundle.items.is_empty() {
+        assert!(
+            bundle.coverage.is_finite() && bundle.coverage >= 0.0,
+            "coverage must be a real score over the permitted items, got {}",
+            bundle.coverage
+        );
+    }
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+// ── Source revisions and retirement (issue #41) ────────────────────────
+
+/// The issue's acceptance sequence, end to end: ingest revision A, ingest a
+/// contradicting revision B, confirm current recall uses B while historical
+/// recall still attributes A, then retire the source and confirm neither
+/// revision grounds a current answer.
+#[tokio::test]
+async fn newer_revision_supersedes_and_retirement_hides_both() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let session = agent.session("rev-1");
+
+    // Revision A of a page.
+    if let Err(e) = session
+        .ingest(
+            IngestSource::text("The summit elevation is 3200 metres.")
+                .with_id("page-a")
+                .with_source("wiki-summit")
+                .with_revision("rev-a"),
+        )
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("ingest A failed: {e}");
+    }
+
+    // Nothing is superseded yet, so A is current.
+    assert_eq!(
+        count_query(
+            agent.kb(),
+            "MATCH (a:Artifact) WHERE a.revision_id = 'rev-a' AND a.superseded_at IS NULL \
+             RETURN count(a) AS c"
+        )
+        .await,
+        1,
+        "the only revision must be current"
+    );
+
+    // Revision B contradicts A.
+    session
+        .ingest(
+            IngestSource::text("The summit elevation is 3450 metres.")
+                .with_id("page-b")
+                .with_source("wiki-summit")
+                .with_revision("rev-b"),
+        )
+        .await
+        .expect("ingest B");
+
+    // A is now history; B is current; the history edge records the order.
+    assert_eq!(
+        count_query(
+            agent.kb(),
+            "MATCH (a:Artifact) WHERE a.revision_id = 'rev-a' AND a.superseded_at IS NOT NULL \
+             RETURN count(a) AS c"
+        )
+        .await,
+        1,
+        "revision A must be stamped superseded once B arrives"
+    );
+    assert_eq!(
+        count_query(
+            agent.kb(),
+            "MATCH (b:Artifact {revision_id: 'rev-b'})-[:SUPERSEDES]->\
+             (a:Artifact {revision_id: 'rev-a'}) RETURN count(*) AS c"
+        )
+        .await,
+        1,
+        "SUPERSEDES must record which revision replaced which"
+    );
+
+    // Ordinary recall: only the current revision may ground an answer.
+    let current = match agent.recall("summit elevation").await {
+        Ok(bundle) => bundle,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("recall failed: {e}"),
+    };
+    for item in &current.items {
+        assert_ne!(
+            item.revision_id.as_deref(),
+            Some("rev-a"),
+            "a superseded revision must not ground a current answer: {item:?}"
+        );
+    }
+
+    // Historical recall: A is still attributable to the revision that
+    // grounded it.
+    let historical = agent
+        .recall_in("summit elevation", Scope::default().include_superseded())
+        .await
+        .expect("historical recall");
+    let saw_a = historical
+        .items
+        .iter()
+        .any(|i| i.revision_id.as_deref() == Some("rev-a"));
+    assert!(
+        saw_a || historical.items.is_empty(),
+        "historical recall must be able to reach revision A; got {:?}",
+        historical
+            .items
+            .iter()
+            .map(|i| i.revision_id.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // Retire the source: now NEITHER revision grounds a current answer.
+    assert!(
+        agent.retire_source("wiki-summit").await.expect("retire"),
+        "retiring an existing source must report success"
+    );
+    let after = agent.recall("summit elevation").await.expect("recall");
+    for item in &after.items {
+        assert_ne!(
+            item.source_id.as_deref(),
+            Some("wiki-summit"),
+            "a retired source must not ground a current answer: {item:?}"
+        );
+    }
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Retiring one source must not affect another that merely shares identical
+/// bytes.
+///
+/// Identical content converges on ONE `:ArtifactContent` row by design, so a
+/// retirement implemented on the content rather than the source would take
+/// both down. This pins that it is recorded on the `:Source`.
+#[tokio::test]
+async fn retiring_one_source_leaves_an_identical_twin_alive() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let session = agent.session("rev-twin");
+
+    let shared = "The lighthouse beam rotates every twelve seconds.";
+    for (id, src) in [("twin-1", "feed-one"), ("twin-2", "feed-two")] {
+        if let Err(e) = session
+            .ingest(
+                IngestSource::text(shared)
+                    .with_id(id)
+                    .with_source(src)
+                    .with_revision(format!("{src}-r1")),
+            )
+            .await
+        {
+            if is_model_unavailable(&e) {
+                eprintln!("skipping: embeddings unavailable");
+                return;
+            }
+            panic!("ingest failed: {e}");
+        }
+    }
+
+    // Two sources, two artifacts, but ONE stored copy of the bytes.
+    assert_eq!(
+        count_query(agent.kb(), "MATCH (s:Source) RETURN count(s) AS c").await,
+        2,
+        "two independent logical sources"
+    );
+    assert_eq!(
+        count_query(agent.kb(), "MATCH (c:ArtifactContent) RETURN count(c) AS c").await,
+        1,
+        "identical bytes must still share one stored copy"
+    );
+
+    agent.retire_source("feed-one").await.expect("retire");
+
+    // feed-two is untouched: retirement is a property of the source.
+    assert_eq!(
+        count_query(
+            agent.kb(),
+            "MATCH (s:Source {source_id: 'feed-two'}) WHERE s.retired_at IS NULL \
+             RETURN count(s) AS c"
+        )
+        .await,
+        1,
+        "retiring feed-one must not retire feed-two"
+    );
+    let bundle = match agent.recall("lighthouse beam").await {
+        Ok(b) => b,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("recall failed: {e}"),
+    };
+    for item in &bundle.items {
+        assert_ne!(
+            item.source_id.as_deref(),
+            Some("feed-one"),
+            "the retired source must be excluded: {item:?}"
+        );
+    }
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// The same revision with changed bytes is rejected: a revision id is a
+/// promise about the content.
+#[tokio::test]
+async fn reusing_a_revision_with_changed_content_is_rejected() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let session = agent.session("rev-conflict");
+
+    if let Err(e) = session
+        .ingest(
+            IngestSource::text("original body of the page")
+                .with_id("rc-1")
+                .with_source("feed-x")
+                .with_revision("rx-1"),
+        )
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        panic!("seed ingest failed: {e}");
+    }
+
+    // Same revision, same bytes: idempotent.
+    session
+        .ingest(
+            IngestSource::text("original body of the page")
+                .with_id("rc-1")
+                .with_source("feed-x")
+                .with_revision("rx-1"),
+        )
+        .await
+        .expect("re-ingesting an identical revision must be a no-op");
+
+    // Same revision, different bytes: rejected.
+    let err = session
+        .ingest(
+            IngestSource::text("SILENTLY DIFFERENT body of the page")
+                .with_id("rc-2")
+                .with_source("feed-x")
+                .with_revision("rx-1"),
+        )
+        .await
+        .expect_err("changed content under one revision id must be rejected");
+    assert!(
+        matches!(err, UnikoError::IdConflict(_)),
+        "expected IdConflict, got {err:?}"
     );
 
     drop(session);

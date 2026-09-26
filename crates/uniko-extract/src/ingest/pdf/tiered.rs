@@ -22,7 +22,7 @@ use uniko_store::schema::OCR_ALIAS;
 use uniko_store::{KnowledgeBase, NodeId, Value};
 
 use super::super::chunking::{ChunkConfig, ChunkData, Chunker, count_tokens, text::TextChunker};
-use super::super::message::{create_chunks, json_to_uni_value};
+use super::super::message::{create_chunks_in_tx, json_to_uni_value};
 use super::extractor::PdfExtractError;
 
 /// Node IDs produced by [`materialize_tiered`].
@@ -81,12 +81,14 @@ pub(super) async fn extract_tiered(
 ///
 /// # Errors
 /// Returns a storage error if any node or edge write fails.
-pub(super) async fn materialize_tiered(
+pub(super) async fn materialize_tiered_in_tx(
     kb: &KnowledgeBase,
+    tx: &uniko_store::Transaction,
     artifact_id: &str,
     artifact_nid: NodeId,
     pages: &[TieredPageResult],
     chunk_cfg: &ChunkConfig,
+    prov: super::super::message::ChunkProvenance<'_>,
 ) -> uniko_store::Result<TieredMaterialized> {
     let mut out = TieredMaterialized::default();
 
@@ -111,12 +113,12 @@ pub(super) async fn materialize_tiered(
         if !page.escalations.is_empty() {
             pprops.insert("escalations".into(), escalations_value(&page.escalations));
         }
-        let page_nid = kb.create_node("Page", &pprops).await?;
+        let page_nid = kb.create_node_in_tx(tx, "Page", &pprops).await?;
         out.page_node_ids.push(page_nid);
 
         let mut hp: HashMap<String, Value> = HashMap::new();
         hp.insert("index".into(), Value::Int(page_index as i64));
-        kb.create_edge("HAS_PAGE", artifact_nid, page_nid, &hp)
+        kb.create_edges_in_tx(tx, &[("HAS_PAGE", artifact_nid, page_nid, hp)])
             .await?;
 
         // Reading order drives both the CONTAINS index and the chain edges.
@@ -157,7 +159,7 @@ pub(super) async fn materialize_tiered(
                 bprops.insert("bbox_x1".into(), Value::Float(f64::from(x1)));
                 bprops.insert("bbox_y1".into(), Value::Float(f64::from(y1)));
             }
-            let block_nid = kb.create_node("Block", &bprops).await?;
+            let block_nid = kb.create_node_in_tx(tx, "Block", &bprops).await?;
             out.block_node_ids.push(block_nid);
 
             let mut ce: HashMap<String, Value> = HashMap::new();
@@ -165,12 +167,12 @@ pub(super) async fn materialize_tiered(
                 "reading_order".into(),
                 Value::Int(i64::from(block.reading_order)),
             );
-            kb.create_edge("CONTAINS", page_nid, block_nid, &ce).await?;
-
+            let mut block_edges: Vec<(&str, NodeId, NodeId, HashMap<String, Value>)> =
+                vec![("CONTAINS", page_nid, block_nid, ce)];
             if let Some(prev) = prev_block_nid {
-                kb.create_edge("NEXT_IN_READING_ORDER", prev, block_nid, &HashMap::new())
-                    .await?;
+                block_edges.push(("NEXT_IN_READING_ORDER", prev, block_nid, HashMap::new()));
             }
+            kb.create_edges_in_tx(tx, &block_edges).await?;
             prev_block_nid = Some(block_nid);
 
             // Child :Chunk(s): the embeddable/recall unit. Block is atomic, so
@@ -180,13 +182,15 @@ pub(super) async fn materialize_tiered(
             if chunks.is_empty() {
                 continue;
             }
-            let chunk_nids = create_chunks(kb, &block_ext_id, block_nid, &chunks, "Block").await?;
+            let chunk_nids =
+                create_chunks_in_tx(kb, tx, &block_ext_id, block_nid, &chunks, "Block", prov)
+                    .await?;
             for &chunk_nid in &chunk_nids {
                 // Also attach to the Artifact (B1): keeps mean-pool and
                 // artifact-scoped recall working without touching their queries.
                 let mut hc: HashMap<String, Value> = HashMap::new();
                 hc.insert("index".into(), Value::Int(out.chunk_node_ids.len() as i64));
-                kb.create_edge("HAS_CHUNK", artifact_nid, chunk_nid, &hc)
+                kb.create_edges_in_tx(tx, &[("HAS_CHUNK", artifact_nid, chunk_nid, hc)])
                     .await?;
                 out.chunk_node_ids.push(chunk_nid);
             }
@@ -444,9 +448,21 @@ mod tests {
         }];
 
         let cfg = ChunkConfig::default();
-        let mat = materialize_tiered(&kb, "art-doc-ir", artifact_nid, &pages, &cfg)
-            .await
-            .expect("materialize");
+        // `materialize_tiered_in_tx` defers the commit to its caller, so the
+        // test owns the transaction the way the unit path does.
+        let tx = kb.begin_tx().await.expect("begin tx");
+        let mat = materialize_tiered_in_tx(
+            &kb,
+            &tx,
+            "art-doc-ir",
+            artifact_nid,
+            &pages,
+            &cfg,
+            crate::ingest::message::ChunkProvenance::default(),
+        )
+        .await
+        .expect("materialize");
+        tx.commit().await.expect("commit");
 
         assert_eq!(mat.page_node_ids.len(), 1);
         assert_eq!(mat.block_node_ids.len(), 2);

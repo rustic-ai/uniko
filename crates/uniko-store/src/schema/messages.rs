@@ -11,6 +11,19 @@ pub(crate) fn register_labels<'a>(
 ) -> SchemaBuilder<'a> {
     builder
         .label(labels::MESSAGE)
+        // Typed provenance (issue #39). `category` is the caller's own
+        // record class — a user assertion, an executed result, a model
+        // interpretation — kept OUT of searchable prose so a recall scope
+        // can filter on it. `source_id` is denormalised from the
+        // FROM_SOURCE edge so that filter is a property predicate rather
+        // than a traversal, since it runs inside every candidate query.
+        .property_nullable("category", DataType::String)
+        .property_nullable("source_id", DataType::String)
+        // Which revision of that source this record came from (issue
+        // #41). Denormalised beside `source_id` so the "is this evidence
+        // still current" filter is a property predicate in candidate
+        // generation rather than a traversal.
+        .property_nullable("revision_id", DataType::String)
         .property("message_id", DataType::String)
         .property("content", DataType::String)
         .property_nullable("content_type", DataType::String)

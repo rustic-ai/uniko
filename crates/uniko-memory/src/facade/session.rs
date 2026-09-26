@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
-use uniko_extract::ingest::atomic::ingest_message_atomic;
 use uniko_extract::ingest::context::SessionContext;
 use uniko_extract::ingest::session_chunk::{
     ChunkMode, chunk_session_observations_with, chunk_session_with,
 };
 use uniko_extract::ingest::{
-    AtomicIngestResult, IngestContext, IngestOutcome, IngestSource, ModalityRegistry, ingest_source,
+    AtomicIngestResult, IngestContext, IngestOutcome, IngestSource, ModalityRegistry, UnitTurn,
+    ingest_source, ingest_turns_atomic, prepare_source,
 };
 use uniko_pipes::IngestMessage;
 use uniko_pipes::types::{ConsolidationTask, IngestTask, ObservationsReady};
@@ -121,41 +121,122 @@ impl Session {
     /// Returns [`UnikoError`] on any extraction or write failure; on error
     /// no partial state persists for the turn.
     pub async fn observe(&mut self, turn: Turn) -> Result<ObserveResult, UnikoError> {
-        // Update speaker / pronoun window before ingest so recipient
-        // inference and pronoun resolution see the right context.
-        self.ctx.set_current_speaker(&turn.sender_id);
+        // One turn IS a one-turn unit. Sharing the path means the rollback,
+        // speaker-ordering and attachment-atomicity semantics cannot drift
+        // between the two entry points — a second implementation is where
+        // the next bug would live.
+        //
+        // Two behaviour changes fall out of this, both of them what #40
+        // asks for: attachments now commit WITH the message rather than in
+        // separate transactions afterwards, and an idempotent replay now
+        // advances the chain head, so the following turn still gets its
+        // NEXT edge.
+        let mut result = self.commit_unit(vec![turn]).await?;
+        Ok(result
+            .turns
+            .pop()
+            .expect("commit_unit returns one result per input turn"))
+    }
+
+    /// Begin a multi-turn unit: several related turns recorded as ONE
+    /// durable, idempotent write.
+    ///
+    /// Every turn added — and every attachment on them — lands in a single
+    /// transaction. Either the whole unit is visible to later recall, or
+    /// none of it is. That is the guarantee two separate [`observe`] calls
+    /// cannot give: an interruption between them leaves a question with no
+    /// answer, indistinguishable from a real one.
+    ///
+    /// [`observe`]: Self::observe
+    ///
+    /// ```no_run
+    /// # async fn demo(session: &mut uniko_memory::Session) -> Result<(), uniko_store::UnikoError> {
+    /// use uniko_memory::Turn;
+    /// session
+    ///     .unit()
+    ///     .turn(Turn::new("alice", "what's the plan?").id("m-1"))
+    ///     .turn(Turn::new("bob", "ship it friday").id("m-2"))
+    ///     .commit()
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn unit(&mut self) -> TurnUnit<'_> {
+        TurnUnit {
+            session: self,
+            turns: Vec::new(),
+        }
+    }
+
+    /// Commit `turns` as one atomic unit.
+    ///
+    /// The owned form [`TurnUnit::commit`] delegates to. Use it directly
+    /// when the turns are built elsewhere — notably the Python bridge,
+    /// which holds the `Session` behind an `Arc<Mutex<_>>` and so can call
+    /// a method but cannot lend out a borrow.
+    ///
+    /// Re-committing a unit whose `message_id`s are all present with
+    /// identical content is a no-op ([`UnitResult::was_replay`]). Reusing
+    /// an id with different content, or submitting a unit that is only
+    /// *partly* recorded, is rejected with
+    /// [`UnikoError::IdConflict`](uniko_store::UnikoError::IdConflict).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on any extraction or write failure. On error
+    /// **nothing** from the unit persists.
+    pub async fn commit_unit(&mut self, turns: Vec<Turn>) -> Result<UnitResult, UnikoError> {
         let session_id = self.ctx.session_id.clone();
 
-        // Resolve the message id up front so attachments can link to it.
-        let message_id = turn
-            .message_id
-            .clone()
-            .unwrap_or_else(uniko_store::id::new_id);
-        let mut turn = turn;
-        turn.message_id = Some(message_id.clone());
-        let attachments = std::mem::take(&mut turn.attachments);
+        // Resolve every message id and prepare every attachment BEFORE the
+        // transaction opens: blob PUTs, chunking and model inference must
+        // never be re-paid on a retry, and the unit needs each attachment's
+        // content ids to take its striped locks before opening the tx.
+        let mut unit_turns = Vec::with_capacity(turns.len());
+        for mut turn in turns {
+            let message_id = turn
+                .message_id
+                .clone()
+                .unwrap_or_else(uniko_store::id::new_id);
+            turn.message_id = Some(message_id.clone());
+            let attachments = std::mem::take(&mut turn.attachments);
 
-        let msg = turn.into_ingest_message(session_id.clone());
-        let message = ingest_message_atomic(&self.kb, &msg, &mut self.ctx).await?;
-
-        // Ingest each attachment linked to this message (and session).
-        let mut attachment_outcomes = Vec::with_capacity(attachments.len());
-        for source in attachments {
             let context = IngestContext {
                 session_id: Some(session_id.clone()),
-                triggered_by_message_id: Some(message_id.clone()),
+                triggered_by_message_id: Some(message_id),
             };
-            attachment_outcomes
-                .push(ingest_source(&self.kb, &self.extractors, source, context).await?);
+            let mut prepared = Vec::with_capacity(attachments.len());
+            for source in attachments {
+                prepared.push(prepare_source(&self.kb, &self.extractors, source, &context).await?);
+            }
+
+            unit_turns.push(UnitTurn {
+                message: turn.into_ingest_message(session_id.clone()),
+                attachments: prepared,
+            });
         }
 
-        // New Observations advance the consolidation counter. Only reaches a
-        // worker when streaming is on; otherwise call `Agent::consolidate`.
-        self.notify_observations(&message.extracted_observations);
+        let result = ingest_turns_atomic(&self.kb, &unit_turns, &mut self.ctx).await?;
 
-        Ok(ObserveResult {
-            message,
-            attachments: attachment_outcomes,
+        // One atomic batch is one consolidation notice.
+        let all_observations: Vec<uniko_store::NodeId> = result
+            .turns
+            .iter()
+            .flat_map(|t| t.extracted_observations.iter().copied())
+            .collect();
+        self.notify_observations(&all_observations);
+
+        let mut attachments = result.attachments;
+        Ok(UnitResult {
+            turns: result
+                .turns
+                .into_iter()
+                .enumerate()
+                .map(|(i, message)| ObserveResult {
+                    message,
+                    attachments: std::mem::take(attachments.get_mut(i).unwrap_or(&mut Vec::new())),
+                })
+                .collect(),
+            was_replay: result.was_replay,
         })
     }
 
@@ -289,25 +370,39 @@ impl Session {
     /// # Errors
     ///
     /// Returns [`UnikoError`] on a read, write, or generation failure.
-    /// A failure to refresh the chunks is logged, not returned.
-    pub async fn summarize(&self) -> Result<Option<NodeId>, UnikoError> {
-        // Best-effort: this is post-processing the caller did not ask for,
-        // and failing summary generation because a chunk rebuild hit a
-        // transient conflict would be a regression for existing callers.
-        if let Err(e) = self.finalize().await {
-            tracing::warn!(
-                session_id = %self.ctx.session_id,
-                error = %e,
-                "summarize: session chunk refresh failed; continuing with stale chunks",
-            );
-        }
-        generate_session_summary(
+    /// A failure to refresh the chunks does not fail the call; it is
+    /// reported in [`SummarizeReport::finalize_error`].
+    pub async fn summarize(&self) -> Result<SummarizeReport, UnikoError> {
+        // Still best-effort: this is post-processing the caller did not ask
+        // for, and failing summary generation because a chunk rebuild hit a
+        // transient conflict would be a regression for existing callers. But
+        // the outcome is now REPORTED rather than only logged — issue #40
+        // requires finalization success or failure to be observable, and a
+        // warn! in someone else's log is not.
+        let (finalize, finalize_error) = match self.finalize().await {
+            Ok(report) => (Some(report), None),
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %self.ctx.session_id,
+                    error = %e,
+                    "summarize: session chunk refresh failed; continuing with stale chunks",
+                );
+                (None, Some(e.to_string()))
+            }
+        };
+        let summary = generate_session_summary(
             &self.kb,
             &self.ctx.session_id,
             Utc::now(),
             self.llm_alias.as_deref(),
         )
-        .await
+        .await?;
+
+        Ok(SummarizeReport {
+            summary,
+            finalize,
+            finalize_error,
+        })
     }
 
     /// Soft-forget one turn: hide it from recall, keep the node + lineage.
@@ -439,6 +534,9 @@ pub struct Turn {
     timestamp: DateTime<Utc>,
     metadata: HashMap<String, serde_json::Value>,
     attachments: Vec<IngestSource>,
+    category: Option<String>,
+    source_id: Option<String>,
+    revision_id: Option<String>,
 }
 
 impl Turn {
@@ -453,14 +551,21 @@ impl Turn {
             timestamp: Utc::now(),
             metadata: HashMap::new(),
             attachments: Vec::new(),
+            category: None,
+            source_id: None,
+            revision_id: None,
         }
     }
 
     /// Set an explicit message id for idempotent ingest.
     ///
     /// Ingest is idempotent on `message_id`: re-feeding a turn with the
-    /// same id is a no-op rather than a duplicate. When unset, a fresh
-    /// UUID v7 is generated per turn.
+    /// same id **and the same content** is a no-op rather than a
+    /// duplicate. Reusing an id for *different* content is rejected with
+    /// [`UnikoError::IdConflict`](uniko_store::UnikoError::IdConflict) —
+    /// the id already names a different turn, and accepting it silently
+    /// would drop the new one. When unset, a fresh UUID v7 is generated
+    /// per turn.
     #[must_use]
     pub fn id(mut self, message_id: impl Into<String>) -> Self {
         self.message_id = Some(message_id.into());
@@ -497,6 +602,41 @@ impl Turn {
         self
     }
 
+    /// Tag this turn with the caller's own record category (issue #39).
+    ///
+    /// Typed provenance: a recall scope can filter on it, and it never
+    /// enters the searchable text. That is the point — the alternative is
+    /// encoding a class into the prose and parsing it back out of results,
+    /// which makes a coverage score describe candidates the consumer never
+    /// received.
+    #[must_use]
+    pub fn category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
+        self
+    }
+
+    /// Attribute this turn to a stable logical source id (issue #39).
+    ///
+    /// Materialised as a `:Source` node with a `FROM_SOURCE` edge, and
+    /// denormalised onto the message and its chunks so the recall filter is
+    /// a property predicate rather than a traversal.
+    #[must_use]
+    pub fn source(mut self, source_id: impl Into<String>) -> Self {
+        self.source_id = Some(source_id.into());
+        self
+    }
+
+    /// Declare which revision of that source this turn reflects (issue #41).
+    ///
+    /// A new revision of the same source supersedes the previous one, which
+    /// then stops grounding current answers while staying attributable to
+    /// the results it did ground.
+    #[must_use]
+    pub fn revision(mut self, revision_id: impl Into<String>) -> Self {
+        self.revision_id = Some(revision_id.into());
+        self
+    }
+
     /// Attach a document/file shared in this turn.
     ///
     /// On [`observe`](Session::observe) each attachment is ingested and
@@ -526,6 +666,99 @@ impl Turn {
             addressed_to: self.addressed_to,
             timestamp: self.timestamp,
             metadata: self.metadata,
+            category: self.category,
+            source_id: self.source_id,
+            revision_id: self.revision_id,
         }
+    }
+}
+
+/// Accumulates turns for one atomic commit.
+///
+/// Borrows the [`Session`] mutably for the builder's lifetime, so the
+/// compiler prevents using the session mid-build, and `commit` consumes the
+/// builder to regain unique access. That borrow is also why this type is not
+/// `'static`: bindings that hold a `Session` behind a lock call
+/// [`Session::commit_unit`] instead.
+#[derive(Debug)]
+pub struct TurnUnit<'s> {
+    session: &'s mut Session,
+    turns: Vec<Turn>,
+}
+
+impl TurnUnit<'_> {
+    /// Add a turn to the unit.
+    #[must_use]
+    pub fn turn(mut self, turn: Turn) -> Self {
+        self.turns.push(turn);
+        self
+    }
+
+    /// Add several turns, in order.
+    #[must_use]
+    pub fn turns(mut self, turns: impl IntoIterator<Item = Turn>) -> Self {
+        self.turns.extend(turns);
+        self
+    }
+
+    /// Write every accumulated turn, and their attachments, in ONE
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on any extraction or write failure; on error
+    /// nothing from the unit persists. See [`Session::commit_unit`] for the
+    /// idempotency and conflict rules.
+    pub async fn commit(self) -> Result<UnitResult, UnikoError> {
+        let Self { session, turns } = self;
+        session.commit_unit(turns).await
+    }
+}
+
+/// What one [`TurnUnit::commit`] recorded.
+#[derive(Debug)]
+pub struct UnitResult {
+    /// One per turn, in unit order — the same shape [`Session::observe`]
+    /// returns.
+    pub turns: Vec<ObserveResult>,
+    /// True when the unit was already recorded verbatim, so nothing was
+    /// written and no transaction was opened.
+    pub was_replay: bool,
+}
+
+impl UnitResult {
+    /// The message node ids this unit recorded, in unit order.
+    #[must_use]
+    pub fn message_node_ids(&self) -> Vec<NodeId> {
+        self.turns
+            .iter()
+            .map(|t| t.message.message_node_id)
+            .collect()
+    }
+}
+
+/// What one [`Session::summarize`] did.
+///
+/// Carries the chunk-refresh outcome alongside the summary so a caller can
+/// see that finalization failed, rather than that fact existing only as a
+/// `warn!` in a log the caller may not read (issue #40).
+#[derive(Debug)]
+pub struct SummarizeReport {
+    /// The generated `:Summary` node, or `None` when there was nothing to
+    /// summarize.
+    pub summary: Option<NodeId>,
+    /// The chunk refresh, when it succeeded.
+    pub finalize: Option<FinalizeReport>,
+    /// Why the chunk refresh failed, when it did. The summary was still
+    /// generated, but from stale chunks.
+    pub finalize_error: Option<String>,
+}
+
+impl SummarizeReport {
+    /// True when the chunk refresh succeeded, so the summary was built from
+    /// current chunks.
+    #[must_use]
+    pub fn finalized(&self) -> bool {
+        self.finalize_error.is_none()
     }
 }

@@ -115,9 +115,23 @@ impl KnowledgeBase {
         }
     }
 
+    /// Cypher for an external-id lookup, shared by the committing and
+    /// in-transaction variants so the two cannot drift apart.
+    fn ext_id_cypher(label: &str, id_field: &str) -> Result<String> {
+        validate_label(label)?;
+        validate_property_name(id_field)?;
+        Ok(format!(
+            "MATCH (n:{label} {{{id_field}: $eid}}) RETURN n, id(n) AS vid"
+        ))
+    }
+
     /// Look up a node by its external ID field (e.g. `message_id`).
     ///
     /// Uses the Hash index on the ID field for O(1) lookup.
+    ///
+    /// Runs on a fresh session, so it sees only *committed* state. Inside a
+    /// transaction you own, use
+    /// [`get_node_by_ext_id_in_tx`](Self::get_node_by_ext_id_in_tx).
     ///
     /// # Errors
     ///
@@ -129,17 +143,51 @@ impl KnowledgeBase {
         id_field: &str,
         ext_id: &str,
     ) -> Result<Option<(NodeId, HashMap<String, Value>)>> {
-        validate_label(label)?;
-        validate_property_name(id_field)?;
-
-        let cypher = format!("MATCH (n:{label} {{{id_field}: $eid}}) RETURN n, id(n) AS vid");
+        let cypher = Self::ext_id_cypher(label, id_field)?;
         let session = self.db.session();
         let result = session
             .query_with(&cypher)
             .param("eid", ext_id)
             .fetch_all()
             .await?;
+        Self::first_ext_id_row(&result)
+    }
 
+    /// Look up a node by its external ID field **inside** `tx`, so the read
+    /// joins that transaction's snapshot and its SSI read set.
+    ///
+    /// [`get_node_by_ext_id`](Self::get_node_by_ext_id) runs on a fresh
+    /// session and therefore *cannot* observe writes the caller has made
+    /// but not yet committed. Any check-then-create that lives inside a
+    /// caller-owned transaction must use this variant — otherwise a second
+    /// write of the same logical row in the same transaction reads "absent"
+    /// and creates a duplicate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Schema`] if `label` or `id_field` is invalid,
+    /// or [`UnikoError::Storage`] on database failure.
+    pub async fn get_node_by_ext_id_in_tx(
+        &self,
+        tx: &uni_db::Transaction,
+        label: &str,
+        id_field: &str,
+        ext_id: &str,
+    ) -> Result<Option<(NodeId, HashMap<String, Value>)>> {
+        let cypher = Self::ext_id_cypher(label, id_field)?;
+        let result = tx
+            .query_with(&cypher)
+            .param("eid", ext_id)
+            .fetch_all()
+            .await?;
+        Self::first_ext_id_row(&result)
+    }
+
+    /// Decode the first row of an [`ext_id_cypher`](Self::ext_id_cypher)
+    /// result, shared by both lookup variants.
+    fn first_ext_id_row(
+        result: &uni_db::QueryResult,
+    ) -> Result<Option<(NodeId, HashMap<String, Value>)>> {
         match result.rows().first() {
             None => Ok(None),
             Some(row) => {

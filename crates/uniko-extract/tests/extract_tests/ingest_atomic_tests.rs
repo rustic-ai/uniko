@@ -31,6 +31,9 @@ fn test_message(id: &str, content: &str, session: &str, sender: &str) -> IngestM
         addressed_to: None,
         timestamp: Utc::now(),
         metadata: HashMap::new(),
+        category: None,
+        source_id: None,
+        revision_id: None,
     }
 }
 
@@ -120,6 +123,57 @@ async fn test_atomic_idempotent() {
     );
     assert!(r2.extracted_entities.is_empty());
     assert!(r2.extracted_observations.is_empty());
+}
+
+/// A reused `message_id` carrying *different* text is a caller bug, not an
+/// idempotent replay. Silently returning the original left the caller
+/// believing the new turn had been recorded when it had not.
+#[tokio::test]
+async fn test_atomic_rejects_reused_id_with_different_content() {
+    let kb = test_kb().await;
+
+    let first = test_message("m-conflict", "the original fact", "s-1", "p-1");
+    let r1 = {
+        let mut sc = SessionContext::new(first.session_id.clone(), 0);
+        ingest_message_atomic(&kb, &first, &mut sc).await.unwrap()
+    };
+    let messages_before = count_label(&kb, "Message").await;
+
+    let conflicting = test_message("m-conflict", "a contradictory fact", "s-1", "p-1");
+    let err = {
+        let mut sc = SessionContext::new(conflicting.session_id.clone(), 0);
+        ingest_message_atomic(&kb, &conflicting, &mut sc)
+            .await
+            .expect_err("a reused id with different content must be rejected")
+    };
+
+    assert!(
+        matches!(err, uniko_store::UnikoError::IdConflict(_)),
+        "expected IdConflict, got {err:?}"
+    );
+    // Critical: `Conflict` is retriable and the ingest retry loop would spin
+    // on it. An id conflict is deterministic — retrying cannot clear it.
+    assert!(
+        !err.is_retriable(),
+        "an id conflict must not be classified retriable"
+    );
+
+    // The rejection wrote nothing and changed nothing.
+    assert_eq!(
+        count_label(&kb, "Message").await,
+        messages_before,
+        "a rejected conflict must not create a Message"
+    );
+    let (nid, props) = kb
+        .get_node_by_ext_id("Message", "message_id", "m-conflict")
+        .await
+        .unwrap()
+        .expect("original message still present");
+    assert_eq!(nid, r1.message_node_id);
+    assert!(matches!(
+        props.get("content"),
+        Some(uniko_store::Value::String(c)) if c == "the original fact"
+    ));
 }
 
 #[tokio::test]

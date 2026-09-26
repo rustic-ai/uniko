@@ -49,6 +49,34 @@ impl PyScope {
         slf
     }
 
+    /// Restrict recall to these record categories (issue #39).
+    ///
+    /// Pushed into candidate generation, so ranking, the result limit and
+    /// the coverage score all describe the permitted evidence rather than
+    /// items discarded after ranking. A category with no matches returns an
+    /// empty result instead of being padded with other categories.
+    fn categories<'py>(slf: PyRef<'py, Self>, categories: Vec<String>) -> PyRef<'py, Self> {
+        slf.map(|s| s.categories(categories));
+        slf
+    }
+
+    /// Restrict recall to these logical source ids (issue #39).
+    fn sources<'py>(slf: PyRef<'py, Self>, sources: Vec<String>) -> PyRef<'py, Self> {
+        slf.map(|s| s.sources(sources));
+        slf
+    }
+
+    /// Include superseded revisions and retired sources — historical recall
+    /// (issue #41).
+    ///
+    /// Ordinary recall excludes them, so a replaced page or a retired feed
+    /// cannot ground a current answer. Ask for them when the question is
+    /// what grounded a result at the time.
+    fn include_superseded<'py>(slf: PyRef<'py, Self>) -> PyRef<'py, Self> {
+        slf.map(Scope::include_superseded);
+        slf
+    }
+
     /// Restrict recall to these participant names (sender or subject).
     fn participants<'py>(slf: PyRef<'py, Self>, participants: Vec<String>) -> PyRef<'py, Self> {
         slf.map(|s| s.participants(participants));

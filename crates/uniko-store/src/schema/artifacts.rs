@@ -11,6 +11,19 @@ pub(crate) fn register_labels<'a>(
 ) -> SchemaBuilder<'a> {
     builder
         .label(labels::ARTIFACT)
+        // Typed provenance (issue #39). `category` is the caller's own
+        // record class — a user assertion, an executed result, a model
+        // interpretation — kept OUT of searchable prose so a recall scope
+        // can filter on it. `source_id` is denormalised from the
+        // FROM_SOURCE edge so that filter is a property predicate rather
+        // than a traversal, since it runs inside every candidate query.
+        .property_nullable("category", DataType::String)
+        .property_nullable("source_id", DataType::String)
+        // Which revision of that source this record came from (issue
+        // #41). Denormalised beside `source_id` so the "is this evidence
+        // still current" filter is a property predicate in candidate
+        // generation rather than a traversal.
+        .property_nullable("revision_id", DataType::String)
         .property("artifact_id", DataType::String)
         .property("kind", DataType::String)
         .property_nullable("path", DataType::String)
@@ -21,6 +34,10 @@ pub(crate) fn register_labels<'a>(
         .property_nullable("language", DataType::String)
         .property_nullable("created_at", DataType::DateTime)
         .property_nullable("updated_at", DataType::DateTime)
+        // Stamped when a newer revision of the same source arrives. An
+        // artifact with this set is history: it still answers a historical
+        // query but must not ground a current one (issue #41).
+        .property_nullable("superseded_at", DataType::DateTime)
         // Typed nullable modality metadata. Indexed columns where common
         // queries deserve them (`duration_ms` for "audio > 5 min",
         // `page_count` for "PDFs > N pages"); long-tail fields land in

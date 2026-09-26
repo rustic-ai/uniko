@@ -69,6 +69,28 @@ impl PyTurn {
         slf
     }
 
+    /// Tag this turn with the caller's own record category (issue #39).
+    ///
+    /// Typed provenance: recall can filter on it, and it never enters the
+    /// searchable text — so a consumer no longer has to encode a class into
+    /// the prose and parse it back out of results.
+    fn category<'py>(slf: PyRef<'py, Self>, category: String) -> PyRef<'py, Self> {
+        slf.map(|t| t.category(category));
+        slf
+    }
+
+    /// Attribute this turn to a stable logical source id (issue #39).
+    fn source<'py>(slf: PyRef<'py, Self>, source_id: String) -> PyRef<'py, Self> {
+        slf.map(|t| t.source(source_id));
+        slf
+    }
+
+    /// Declare which revision of that source this turn reflects (issue #41).
+    fn revision<'py>(slf: PyRef<'py, Self>, revision_id: String) -> PyRef<'py, Self> {
+        slf.map(|t| t.revision(revision_id));
+        slf
+    }
+
     /// Override the content type (defaults to `"text"`).
     fn content_type<'py>(slf: PyRef<'py, Self>, content_type: String) -> PyRef<'py, Self> {
         slf.map(|t| t.content_type(content_type));
@@ -168,6 +190,44 @@ impl PySession {
         })
     }
 
+    /// Record several related turns as ONE durable, idempotent unit.
+    ///
+    /// Every turn, and every attachment on them, lands in a single
+    /// transaction: either the whole unit is visible to later recall or none
+    /// of it is. Two separate `observe` calls cannot give that — an
+    /// interruption between them leaves a question with no answer.
+    ///
+    /// Resolves to `(observe_results, was_replay)`. `was_replay` is true when
+    /// every id was already present with identical content, so nothing was
+    /// written.
+    ///
+    /// Reusing an id with different content, repeating an id inside one unit,
+    /// or submitting a unit that is only partly recorded raises
+    /// `IdConflictError`.
+    fn commit_unit<'py>(
+        &self,
+        py: Python<'py>,
+        turns: Vec<PyRef<'_, PyTurn>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // Snapshot before entering the async block: PyO3 refs are not Send.
+        let turns: Vec<_> = turns
+            .iter()
+            .map(|t| t.snapshot())
+            .collect::<PyResult<_>>()?;
+        bridge!(py, session = self.inner.clone(), {
+            let mut guard = session.lock().await;
+            let result = guard.commit_unit(turns).await.map_err(to_pyerr)?;
+            Python::attach(|py| {
+                let turns: Vec<_> = result
+                    .turns
+                    .iter()
+                    .map(|r| PyObserveResult::from_rust(py, r))
+                    .collect::<PyResult<_>>()?;
+                Ok((turns, result.was_replay))
+            })
+        })
+    }
+
     /// Ingest a standalone document/blob into this session (not a turn).
     fn ingest<'py>(&self, py: Python<'py>, source: &PyIngestSource) -> PyResult<Bound<'py, PyAny>> {
         let src = source.snapshot()?;
@@ -230,13 +290,18 @@ impl PySession {
 
     /// Generate and persist a summary of the session so far.
     ///
-    /// Resolves to the new summary node id, or `None` when there was nothing
-    /// new to summarize.
+    /// Resolves to `(summary_node_id, finalize_error)`: the new summary node
+    /// id or `None` when there was nothing new to summarize, paired with the
+    /// chunk-refresh failure message or `None` when it succeeded.
+    ///
+    /// The refresh is best-effort and never fails the call, but its outcome
+    /// is reported rather than only logged, so a caller can tell that the
+    /// summary was built from stale chunks.
     fn summarize<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         bridge!(py, session = self.inner.clone(), {
             let guard = session.lock().await;
-            let node = guard.summarize().await.map_err(to_pyerr)?;
-            Ok(node)
+            let report = guard.summarize().await.map_err(to_pyerr)?;
+            Ok((report.summary, report.finalize_error))
         })
     }
 
@@ -283,6 +348,30 @@ impl PySession {
             let mut guard = session.lock().await;
             let result = guard.observe(turn).await.map_err(to_pyerr)?;
             Python::attach(|py| PyObserveResult::from_rust(py, &result))
+        })
+    }
+
+    /// Blocking variant of [`commit_unit`](Self::commit_unit).
+    fn commit_unit_sync(
+        &self,
+        py: Python<'_>,
+        turns: Vec<PyRef<'_, PyTurn>>,
+    ) -> PyResult<(Vec<Py<PyObserveResult>>, bool)> {
+        let turns: Vec<_> = turns
+            .iter()
+            .map(|t| t.snapshot())
+            .collect::<PyResult<_>>()?;
+        bridge_sync!(py, session = self.inner.clone(), {
+            let mut guard = session.lock().await;
+            let result = guard.commit_unit(turns).await.map_err(to_pyerr)?;
+            Python::attach(|py| {
+                let turns: Vec<_> = result
+                    .turns
+                    .iter()
+                    .map(|r| PyObserveResult::from_rust(py, r))
+                    .collect::<PyResult<_>>()?;
+                Ok((turns, result.was_replay))
+            })
         })
     }
 
@@ -391,11 +480,11 @@ impl PySession {
     }
 
     /// Blocking variant of [`summarize`](Self::summarize).
-    fn summarize_sync(&self, py: Python<'_>) -> PyResult<Option<NodeId>> {
+    fn summarize_sync(&self, py: Python<'_>) -> PyResult<(Option<NodeId>, Option<String>)> {
         bridge_sync!(py, session = self.inner.clone(), {
             let guard = session.lock().await;
-            let node = guard.summarize().await.map_err(to_pyerr)?;
-            Ok(node)
+            let report = guard.summarize().await.map_err(to_pyerr)?;
+            Ok((report.summary, report.finalize_error))
         })
     }
 

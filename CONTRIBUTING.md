@@ -145,6 +145,34 @@ cargo nextest run -E 'test(recall_cascade)'
 CI runs `cargo nextest run --workspace`, so that is the command of record. Add
 or update tests alongside any behavioral change.
 
+### macOS: put `TMPDIR` on a RAM disk before running tests
+
+`KnowledgeBase::in_memory()` is not really in memory — uni-db materializes it
+as a store directory under `TMPDIR`, and creating one writes the full schema
+(24 node types, 53 edge types, plus indexes) as many small files. That is one
+store per test, with tests running in parallel.
+
+On macOS `TMPDIR` lives on the APFS Data volume, where small-file writes slow
+down badly as the volume fills. On a volume at 87% full, 200 small files plus
+`sync` took **5.45 s** (~27 ms per file); the same work on a RAM disk took
+**0.06 s**.
+
+This does not fail — it stalls. Tests sit at ~3% CPU with ~60 MB RSS and no
+swap, making no progress, while nextest prints only `SLOW [>60s]`. It is
+indistinguishable from a deadlock unless you measure the filesystem.
+
+```sh
+diskutil erasevolume HFS+ unikoram $(hdiutil attach -nomount ram://8388608)
+export TMPDIR=/Volumes/unikoram
+```
+
+With that set, nine `ingest_atomic_tests` that otherwise never finished in
+over two minutes complete in **2.5 s**. Reclaim the RAM with `hdiutil detach
+/Volumes/unikoram`; you will need to re-create it after a reboot.
+
+Our Linux CI runs on fast storage and never hits this, so a green CI run tells
+you nothing about whether your local suite will hang.
+
 ---
 
 ## 4. CI gates (must pass before merge)

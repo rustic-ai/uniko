@@ -27,6 +27,9 @@ fn ingest_msg(id: &str, content: &str, content_type: &str, session: &str) -> Ing
         addressed_to: None,
         timestamp: Utc::now(),
         metadata: HashMap::new(),
+        category: None,
+        source_id: None,
+        revision_id: None,
     }
 }
 

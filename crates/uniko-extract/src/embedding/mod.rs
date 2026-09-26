@@ -63,8 +63,11 @@ pub async fn embed_multivector_query(
     text: &str,
 ) -> Result<Vec<Vec<f32>>, UnikoError> {
     let prefixed = apply_prefix(text, kb.config().embedding.query_prefix.as_deref());
-    // ColBERT lives on the hybrid alias (EmbedHybrid); the dense EMBED_ALIAS
-    // has no multi-vector head.
+    // ColBERT rides the hybrid alias. uni-xervo 0.18.1 adapts a
+    // `HybridEmbeddingModel` handle to the narrow `MultiVectorEmbeddingModel`
+    // facade (`hybrid_adapter::HybridAsMultiVector`), so one alias serves both
+    // the document pass and the query. Before 0.18.1 this lookup failed and
+    // the reranker silently kept RRF order — see `rustic-ai/uni-xervo#49`.
     let results = kb
         .embed_multivector(HYBRID_EMBED_ALIAS, &[prefixed.as_str()])
         .await?;

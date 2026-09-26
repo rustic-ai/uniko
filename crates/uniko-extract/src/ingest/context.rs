@@ -55,17 +55,8 @@ impl SessionContext {
 
     /// Set the current speaker and update other_speakers list.
     pub fn set_current_speaker(&mut self, speaker: &str) {
+        self.other_speakers = advance_speaker(&mut self.sentence_ctx, &self.participants, speaker);
         self.current_speaker = speaker.to_string();
-        self.sentence_ctx.speaker = speaker.to_string();
-
-        // Rebuild other_speakers from participants excluding current.
-        self.other_speakers = self
-            .participants
-            .keys()
-            .filter(|name| name.as_str() != speaker)
-            .cloned()
-            .collect();
-        self.sentence_ctx.other_speakers = self.other_speakers.clone();
     }
 
     /// Register a participant (caches name → nid).
@@ -77,6 +68,31 @@ impl SessionContext {
     pub fn participant_nid(&self, name: &str) -> Option<NodeId> {
         self.participants.get(name).copied()
     }
+}
+
+/// Point a sentence-context window at `speaker`, rebuilding
+/// `other_speakers` from `participants`. Returns the rebuilt list.
+///
+/// A free function rather than only a [`SessionContext`] method because a
+/// multi-turn atomic unit must advance the speaker on a **local**
+/// `SentenceContext` inside the transaction body: the real `SessionContext`
+/// must not be mutated until the unit commits, or a retriable conflict on a
+/// later turn would re-seed pronoun resolution from an already-advanced
+/// window. [`SessionContext::set_current_speaker`] is implemented on top of
+/// this, so there is one rule for both paths.
+pub fn advance_speaker(
+    sentence_ctx: &mut SentenceContext,
+    participants: &HashMap<String, NodeId>,
+    speaker: &str,
+) -> Vec<String> {
+    sentence_ctx.speaker = speaker.to_string();
+    let others: Vec<String> = participants
+        .keys()
+        .filter(|name| name.as_str() != speaker)
+        .cloned()
+        .collect();
+    sentence_ctx.other_speakers = others.clone();
+    others
 }
 
 /// Pronoun resolution context window.

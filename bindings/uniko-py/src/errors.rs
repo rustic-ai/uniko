@@ -48,6 +48,12 @@ create_exception!(
 );
 create_exception!(
     _uniko,
+    IdConflictError,
+    UnikoError,
+    "A stable external id was reused for different content. Not retriable."
+);
+create_exception!(
+    _uniko,
     UnsupportedError,
     UnikoError,
     "The content modality has no registered extractor."
@@ -70,6 +76,7 @@ pub fn to_pyerr(err: CoreError) -> PyErr {
         CoreError::Llm(_) => (LlmError::new_err(msg), "llm"),
         CoreError::Timeout(_) => (TimeoutError::new_err(msg), "timeout"),
         CoreError::Conflict(_) => (ConflictError::new_err(msg), "conflict"),
+        CoreError::IdConflict(_) => (IdConflictError::new_err(msg), "id_conflict"),
         CoreError::Unsupported(_) => (UnsupportedError::new_err(msg), "unsupported"),
         CoreError::Storage(_) => (UnikoError::new_err(msg), "storage"),
         CoreError::Search(_) => (UnikoError::new_err(msg), "search"),
@@ -107,6 +114,7 @@ pub fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add("LlmError", py.get_type::<LlmError>())?;
     m.add("TimeoutError", py.get_type::<TimeoutError>())?;
     m.add("ConflictError", py.get_type::<ConflictError>())?;
+    m.add("IdConflictError", py.get_type::<IdConflictError>())?;
     m.add("UnsupportedError", py.get_type::<UnsupportedError>())?;
     Ok(())
 }

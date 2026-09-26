@@ -146,6 +146,18 @@ pub struct PyRecallItem {
     /// Lineage — the messages/attachments this content came from.
     #[pyo3(get)]
     sources: Vec<Py<PyRecallSource>>,
+    /// The caller's record category, when the record carries one (issue
+    /// #39). `None` means the item genuinely has none — not that it was
+    /// filtered, since a category filter runs during candidate generation.
+    #[pyo3(get)]
+    category: Option<String>,
+    /// The logical source id this item traces to. `None` is the explicit
+    /// "lineage unavailable" signal for an aggregate with no single source.
+    #[pyo3(get)]
+    source_id: Option<String>,
+    /// Which revision of that source grounded this item (issue #41).
+    #[pyo3(get)]
+    revision_id: Option<String>,
 }
 
 impl PyRecallItem {
@@ -164,6 +176,9 @@ impl PyRecallItem {
                 score: item.score,
                 content: item.content.clone(),
                 sources,
+                category: item.category.clone(),
+                source_id: item.source_id.clone(),
+                revision_id: item.revision_id.clone(),
             },
         )
     }

@@ -55,8 +55,8 @@ pub use episode::{RecordEpisodeParams, record_episode};
 #[doc(inline)]
 pub use facade::{
     ArtifactView, Data, FinalizeReport, GoalContext, GoalPhase, GoalView, Goals, LlmSpec,
-    MessageView, ObserveResult, RecallScope, Session, TaskPhase, TaskView, Turn, Uniko,
-    UnikoBuilder,
+    MessageView, ObserveResult, RecallScope, Session, SummarizeReport, TaskPhase, TaskView, Turn,
+    TurnUnit, Uniko, UnikoBuilder, UnitResult,
 };
 #[doc(inline)]
 pub use fact::{AssertFactParams, InvalidateFactParams, assert_fact, invalidate_fact};
@@ -75,8 +75,8 @@ pub use recall::{
 #[doc(no_inline)]
 pub use uniko_extract::ingest::{
     ArtifactIngestResult, AtomicIngestResult, IngestContext, IngestData, IngestOutcome,
-    IngestSource, ModalityExtractor, ModalityRegistry, PdfIngestResult, ingest_source,
-    resolve_mime,
+    IngestSource, ModalityExtractor, ModalityPrepared, ModalityRegistry, PdfIngestResult,
+    ingest_source, resolve_mime,
 };
 // Content-type taxonomy shared by ingest routing and recall channels.
 #[doc(no_inline)]

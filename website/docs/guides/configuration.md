@@ -405,15 +405,138 @@ Three `validate()` gates catch the invalid combinations at open time:
 - `reranker.style = "colbert"` without `multivector_dimensions` is an error.
 - `reranker.top_n` must be `>= recall_limit` whenever the reranker is enabled.
 
+### Aliases each channel uses
+
+The two channels reach the model through different xervo aliases, because the
+write and query sides need different capabilities:
+
+| Alias | Task | Registered when | Serves |
+|---|---|---|---|
+| `embed/default` | `Embed` | always | dense columns on lone-dense labels (Message, Summary, …) |
+| `embed/hybrid` | `EmbedHybrid` | `sparse_dimensions` **or** `multivector_dimensions` set | the dense + ColBERT columns on `:Chunk` / `:Observation`, written in one forward pass |
+`embed/hybrid` serves **both sides**: the document pass that writes the columns,
+and the query-side vector for `uni.sparse.query` and ColBERT MaxSim.
+
+That is not free historically. A sparse query asks the runtime for a
+`SparseEmbeddingModel` and a ColBERT query for a `MultiVectorEmbeddingModel`,
+while an `EmbedHybrid` alias loads a `HybridEmbeddingModel` — a different trait
+object. Before **uni-xervo 0.18.1** those lookups failed and both channels
+returned nothing on every query while ingest kept populating the columns
+normally, so the failure was query-only and silent
+(`rustic-ai/uni-xervo#49`). 0.18.1 adapts the hybrid handle to each narrow
+facade (`hybrid_adapter::HybridAsSparse` / `HybridAsMultiVector`), so one alias
+now covers everything.
+
+If you are pinned below 0.18.1, register separate `EmbedSparse` /
+`EmbedMultiVector` aliases against the same `model_id` — the per-task preset
+tables resolve the bare repo id for each head.
+
 !!! note "Cost"
-    Setting either hybrid dimension registers a second model alias,
-    `embed/hybrid`, alongside `embed/default`. The runtime caches by task, so
-    **the model loads twice** — budget roughly 2× embedder memory. The ColBERT
-    index uses an exact (flat) vector index because it only ever re-scores a
-    candidate window, never scans.
+    The runtime caches loaded models **by task**, so `embed/hybrid` is a
+    second load of the same weights alongside `embed/default` — budget roughly
+    2× embedder memory before enabling these channels on a constrained host.
+
+    The ColBERT index uses an exact (flat) vector index because it only ever
+    re-scores a candidate window, never scans.
+
+    **Declaring `multivector_dimensions` is not free even when ColBERT is
+    off.** Every `:Chunk` and `:Observation` then carries a
+    `List(Vector(d))` column, which widens the table the dense and sparse
+    scans read. On a LoCoMo conversation (bge-m3, CPU) mean recall latency
+    went from ~10 s/question without the column to ~46 s/question with it
+    present but unused. Declare it only when you intend to use ColBERT.
 
     Neither channel is reachable from the Python builder today; configure them
     from Rust.
+
+### What they measure on LoCoMo
+
+Both channels were returning nothing until their query paths were fixed
+(2026-09-19), so no earlier number from them measured anything. The first real
+measurement, on LoCoMo `conv-30` (105 questions, bge-m3, retrieval-only, CPU,
+all four arms over one shared knowledge base so only the retrieval channel
+varies):
+
+| arm | evidence hit | Δ | recall latency | Δ | questions changed (better / worse) |
+|---|---|---|---|---|---|
+| dense only | 66.41% | — | 46.9 s | — | — |
+| + sparse | 61.83% | **−4.58 pp** | 69.8 s | +49% | 10 (2 / 8) |
+| + ColBERT | 67.18% | +0.76 pp | 59.6 s | +27% | 1 (1 / 0) |
+| + sparse + ColBERT | 60.31% | **−6.11 pp** | 84.3 s | +80% | 8 (0 / 8) |
+
+Read with care:
+
+- **Sparse is a regression on this workload.** −4.58 pp is well outside the
+  ~0.76 pp run-to-run ingest variance measured on the same conversation, the
+  loss is uniform across Single-hop / Multi-hop / Temporal, and enabling both
+  channels lands *below* sparse alone. Adversarial questions are the one
+  category that gains (+4.0 pp), which fits a lexical channel being better at
+  "this term never appears" judgements.
+- **ColBERT is a null result, not a win.** +0.76 pp sits exactly on the noise
+  floor and comes from a single question flipping; every category except
+  Single-hop is identical to dense-only. The defensible claim is that its
+  quality effect here is indistinguishable from zero at +27% latency.
+- One conversation, no LLM judge, CPU. Enough to say neither channel is free;
+  not enough to generalise across the corpus. Re-measure on your own workload
+  before enabling either.
+
+### Verifying a channel is actually live
+
+Both channels fail **silently** if misconfigured. `run_sparse_source` logs a
+failed `uni.sparse.query` at `debug` and returns an empty hit list, and
+`colbert_rerank` logs at `warn` and keeps the RRF order. In both cases recall
+still returns results, so an enabled-but-broken channel looks exactly like one
+that simply did not change the ranking — while still costing a query per
+variant.
+
+ColBERT fails the same way and is even easier to miss: `colbert_rerank`
+warns once per query and keeps the RRF order, so the bundle is still returned,
+merely un-reranked.
+
+Check, rather than assume:
+
+```sh
+# The channel prints one line per query on the success path only.
+RUST_LOG=uniko_memory=debug <your binary> 2>&1 | grep -E "sparse_source|sparse query failed"
+```
+
+- `RECALL_PROF sparse_source label=Chunk rows=N` — the channel ran and returned
+  `N` hits.
+- `sparse query failed …` — it errored; the channel is contributing nothing.
+- Neither line — `recall_sparse_enabled` never took effect.
+
+For ColBERT, grep at `warn` level instead — one line per query means the
+reranker is inert:
+
+```sh
+<your binary> 2>&1 | grep -E "colbert query embed failed|colbert maxsim query failed"
+```
+
+The decisive check for either channel is a **differential run**: same KB, the
+channel on and off, comparing per-question results. If the two arms agree on
+every question, the channel changed nothing — which is what a silent failure
+looks like.
+
+A quick end-to-end check of the storage layer, independent of recall, lives in
+`crates/uniko-store/tests/sparse_query_alias_repro.rs`. It is `#[ignore]`d
+because it loads bge-m3 (~2 GB):
+
+```sh
+cargo nextest run -p uniko-store --test sparse_query_alias_repro \
+  --run-ignored all --no-capture
+```
+
+It asserts the columns are populated, the raw `uni.sparse.query` returns ranked
+rows, and both `recall_sparse_search` and `recall_colbert_maxsim` project them
+without error.
+
+!!! warning "Benchmark profiles"
+    `crates/uniko-bench/bench-configs/` ships arms that enable these channels
+    (`locomo-bgem3-norerank-retrieval.json` for sparse,
+    `locomo-bgem3-colbert-retrieval.json` for ColBERT). Any measurement taken
+    with them **before** these channels were verified live should be treated as
+    unmeasured, not as a null result: a channel that errors on every query is
+    indistinguishable in the summary from one that did not help.
 
 ---
 

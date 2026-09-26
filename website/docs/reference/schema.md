@@ -233,6 +233,28 @@ Most embedding-bearing nodes also carry a **Vector** index. `Message`, `Chunk`,
 computes the vector on write); `Entity`, `Fact`, `Episode`, `Goal`, `Task`,
 `Session`, `Topic`, and `Procedure` use application-computed embeddings.
 
+### Conditional hybrid columns
+
+`:Chunk` and `:Observation` — and only those two — gain extra retrieval
+columns when the configured embedder is hybrid. Neither exists by default;
+the schema omits the column entirely when the corresponding dimension is
+`None`, so a dense-only knowledge base is byte-identical to before.
+
+| Column | Type | Added when | Index |
+|---|---|---|---|
+| `sparse_embedding` | `SparseVector(n)` | `embedding.sparse_dimensions = Some(n)` | sparse auto-embed index on the `embed/hybrid` alias |
+| `colbert_embedding` | `List(Vector(d))` | `embedding.multivector_dimensions = Some(d)` | exact (flat) vector index on the `embed/hybrid` alias |
+
+With either set, the dense `embedding` column on these two labels moves from
+`embed/default` to `embed/hybrid`, so dense, sparse and ColBERT are all
+produced by one forward pass. Changing either dimension changes the registered schema and the
+vector widths, so it **requires a fresh ingest** — an existing store cannot be
+reused across the change.
+
+See [Sparse + ColBERT hybrid retrieval](../guides/configuration.md#sparse-colbert-hybrid-retrieval)
+for the configuration, the alias topology, and how to verify a channel is
+actually live.
+
 !!! note "This catalog reflects the installed schema"
     Because it is drawn from `crates/uniko-store/src/schema`, this page is
     authoritative — it lists exactly what `register_schema` installs. Some

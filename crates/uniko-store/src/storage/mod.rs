@@ -441,20 +441,71 @@ impl KnowledgeBase {
     /// RC2). The caller must hold these guards across BOTH the existence
     /// re-read AND the commit so a second writer cannot interleave; the guards
     /// are dropped when the returned `Vec` goes out of scope (after commit).
-    /// Ids are de-duplicated and sorted so concurrent callers acquire shared
-    /// keys in the same order, preventing deadlock (mirrors
-    /// [`KnowledgeBase::batch_upsert_facts`]).
+    ///
+    /// A caller that also writes artifacts in the same transaction must use
+    /// [`lock_ingest_unit`](Self::lock_ingest_unit) instead — see there for
+    /// why the two key families cannot be acquired in separate calls.
     pub async fn lock_entity_ids(
         &self,
         entity_ids: &[String],
     ) -> Vec<tokio::sync::MutexGuard<'_, ()>> {
+        self.lock_ingest_unit(entity_ids, &[]).await
+    }
+
+    /// Acquire the per-content RMW striped locks for `content_ids`
+    /// (SHA-256 hex), in a deadlock-free order, returning the held guards.
+    ///
+    /// The `:ArtifactContent` merge is the same check-then-create hazard as
+    /// entity dedup: without a guard two concurrent ingests of identical
+    /// bytes both read "absent" and both CREATE a duplicate row. A caller
+    /// driving the merge inside its own transaction (via
+    /// [`merge_artifact_content_in_tx`](Self::merge_artifact_content_in_tx))
+    /// must hold these across BOTH the existence read AND the commit.
+    ///
+    /// A caller that also upserts entities in the same transaction must use
+    /// [`lock_ingest_unit`](Self::lock_ingest_unit) instead.
+    pub async fn lock_content_ids(
+        &self,
+        content_ids: &[String],
+    ) -> Vec<tokio::sync::MutexGuard<'_, ()>> {
+        self.lock_ingest_unit(&[], content_ids).await
+    }
+
+    /// Acquire, in ONE deadlock-free pass, every `rmw_locks` guard an
+    /// ingest unit needs: the per-entity locks for its merged entity batch
+    /// plus the per-content locks for every artifact it will write.
+    ///
+    /// A unit opens one transaction and commits once, so it must take
+    /// exactly one `rmw_locks` acquisition. [`StripedLocks::lock_many`]
+    /// dedups by stripe index and acquires ascending, but only *within a
+    /// single call* — so two sequential calls (entities, then content) can
+    /// self-deadlock whenever an entity key and a content key land on the
+    /// same non-reentrant stripe, and can deadlock AB/BA against a
+    /// concurrent unit acquiring them in the other order. That is issue
+    /// #36's failure mode with a new pair of key families. Passing the
+    /// union here is safe however large it is.
+    ///
+    /// Callers must NOT hold these around
+    /// [`lock_session_setup`](Self::lock_session_setup) — setup locks
+    /// first and fully released, then RMW (see that method's contract).
+    pub async fn lock_ingest_unit(
+        &self,
+        entity_ids: &[String],
+        content_ids: &[String],
+    ) -> Vec<tokio::sync::MutexGuard<'_, ()>> {
         let keys: Vec<Vec<u8>> = entity_ids
             .iter()
             .map(|id| crate::locks::entity_lock_key(id))
+            .chain(
+                content_ids
+                    .iter()
+                    .map(|id| crate::locks::content_lock_key(id)),
+            )
             .collect();
-        // `lock_many` dedups by stripe index (not just by key bytes):
-        // two distinct entity ids can hash to the same stripe, and
-        // acquiring that non-reentrant stripe twice would self-deadlock.
+        // `lock_many` dedups by stripe index (not just by key bytes): two
+        // distinct keys — including one entity and one content key — can
+        // hash to the same stripe, and acquiring that non-reentrant stripe
+        // twice would self-deadlock.
         self.rmw_locks.lock_many(&keys).await
     }
 

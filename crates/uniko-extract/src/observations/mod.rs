@@ -185,6 +185,15 @@ pub struct ObservationInputs<'a> {
     /// Optional path to a custom observation rules YAML; `None` uses
     /// bundled rules.
     pub observation_rules_path: Option<&'a std::path::Path>,
+    /// The parent message's record category, inherited by every observation
+    /// extracted from it (issue #39). Denormalised so the recall filter can
+    /// reach derived items with a property predicate rather than walking
+    /// OBSERVED_IN back to the message.
+    pub category: Option<&'a str>,
+    /// The parent message's logical source id, inherited likewise.
+    pub source_id: Option<&'a str>,
+    /// The parent's revision id (issue #41), inherited likewise.
+    pub revision_id: Option<&'a str>,
 }
 
 /// Output of a successful [`prepare_observations`] call.
@@ -201,6 +210,12 @@ pub struct ObservationPrep {
     pub sentence_ctx_updated: Option<crate::ingest::context::SentenceContext>,
     pub sender_ms: u128,
     pub extract_ms: u128,
+    /// Provenance inherited from the parent message.
+    pub category: Option<String>,
+    /// Provenance inherited from the parent message.
+    pub source_id: Option<String>,
+    /// Provenance inherited from the parent message.
+    pub revision_id: Option<String>,
 }
 
 impl ObservationPrep {
@@ -214,7 +229,9 @@ impl ObservationPrep {
 pub enum ObservationPrepOutcome {
     /// CLS gate / no-entities / empty extraction. Caller skips the write.
     Skip(String),
-    Ready(ObservationPrep),
+    /// Boxed: the prep is far larger than `Skip`, and an unboxed variant
+    /// makes every `Skip` pay for it.
+    Ready(Box<ObservationPrep>),
 }
 
 /// CPU + optional SENT_BY lookup. Does NOT open a transaction; does
@@ -349,7 +366,10 @@ pub async fn prepare_observations(
 
     let entity_refs = combine_entity_refs(input.extracted_entities, &sender_ref);
 
-    Ok(ObservationPrepOutcome::Ready(ObservationPrep {
+    Ok(ObservationPrepOutcome::Ready(Box::new(ObservationPrep {
+        category: input.category.map(str::to_string),
+        source_id: input.source_id.map(str::to_string),
+        revision_id: input.revision_id.map(str::to_string),
         all_obs,
         used_model,
         sender_ref,
@@ -357,7 +377,7 @@ pub async fn prepare_observations(
         sentence_ctx_updated,
         sender_ms,
         extract_ms,
-    }))
+    })))
 }
 
 /// Writes-only inside the caller's tx. Creates Observation nodes,
@@ -383,6 +403,9 @@ pub async fn apply_observations(
         all_obs,
         sender_ref,
         entity_refs,
+        category,
+        source_id,
+        revision_id,
         ..
     } = prep;
 
@@ -394,6 +417,15 @@ pub async fn apply_observations(
             let mut props = HashMap::new();
             props.insert("observation_id".into(), Value::String(obs_id));
             props.insert("content".into(), Value::String(raw.content.clone()));
+            if let Some(ref category) = category {
+                props.insert("category".into(), Value::String(category.clone()));
+            }
+            if let Some(ref source_id) = source_id {
+                props.insert("source_id".into(), Value::String(source_id.clone()));
+            }
+            if let Some(ref revision_id) = revision_id {
+                props.insert("revision_id".into(), Value::String(revision_id.clone()));
+            }
             // Normalize the subject (the grouping/ABOUT key) so it keys
             // identically with Entity names and consolidation grouping. The
             // human-readable form lives in `content`, left untouched.

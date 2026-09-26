@@ -184,6 +184,9 @@ pub async fn ingest_into_kb_with_observer(
                 addressed_to: Some(vec![other_speaker]),
                 timestamp,
                 metadata: HashMap::new(),
+                category: None,
+                source_id: None,
+                revision_id: None,
             };
 
             // Atomic ingest: Message + entities + observations in one tx.
@@ -214,6 +217,10 @@ pub async fn ingest_into_kb_with_observer(
 
                     let artifact = IngestArtifact {
                         artifact_id: format!("{}-{}-img", sample.sample_id, turn.dia_id),
+                        // The id above is deliberate and per-turn, so it is
+                        // the identity: two turns whose caption+query text
+                        // happens to match must stay two artifacts.
+                        caller_supplied_id: true,
                         content: artifact_content,
                         kind: "image".to_string(),
                         path: img_path,

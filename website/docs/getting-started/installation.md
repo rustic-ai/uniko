@@ -256,7 +256,7 @@ pay cold-start latency.
 | `embed/default` | Embedding | `BAAI/bge-small-en-v1.5` | 384-dim, BERT-based MTEB-strong retriever. Query side uses the prefix `"Represent this sentence for searching relevant passages: "`; documents go in raw. |
 | `nlp/default` | NLP | `dragonscale-ai/kniv-deberta-nlp-base-en-xsmall` | Multi-task cascade loaded from the `onnx/cascade-int8.onnx` (INT8) artifact. xervo owns tokenization and POS / NER / DEP / SRL / CLS decode; uniko adapts the output. |
 | `rerank/default` | Rerank | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder reranker, **enabled by default**. 22M params; re-scores the top RRF candidates. Registered only when `reranker.enabled` and `style != "colbert"`. |
-| `embed/hybrid` | Hybrid embed | same model as `embed/default` | Registered **only** when `EmbeddingConfig` sets `sparse_dimensions` or `multivector_dimensions` (e.g. the `bge-m3` preset). Backs the learned-sparse and ColBERT channels — see [Hybrid retrieval](../guides/configuration.md#sparse-colbert-hybrid-retrieval). |
+| `embed/hybrid` | Hybrid embed | same model as `embed/default` | Registered **only** when `EmbeddingConfig` sets `sparse_dimensions` or `multivector_dimensions` (e.g. the `bge-m3` preset). Serves the learned-sparse and ColBERT channels on `:Chunk` / `:Observation` — both the single-pass document write and the query-side vectors (uni-xervo 0.18.1+ adapts the hybrid handle to each narrow facade) — see [Hybrid retrieval](../guides/configuration.md#sparse-colbert-hybrid-retrieval). |
 | `ocr/default` | OCR | `monkt/paddleocr-onnx` | Registered **only** when `ocr.enabled` is set. Drives the OCR tier of tiered PDF extraction. |
 
 !!! note "Where these defaults live"

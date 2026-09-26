@@ -181,6 +181,12 @@ impl Agent {
             participants: scope.dims.participants.clone(),
             since: scope.dims.since,
             until: scope.dims.until,
+            categories: scope.dims.categories.clone(),
+            sources: scope.dims.sources.clone(),
+            // `query_in` scopes a raw Cypher read, where the caller writes
+            // the MATCH themselves; revision exclusion belongs to recall's
+            // candidate generation, not here.
+            exclude: uniko_store::repository::recall::ExcludeSet::default(),
         };
         let mut params: HashMap<String, Value> = HashMap::new();
         if filter.is_active() {
@@ -331,15 +337,51 @@ impl Agent {
     /// # Ok(()) }
     /// ```
     ///
-    /// Unlike [`Session::finalize`](crate::Session::finalize) this does not
-    /// quiesce the streaming pipeline first — there is no session-to-pipeline
-    /// binding at this level, so it chunks whatever is committed at call time.
+    /// Quiesces the streaming pipeline first, when the instance has one, so
+    /// the report cannot claim completion while ingest for this session is
+    /// still in flight (issue #40).
+    ///
+    /// The barrier is instance-wide rather than per-session — there is no
+    /// session-to-pipeline binding at this level — so it may wait on
+    /// unrelated work. That is broader than necessary but never waits too
+    /// little, which is the direction that matters for a completion signal.
     ///
     /// # Errors
     ///
     /// Returns [`UnikoError`] on a read or write failure.
     pub async fn finalize_session(&self, session_id: &str) -> Result<FinalizeReport, UnikoError> {
+        if let Some(pipeline) = &self.streaming {
+            pipeline.quiesce().await;
+        }
         finalize_session(&self.kb, session_id).await
+    }
+
+    /// Retire a logical source: no revision of it grounds a current answer.
+    ///
+    /// Nothing is deleted, so a past result stays attributable to the
+    /// revision that grounded it — ask for it with
+    /// [`Scope::include_superseded`](crate::Scope::include_superseded).
+    /// Retirement is recorded on the source, never on its content, so
+    /// retiring one source cannot affect another that merely shares
+    /// identical bytes: those share an `:ArtifactContent` row but not a
+    /// `:Source`.
+    ///
+    /// Returns `false` when no such source exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a read or write failure.
+    pub async fn retire_source(&self, source_id: &str) -> Result<bool, UnikoError> {
+        self.kb.retire_source(source_id).await
+    }
+
+    /// Un-retire a source, making its current revision eligible again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a read or write failure.
+    pub async fn restore_source(&self, source_id: &str) -> Result<bool, UnikoError> {
+        self.kb.restore_source(source_id).await
     }
 
     /// Run one consolidation cycle for this agent, now.

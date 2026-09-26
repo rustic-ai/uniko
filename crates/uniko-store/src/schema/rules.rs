@@ -30,7 +30,16 @@ pub(crate) fn register_labels(builder: SchemaBuilder<'_>) -> SchemaBuilder<'_> {
 
 pub(crate) fn register_edges(builder: SchemaBuilder<'_>) -> SchemaBuilder<'_> {
     builder
-        .edge_type(edges::SUPERSEDES, &[labels::RULE], &[labels::RULE])
+        // SUPERSEDES is shared: a Rule replaced by a successor rule, and an
+        // Artifact revision replaced by a newer revision of the same Source
+        // (issue #41). uni-db permits one declaration per edge type, so both
+        // endpoint pairs are declared together here rather than separately —
+        // declaring it twice is rejected as a conflicting re-declaration.
+        .edge_type(
+            edges::SUPERSEDES,
+            &[labels::RULE, labels::ARTIFACT],
+            &[labels::RULE, labels::ARTIFACT],
+        )
         .done()
         .edge_type(edges::COVERS, &[labels::RULE], &[labels::EPISODE])
         .property_nullable("correct", DataType::Int64)

@@ -68,7 +68,7 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.2.2" }
 # bge-m3 GPU campaign is unaffected. To restore local LLMs, re-add
 # "provider-candle"/"provider-mistralrs" (needs a CUDA-compatible gcc<=15 +
 # matching glibc for a GPU build).
-uni-db = { version = "3", default-features = false, features = [
+uni-db = { version = "4", default-features = false, features = [
     "mimalloc",
     "lance-backend",
     "apoc-core",
@@ -87,14 +87,13 @@ uni-db = { version = "3", default-features = false, features = [
 # `KnowledgeBase::build_shared_runtime` / `open_with_runtime`. uni-db
 # uses uni-xervo internally but does not re-export the type. Version
 # pinned to whatever uni-db currently depends on (see
-# `../uni/Cargo.toml`). uni-db 3.2.0 depends on uni-xervo >=0.17.0, <1.0.0,
-# which still resolves to 0.17.0 (the newest published 0.x).
-uni-xervo = { version = "0.17.0", default-features = false }
+# `../uni/Cargo.toml`). uni-db 4.1.0 depends on uni-xervo >=0.18.1, <1.0.0.
+uni-xervo = { version = "0.18.1", default-features = false }
 # Tiered PDF extraction (native text -> OCR -> doc-VLM). Pulls only traits +
 # the pure-Rust native (lopdf) + rasterizer (hayro) tiers; the inference
 # providers ride on `uni-xervo` itself. Built against the same crates.io
-# uni-xervo 0.17.0, so the `OcrModel` / `ModelRuntime` types unify.
-uni-xervo-pdf = { version = "0.17.0", default-features = false, features = [
+# uni-xervo 0.18.1, so the `OcrModel` / `ModelRuntime` types unify.
+uni-xervo-pdf = { version = "0.18.1", default-features = false, features = [
     "pdf-input",
     "hayro",
 ] }
@@ -217,10 +216,11 @@ strip = "symbols"
 #   thin, cgu=1     238 MiB   11.7 GiB     19m26s   <- LTO/CGU basis
 #   fat,  cgu=1     220 MiB   15.8+ GiB    36m48s   <- rejected: OOMs a 14 GB runner
 #
-# A uniko-py sweep on macOS arm64 found that `opt-level = "z"` reduces the
-# stripped thin-LTO dylib from 163.4 MiB (`opt-level = 3`) to 83.1 MiB, yielding
-# a 37.7 MiB wheel. Fat LTO reached 71.3 MiB but retains uni-db's CI memory risk,
-# so thin LTO remains the publishable-wheel default.
+# Prefer runtime speed over minimum wheel size. A macOS arm64 LoCoMo example
+# (58 turns, 20 questions, three trials per variant) measured median warm
+# recall at 835 ms with opt-level 3 versus 1384 ms with "z", with wheels of
+# 65.4 MiB and 37.8 MiB respectively. Keep thin LTO to retain its size savings
+# without fat LTO's CI memory risk.
 #
 # So `codegen-units` is the memory-hungry knob, and peak rustc RSS — not wall
 # time — is what actually constrains the choice. Runners too small to hold the
@@ -232,6 +232,6 @@ strip = "symbols"
 # Named `dist`, not `publish` — Cargo reserves the latter as a profile name.
 [profile.dist]
 inherits = "release"
-opt-level = "z"
+opt-level = 3
 lto = "thin"
 codegen-units = 1

@@ -197,6 +197,13 @@ the full hybrid + entity-scoped pipeline (`recall_chunk_and_entity_scoped`, vect
 session/observation chunks, weighted by `vector_weight` / `bm25_weight`) concurrently, and the
 per-variant ranked lists are RRF-fused.
 
+With a hybrid embedder and `recall_sparse_enabled`, a **learned-sparse channel** joins this
+fusion: one `uni.sparse.query` per variant over `Chunk.sparse_embedding`, contributed as extra
+ranked lists in the same RRF pool, so a chunk matched by both dense and sparse accumulates
+score. Observation's sparse channel rides in Phase 2 instead. Both are off unless the embedder
+is hybrid — see [Sparse + ColBERT hybrid retrieval](../guides/configuration.md#sparse-colbert-hybrid-retrieval),
+which also covers how to confirm the channel is actually firing (it fails silently if not).
+
 Fused candidates become `RecallItem`s carrying their tier weight (Observations, Chunks, and
 Artifacts share the `KnowledgeBase` tier so Observations don't crowd Chunks out of the
 bundle). Then two optional refinements apply, in order:
@@ -207,6 +214,11 @@ bundle). Then two optional refinements apply, in order:
    the runtime builds `RecallConfig` via `from_uniko_config`, so this is the effective default
    (standalone `RecallConfig::default()` has `reranker_enabled = false`). On failure the path
    falls back to RRF order rather than erroring.
+    With `reranker.style = "colbert"` no reranker model is loaded at all: the top candidates
+   are re-scored in-process by ColBERT MaxSim against the query's per-token embedding, read
+   from the `colbert_embedding` column on Chunk and Observation. Like the cross-encoder, a
+   failure keeps the RRF order rather than erroring.
+
 2. **Answer-type boost** — when `answer_type_boost > 1.0` and the intent predicted a type,
    any of the top `answer_type_top_n` items whose connected entities match that type get their
    score multiplied. **Default 1.0 (no-op)**: LongMemEval measured this boost regressing R@5

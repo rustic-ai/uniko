@@ -161,6 +161,9 @@ pub async fn ingest_item(
                         addressed_to: Some(vec![other_role.to_string()]),
                         timestamp,
                         metadata: HashMap::new(),
+                        category: None,
+                        source_id: None,
+                        revision_id: None,
                     };
 
                     // Atomic per-message ingest: one tx for Message +

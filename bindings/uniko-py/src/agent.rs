@@ -228,6 +228,20 @@ impl PyAgent {
     // value rather than an awaitable.
 
     /// Blocking variant of [`recall`](Self::recall).
+    /// Blocking variant of [`retire_source`](Self::retire_source).
+    fn retire_source_sync(&self, py: Python<'_>, source_id: String) -> PyResult<bool> {
+        bridge_sync!(py, agent = self.inner.clone(), {
+            agent.retire_source(&source_id).await.map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`restore_source`](Self::restore_source).
+    fn restore_source_sync(&self, py: Python<'_>, source_id: String) -> PyResult<bool> {
+        bridge_sync!(py, agent = self.inner.clone(), {
+            agent.restore_source(&source_id).await.map_err(to_pyerr)
+        })
+    }
+
     fn recall_sync(&self, py: Python<'_>, query: String) -> PyResult<Py<PyContextBundle>> {
         bridge_sync!(py, agent = self.inner.clone(), {
             let bundle = agent.recall(&query).await.map_err(to_pyerr)?;
@@ -383,6 +397,36 @@ impl PyAgent {
 
     /// Run one consolidation cycle for this agent, now.
     ///
+    /// Retire a logical source: no revision of it grounds a current answer
+    /// (issue #41).
+    ///
+    /// Nothing is deleted, so a past result stays attributable — reach it
+    /// with `Scope().include_superseded()`. Retirement is recorded on the
+    /// source, not its content, so retiring one source never affects another
+    /// that merely shares identical bytes.
+    ///
+    /// Resolves to `False` when no such source exists.
+    fn retire_source<'py>(
+        &self,
+        py: Python<'py>,
+        source_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        bridge!(py, agent = self.inner.clone(), {
+            agent.retire_source(&source_id).await.map_err(to_pyerr)
+        })
+    }
+
+    /// Un-retire a source, making its current revision eligible again.
+    fn restore_source<'py>(
+        &self,
+        py: Python<'py>,
+        source_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        bridge!(py, agent = self.inner.clone(), {
+            agent.restore_source(&source_id).await.map_err(to_pyerr)
+        })
+    }
+
     /// Compiles unprocessed Observations into Facts, reinforcing or
     /// invalidating prior beliefs and flagging entity drift. Always
     /// available — no streaming pipeline required.

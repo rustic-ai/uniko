@@ -42,10 +42,14 @@ impl PdfTextExtractor for FailingExtractor {
 fn mock_opts(artifact_id: &str, pages: Vec<ExtractedPage>) -> PdfIngestOptions {
     PdfIngestOptions {
         artifact_id: artifact_id.into(),
+        caller_supplied_id: true,
         extractor: Some(Arc::new(MockExtractor { pages })),
         source_path: None,
         session_id: None,
         triggered_by_message_id: None,
+        category: None,
+        source_id: None,
+        revision_id: None,
     }
 }
 
@@ -132,10 +136,14 @@ async fn ingest_pdf_persists_artifact_on_extractor_failure() {
     let kb = test_kb().await;
     let opts = PdfIngestOptions {
         artifact_id: "pdf-fail-1".into(),
+        caller_supplied_id: true,
         extractor: Some(Arc::new(FailingExtractor)),
         source_path: None,
         session_id: None,
         triggered_by_message_id: None,
+        category: None,
+        source_id: None,
+        revision_id: None,
     };
     let result = ingest_pdf(&kb, PdfInput::Bytes(b"junk".to_vec()), opts)
         .await
@@ -174,8 +182,11 @@ async fn ingest_pdf_persists_artifact_on_extractor_failure() {
     assert_eq!(row.get::<i64>("n").unwrap(), 0);
 }
 
+/// Identical PDF bytes under two ids stay addressable under both — the same
+/// contract as `ingest_artifact`. The bytes dedup on `:ArtifactContent`; the
+/// ids do not collapse.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ingest_pdf_dedups_by_hash() {
+async fn ingest_pdf_keeps_distinct_ids_for_identical_bytes() {
     let kb = test_kb().await;
     let pages = vec![ExtractedPage {
         page_number: 1,
@@ -195,8 +206,64 @@ async fn ingest_pdf_dedups_by_hash() {
     let second = ingest_pdf(&kb, PdfInput::Bytes(bytes), mock_opts("pdf-dup-2", pages))
         .await
         .expect("second ingest");
-    assert!(second.was_deduplicated);
-    assert_eq!(second.artifact_node_id, first.artifact_node_id);
+    assert!(
+        !second.was_deduplicated,
+        "a second id is a second artifact, not a dedup hit"
+    );
+    assert_ne!(second.artifact_node_id, first.artifact_node_id);
+
+    for ext_id in ["pdf-dup-1", "pdf-dup-2"] {
+        assert!(
+            kb.get_node_by_ext_id("Artifact", "artifact_id", ext_id)
+                .await
+                .expect("lookup")
+                .is_some(),
+            "{ext_id} must resolve"
+        );
+    }
+}
+
+/// Replaying a PDF id with the same bytes is idempotent; reusing it for
+/// different bytes is rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ingest_pdf_rejects_reused_id_with_different_bytes() {
+    let kb = test_kb().await;
+    let pages = vec![ExtractedPage {
+        page_number: 1,
+        text: "Only page.".into(),
+    }];
+
+    let first = ingest_pdf(
+        &kb,
+        PdfInput::Bytes(b"original bytes".to_vec()),
+        mock_opts("pdf-conflict", pages.clone()),
+    )
+    .await
+    .expect("first ingest");
+    assert!(!first.was_deduplicated);
+
+    let replay = ingest_pdf(
+        &kb,
+        PdfInput::Bytes(b"original bytes".to_vec()),
+        mock_opts("pdf-conflict", pages.clone()),
+    )
+    .await
+    .expect("identical bytes must stay idempotent");
+    assert!(replay.was_deduplicated);
+    assert_eq!(replay.artifact_node_id, first.artifact_node_id);
+
+    let err = ingest_pdf(
+        &kb,
+        PdfInput::Bytes(b"different bytes entirely".to_vec()),
+        mock_opts("pdf-conflict", pages),
+    )
+    .await
+    .expect_err("a reused id with different bytes must be rejected");
+    assert!(
+        matches!(err, uniko_store::UnikoError::IdConflict(_)),
+        "expected IdConflict, got {err:?}"
+    );
+    assert!(!err.is_retriable());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -212,10 +279,14 @@ async fn ingest_pdf_real_pdf_round_trip() {
 
     let opts = PdfIngestOptions {
         artifact_id: "pdf-real-1".into(),
+        caller_supplied_id: true,
         extractor: None, // default = PdfExtractCrate
         source_path: Some("tests/fixtures/dummy.pdf".into()),
         session_id: None,
         triggered_by_message_id: None,
+        category: None,
+        source_id: None,
+        revision_id: None,
     };
     let result = ingest_pdf(&kb, PdfInput::Bytes(bytes), opts)
         .await
@@ -262,10 +333,14 @@ async fn ingest_pdf_real_pdf_via_path() {
 
     let opts = PdfIngestOptions {
         artifact_id: "pdf-real-path-1".into(),
+        caller_supplied_id: true,
         extractor: None,
         source_path: Some(path.display().to_string()),
         session_id: None,
         triggered_by_message_id: None,
+        category: None,
+        source_id: None,
+        revision_id: None,
     };
     let result = ingest_pdf(&kb, PdfInput::Path(path), opts)
         .await
@@ -280,10 +355,14 @@ async fn ingest_pdf_rejects_empty_artifact_id() {
     let kb = test_kb().await;
     let opts = PdfIngestOptions {
         artifact_id: String::new(),
+        caller_supplied_id: true,
         extractor: Some(Arc::new(MockExtractor { pages: Vec::new() })),
         source_path: None,
         session_id: None,
         triggered_by_message_id: None,
+        category: None,
+        source_id: None,
+        revision_id: None,
     };
     let err = ingest_pdf(&kb, PdfInput::Bytes(b"x".to_vec()), opts)
         .await

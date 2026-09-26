@@ -28,6 +28,7 @@ mod patterns;
 mod procedures;
 mod rules;
 mod sessions;
+mod sources;
 mod summaries;
 mod topics;
 
@@ -184,6 +185,7 @@ pub async fn register_schema(db: &Uni, config: &UnikoConfig) -> crate::Result<()
     let builder = participants::register_labels(builder);
     let builder = goals::register_labels(builder, config);
     let builder = sessions::register_labels(builder, config);
+    let builder = sources::register_labels(builder, config);
     let builder = messages::register_labels(builder, config);
     let builder = actions::register_labels(builder, config);
     let builder = episodes::register_labels(builder, config);
@@ -207,6 +209,7 @@ pub async fn register_schema(db: &Uni, config: &UnikoConfig) -> crate::Result<()
     // ── Phase 2: edge types ──
     let builder = goals::register_edges(builder);
     let builder = sessions::register_edges(builder);
+    let builder = sources::register_edges(builder);
     let builder = messages::register_edges(builder);
     let builder = actions::register_edges(builder);
     let builder = episodes::register_edges(builder);

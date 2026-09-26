@@ -42,10 +42,8 @@ async fn mk_msg(kb: &KnowledgeBase, id: &str, content: &str, ts: &str, session: 
 
 fn since(filter_since: chrono::DateTime<Utc>) -> ScopeFilter {
     ScopeFilter {
-        sessions: None,
-        participants: None,
         since: Some(filter_since),
-        until: None,
+        ..Default::default()
     }
 }
 

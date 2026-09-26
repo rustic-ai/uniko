@@ -15,11 +15,15 @@ pub mod pdf;
 pub mod session;
 pub mod session_chunk;
 pub mod source;
+mod unit;
 
 pub use artifact::ArtifactIngestResult;
+pub use artifact::{ArtifactContextNids, ArtifactIdentity, ArtifactPrep, UnitArtifactSeen};
 pub use atomic::{AtomicIngestResult, AtomicTimings, ingest_message_atomic};
 pub use chunking::{ChunkConfig, ChunkData, Chunker, count_tokens, select_chunker};
-pub use modality::{ModalityExtractor, ModalityRegistry};
+pub use modality::{ModalityExtractor, ModalityPrepared, ModalityRegistry};
+pub use source::{PreparedSource, prepare_source};
+pub use unit::{UnitIngestResult, UnitTurn, ingest_turns_atomic};
 // IngestSource/IngestData live in uniko-pipes (wire types) so IngestTask can
 // carry them; re-exported here so existing `uniko_extract::ingest` imports
 // and the facade are unchanged.
@@ -105,11 +109,17 @@ impl uniko_pipes::Step for IngestStep {
                 };
                 let options = pdf::PdfIngestOptions {
                     artifact_id: task.artifact_id,
+                    // `IngestPdf.artifact_id` is non-optional and documented
+                    // caller-provided, so the id is always the identity here.
+                    caller_supplied_id: true,
                     extractor: None,
                     source_path: task.source_path,
                     // Streamed PDFs aren't session/message-linked.
                     session_id: None,
                     triggered_by_message_id: None,
+                    category: None,
+                    source_id: None,
+                    revision_id: None,
                 };
                 let result = pdf::ingest_pdf(&ctx.kb, input, options).await?;
                 ctx.node_id = result.artifact_node_id;

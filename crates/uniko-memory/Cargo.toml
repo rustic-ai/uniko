@@ -30,6 +30,10 @@ futures = { workspace = true }
 sha2 = { workspace = true }
 lru = { workspace = true }
 
+[dev-dependencies]
+# Persistent stores for the crash/reopen acceptance test (issue #40).
+tempfile = "3"
+
 [features]
 onnx = ["uniko-extract/onnx"]
 # Enable the abstractive (LLM-rewritten) path for F59 summaries. When

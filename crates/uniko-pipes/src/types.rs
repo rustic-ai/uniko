@@ -32,6 +32,22 @@ pub struct IngestMessage {
     pub timestamp: DateTime<Utc>,
     /// Arbitrary caller metadata forwarded to pipeline steps.
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Caller's own record class — a user assertion, an executed result, a
+    /// model interpretation (issue #39). Typed provenance: it is filterable
+    /// by recall and deliberately NOT part of the searchable text.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Stable logical source this record came from. Materialised as a
+    /// `:Source` node with a `FROM_SOURCE` edge, and denormalised onto the
+    /// record so the recall filter needs no traversal.
+    #[serde(default)]
+    pub source_id: Option<String>,
+    /// Immutable revision identity for this ingest (issue #41). Together
+    /// with the content fingerprint it decides idempotency: the same
+    /// revision with the same bytes is a no-op, the same revision with
+    /// changed bytes is rejected.
+    #[serde(default)]
+    pub revision_id: Option<String>,
 }
 
 /// An artifact (file, document, URL) to ingest.
@@ -39,6 +55,18 @@ pub struct IngestMessage {
 pub struct IngestArtifact {
     /// Caller-provided or auto-generated UUID v7.
     pub artifact_id: String,
+    /// Whether `artifact_id` is the caller's own stable id rather than an
+    /// auto-generated UUID.
+    ///
+    /// This is what decides identity on ingest. A caller-chosen id *is* the
+    /// artifact's identity: two ids over identical bytes are two artifacts
+    /// (sharing one stored copy of the content), and reusing one id for
+    /// different bytes is an error. An auto-generated id means the caller
+    /// expressed no identity, so identical bytes dedup onto the existing
+    /// artifact — which is what keeps re-running a corpus load from
+    /// duplicating every document.
+    #[serde(default)]
+    pub caller_supplied_id: bool,
     /// Text content (empty for binary artifacts).
     pub content: String,
     /// Artifact kind: `"file"`, `"document"`, `"url"`, `"snippet"`, etc.
@@ -62,6 +90,22 @@ pub struct IngestArtifact {
     /// (F18).
     #[serde(default)]
     pub produced_by_action_id: Option<String>,
+    /// Caller's own record class — a user assertion, an executed result, a
+    /// model interpretation (issue #39). Typed provenance: it is filterable
+    /// by recall and deliberately NOT part of the searchable text.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Stable logical source this record came from. Materialised as a
+    /// `:Source` node with a `FROM_SOURCE` edge, and denormalised onto the
+    /// record so the recall filter needs no traversal.
+    #[serde(default)]
+    pub source_id: Option<String>,
+    /// Immutable revision identity for this ingest (issue #41). Together
+    /// with the content fingerprint it decides idempotency: the same
+    /// revision with the same bytes is a no-op, the same revision with
+    /// changed bytes is rejected.
+    #[serde(default)]
+    pub revision_id: Option<String>,
 }
 
 /// Source of PDF bytes — mirrors `uniko_extract::ingest::pdf::PdfInput`.
@@ -120,6 +164,22 @@ pub struct IngestSource {
     pub path: Option<String>,
     /// Arbitrary metadata forwarded to ingest.
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Caller's own record class — a user assertion, an executed result, a
+    /// model interpretation (issue #39). Typed provenance: it is filterable
+    /// by recall and deliberately NOT part of the searchable text.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Stable logical source this record came from. Materialised as a
+    /// `:Source` node with a `FROM_SOURCE` edge, and denormalised onto the
+    /// record so the recall filter needs no traversal.
+    #[serde(default)]
+    pub source_id: Option<String>,
+    /// Immutable revision identity for this ingest (issue #41). Together
+    /// with the content fingerprint it decides idempotency: the same
+    /// revision with the same bytes is a no-op, the same revision with
+    /// changed bytes is rejected.
+    #[serde(default)]
+    pub revision_id: Option<String>,
 }
 
 impl IngestSource {
@@ -146,6 +206,9 @@ impl IngestSource {
             id: None,
             path: Some(recorded),
             metadata: HashMap::new(),
+            category: None,
+            source_id: None,
+            revision_id: None,
         }
     }
 
@@ -156,6 +219,9 @@ impl IngestSource {
             id: None,
             path: None,
             metadata: HashMap::new(),
+            category: None,
+            source_id: None,
+            revision_id: None,
         }
     }
 
@@ -167,9 +233,51 @@ impl IngestSource {
     }
 
     /// Set an explicit artifact id.
+    ///
+    /// The id — not the content hash — is this artifact's identity, and is
+    /// what `agent.data().artifact(..)` fetches it back by. Re-ingesting an
+    /// id with identical content is idempotent; reusing it for different
+    /// content is rejected as an id conflict. Two ids over identical bytes
+    /// give two artifacts sharing one stored copy of the content, so a
+    /// second session that ingests the same document under its own id keeps
+    /// its own handle on it.
     #[must_use]
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    /// Tag this source with the caller's own record category (issue #39).
+    ///
+    /// Typed provenance: recall can filter on it, and it never enters the
+    /// searchable text — which is the point, since the alternative is
+    /// encoding a class into the prose and parsing it back out of results.
+    #[must_use]
+    pub fn with_category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
+        self
+    }
+
+    /// Attribute this source to a stable logical source id (issue #39).
+    ///
+    /// Materialised as a `:Source` node with a `FROM_SOURCE` edge, so the
+    /// same logical origin can be recognised across separate ingests.
+    #[must_use]
+    pub fn with_source(mut self, source_id: impl Into<String>) -> Self {
+        self.source_id = Some(source_id.into());
+        self
+    }
+
+    /// Declare which revision of that source these bytes are (issue #41).
+    ///
+    /// Re-ingesting the same revision with identical bytes is idempotent;
+    /// the same revision with changed bytes is rejected, because a revision
+    /// id is a promise about the content. A NEW revision of the same source
+    /// supersedes the previous one, which then stops grounding current
+    /// answers while staying attributable to history.
+    #[must_use]
+    pub fn with_revision(mut self, revision_id: impl Into<String>) -> Self {
+        self.revision_id = Some(revision_id.into());
         self
     }
 

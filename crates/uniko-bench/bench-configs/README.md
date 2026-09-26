@@ -15,11 +15,28 @@ CLI carries only what changes per invocation: data file, output path,
 conversation/category filters, KB reuse.  All model selection lives
 in the JSON.
 
+## Datasets
+
+Not in the repo — `data/` is gitignored (KB stores are GB-scale, and the
+source corpora are third-party). Fetch them before a run:
+
+| File | Source |
+|---|---|
+| `data/locomo10.json` | `snap-research/locomo`, `data/locomo10.json` on `main`. 2,805,274 bytes, sha256 `79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4`. 10 conversations / 5,882 turns / 1,986 questions — the figures the README quotes. From *Evaluating Very Long-Term Conversational Memory of LLM Agents* (Maharana et al., Snap Research). |
+| `data/longmemeval_s_cleaned.json` | LongMemEval `_s` split. Provenance not yet recorded here — fill in when next fetched. |
+
+The LoCoMo entry was reconstructed by matching `src/data.rs`'s expected
+filename and schema against the published dataset, then confirming the
+conversation / turn / question counts; it was not recorded anywhere when
+the benchmark was first run. Verify the checksum rather than assuming a
+re-download matches.
+
 ## Shipped profiles
 
 | File | Generator | Judge | Embedder | Notes |
 |---|---|---|---|---|
 | `locomo-bge-openai.json` | gpt-4o-mini | gpt-4o-mini | bge-small (384d ONNX-CUDA) | Canonical baseline.  Last measured: 0.849 judge, $0.083/conv. |
+| `locomo-bgesmall-rerank-retrieval.json` | — (retrieval-only) | — | bge-small | The shipped recall defaults (rerank-on + boost + α=0.6, per `3d3afbd`) with no LLM, so a full corpus run needs no API key. The other bge-small retrieval-only profile, `locomo-bgesmall-retrieval.json`, disables the reranker and therefore does **not** measure the default configuration. |
 | `locomo-bge-gemini31.json` | gemini-3.1-flash-lite | gemini-3.1-pro-preview | bge-small | All-Gemini run via Vertex global endpoint.  Requires `VERTEXAI_PROJECT`/`VERTEXAI_LOCATION` env. |
 | `locomo-embeddinggemma-openai.json` | gpt-4o-mini | gpt-4o-mini | embeddinggemma-300m (ONNX-CUDA) | A/B vs bge-small for the embedder swap.  768d vectors — fresh ingest required. |
 
@@ -38,6 +55,15 @@ the bge-small→bge-m3 boundary.
 | `locomo-arm-a-bge-m3-dense` / `lme-arm-a-bge-m3-dense` | bge-m3 | off | cross-encoder | dense-model upgrade (A−0) |
 | `locomo-arm-b-bge-m3-sparse` / `lme-arm-b-bge-m3-sparse` | bge-m3 | on | cross-encoder | learned-sparse (B−A) |
 | `locomo-arm-c-bge-m3-colbert` / `lme-arm-c-bge-m3-colbert` | bge-m3 | on | colbert (MaxSim) | late-interaction (C−B) |
+
+!!! note
+    **Arms B and C could not measure anything before 2026-09-19.** Both the
+    learned-sparse and ColBERT query paths failed on every query and were
+    swallowed (`debug` and `warn` respectively), so the channels contributed
+    no candidates while still costing a query each. Any B−A or C−B delta
+    recorded before that date is an artifact, not a measurement. See
+    `website/docs/guides/configuration.md` for the fix, the first real
+    numbers, and how to verify a channel is live.
 
 `reranker.style = "colbert"` re-scores the top candidates in-process by
 ColBERT MaxSim over the `colbert_embedding` column — it registers no
