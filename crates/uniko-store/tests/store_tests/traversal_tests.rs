@@ -182,7 +182,7 @@ async fn test_ppr_empty_seeds() {
 async fn test_ppr_consumes_per_edge_weight() {
     let kb = test_kb().await;
 
-    let mk = |tag: &str| {
+    let mk_message = |tag: &str| {
         let mut props = HashMap::new();
         props.insert("message_id".into(), Value::String(format!("ppr-w-{tag}")));
         props.insert("content".into(), Value::String(format!("node {tag}")));
@@ -192,9 +192,17 @@ async fn test_ppr_consumes_per_edge_weight() {
         );
         props
     };
-    let s = kb.create_node("Message", &mk("s")).await.unwrap();
-    let a = kb.create_node("Message", &mk("a")).await.unwrap();
-    let b = kb.create_node("Message", &mk("b")).await.unwrap();
+    let mk_entity = |tag: &str| {
+        let mut props = HashMap::new();
+        props.insert("entity_id".into(), Value::String(format!("ppr-w-{tag}")));
+        props.insert("name".into(), Value::String(format!("node {tag}")));
+        props
+    };
+    // MENTIONS is declared Message -> Entity, and uni-db 5.0 enforces declared
+    // edge endpoints on write, so the two forked-to nodes must be Entities.
+    let s = kb.create_node("Message", &mk_message("s")).await.unwrap();
+    let a = kb.create_node("Entity", &mk_entity("a")).await.unwrap();
+    let b = kb.create_node("Entity", &mk_entity("b")).await.unwrap();
 
     // Same edge type, different per-edge weight.
     let mut hi = HashMap::new();

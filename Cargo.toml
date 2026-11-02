@@ -56,7 +56,7 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.3.0" }
 # provider-onnx (embeddings + NLP + reranker), and every remote provider.
 # GPU accelerators (gpu-cuda / gpu-metal) are opt-in via uniko-store /
 # uniko-bench passthrough features.
-# Tracks the latest 3.x release (^3 = >=3.0.0, <4.0.0); `cargo update -p uni-db`
+# Tracks the latest 5.x release (^5 = >=5.0.0, <6.0.0); `cargo update -p uni-db`
 # refreshes the lockfile to the newest compatible version.
 #
 # NOTE (2026-06-28): default-features disabled to drop `provider-candle` /
@@ -68,7 +68,7 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.3.0" }
 # bge-m3 GPU campaign is unaffected. To restore local LLMs, re-add
 # "provider-candle"/"provider-mistralrs" (needs a CUDA-compatible gcc<=15 +
 # matching glibc for a GPU build).
-uni-db = { version = "4", default-features = false, features = [
+uni-db = { version = "5", default-features = false, features = [
     "mimalloc",
     "lance-backend",
     "apoc-core",
@@ -87,7 +87,7 @@ uni-db = { version = "4", default-features = false, features = [
 # `KnowledgeBase::build_shared_runtime` / `open_with_runtime`. uni-db
 # uses uni-xervo internally but does not re-export the type. Version
 # pinned to whatever uni-db currently depends on (see
-# `../uni/Cargo.toml`). uni-db 4.1.0 depends on uni-xervo >=0.18.1, <1.0.0.
+# `../uni/Cargo.toml`). uni-db 5.0.0 depends on uni-xervo >=0.18.0, <1.0.0.
 uni-xervo = { version = "0.18.1", default-features = false }
 # Tiered PDF extraction (native text -> OCR -> doc-VLM). Pulls only traits +
 # the pure-Rust native (lopdf) + rasterizer (hayro) tiers; the inference
