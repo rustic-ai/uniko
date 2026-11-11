@@ -26,11 +26,11 @@ path = "../uniko-py/src/lib.rs"
 # Same facade dep as uniko-py, plus the full Metal stack. Forwards
 # uniko-api -> uniko-memory -> uniko-store -> uni-db. `gpu-metal` resolves to
 # `ort?/coreml` (ONNX Runtime CoreML EP; fires because the uni-db pin always
-# enables `provider-onnx`). `mistralrs` + `candle` turn on uni-xervo's local-LLM
-# providers; combined with `gpu-metal`, the `mistralrs?/metal` / `candle-*?/metal`
-# forwards fire so candle compiles Metal kernels. macOS/Apple-Silicon only; the
-# macOS runner's Metal SDK covers the toolchain (no extra install needed).
-uniko-api = { workspace = true, features = ["onnx", "gpu-metal", "mistralrs", "candle"] }
+# enables `provider-onnx`). `candle` turns on uni-xervo's local-LLM provider;
+# combined with `gpu-metal`, the `candle-*?/metal` forwards fire so candle
+# compiles Metal kernels. macOS/Apple-Silicon only; the macOS runner's Metal
+# SDK covers the toolchain (no extra install needed).
+uniko-api = { workspace = true, features = ["onnx", "gpu-metal", "candle"] }
 pyo3 = { workspace = true, features = ["abi3-py310"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 tokio = { workspace = true }

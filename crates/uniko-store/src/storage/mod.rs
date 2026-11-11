@@ -716,7 +716,15 @@ pub fn embed_catalog(config: &UnikoConfig) -> Vec<ModelAliasSpec> {
             retry: None,
             // `OnnxNlpModel` reads `onnx_path` (not `artifact`) plus the
             // tokenizer / label-map asset names shipped in the model repo.
+            //
+            // `generation` is pinned. uni-xervo >= 0.19 serves two kniv
+            // generations and, absent this key, infers one by probing the
+            // repo for `onnx/onnx_meta.json` — which the v1 cascade repo
+            // also ships, so the probe reads it as v7 and then rejects
+            // every v1 option key. Naming the generation outranks the
+            // probe (uni-xervo `detect_generation`).
             options: serde_json::json!({
+                "generation": "v1",
                 "onnx_path": config.nlp.artifact,
                 "tokenizer_path": "tokenizer.json",
                 "label_maps_path": "label_maps.json",

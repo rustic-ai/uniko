@@ -12,13 +12,15 @@ yanked = "deny"
 #
 # Entries here are pruned when they stop matching: cargo-deny reports an
 # unmatched ignore as `advisory-not-detected`, and a dead entry would silently
-# swallow the advisory if it ever came back. Four were removed once their
-# upstreams shipped fixes (two rustls/TLS-stack, two pyo3).
+# swallow the advisory if it ever came back. Nine have been removed once their
+# upstreams shipped fixes: two rustls/TLS-stack, two pyo3, three zstd/zstd-safe
+# (backported into 0.13.4 / 7.4.0), four `zip` (uni-xervo 0.19 moved to
+# candle 0.11, which requires zip 9) and one `lopdf` (pdf-extract 0.12 moved to
+# lopdf 0.42).
 ignore = [
-    "RUSTSEC-2023-0071", # `rsa` Marvin timing side-channel — no fixed upstream release; transitive via mistralrs (uni-xervo).
-    "RUSTSEC-2026-0187", # `lopdf` stack overflow on deeply nested PDFs (DoS) — transitive via pdf-extract; pinned to ^0.38, fix is 0.42; unblock when pdf-extract bumps.
-    "RUSTSEC-2026-0194", # `quick-xml` quadratic dup-attribute scan (DoS) — transitive via lance/opendal; pinned to ^0.40, fix is 0.41; unblock when they bump.
-    "RUSTSEC-2026-0195", # `quick-xml` unbounded namespace alloc in NsReader (DoS) — same transitive quick-xml pin as RUSTSEC-2026-0194.
+    "RUSTSEC-2023-0071", # `rsa` Marvin timing side-channel — no fixed upstream release; transitive via reqsign-azure-storage -> opendal-service-azblob -> opendal -> lance-io (uni-db's Lance stack).
+    "RUSTSEC-2026-0194", # `quick-xml` quadratic dup-attribute scan (DoS) — transitive via object_store 0.13 (datafusion/lance); that pin holds quick-xml 0.39.4 while the fix is 0.41, which the graph already carries for other consumers; unblock when datafusion/lance move to object_store 0.14.
+    "RUSTSEC-2026-0195", # `quick-xml` unbounded namespace alloc in NsReader (DoS) — same object_store 0.13 pin as RUSTSEC-2026-0194.
 ]
 
 [licenses]

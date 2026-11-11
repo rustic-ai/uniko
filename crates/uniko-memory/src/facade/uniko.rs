@@ -350,9 +350,8 @@ impl UnikoBuilder {
 
 /// An LLM registration for [`Agent::answer`](crate::Agent::answer).
 ///
-/// Construct via a provider helper ([`LlmSpec::openai`],
-/// [`LlmSpec::mistralrs`]); the `alias` is the handle the answer path
-/// generates under.
+/// Construct via a provider helper ([`LlmSpec::openai`]); the `alias` is
+/// the handle the answer path generates under.
 #[derive(Debug, Clone)]
 pub struct LlmSpec {
     alias: String,
@@ -391,16 +390,6 @@ impl LlmSpec {
             provider_id: "remote/openai".to_string(),
             model_id: model_id.into(),
             options,
-        }
-    }
-
-    /// A local model served via mistral.rs with in-situ Q4K quantization.
-    pub fn mistralrs(alias: impl Into<String>, model_id: impl Into<String>) -> Self {
-        Self {
-            alias: alias.into(),
-            provider_id: "local/mistralrs".to_string(),
-            model_id: model_id.into(),
-            options: serde_json::json!({ "isq": "Q4K" }),
         }
     }
 

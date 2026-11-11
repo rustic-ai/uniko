@@ -277,7 +277,7 @@ impl PyUnikoBuilder {
 
 /// An LLM registration for `Agent.answer`.
 ///
-/// Construct via a provider helper (`LlmSpec.openai`, `LlmSpec.mistralrs`).
+/// Construct via a provider helper (`LlmSpec.openai`).
 #[pyclass(name = "LlmSpec", module = "uniko")]
 pub struct PyLlmSpec {
     inner: LlmSpec,
@@ -312,14 +312,6 @@ impl PyLlmSpec {
     ) -> Self {
         Self {
             inner: LlmSpec::openai_with_key_env(alias, model_id, base_url.as_deref(), key_env),
-        }
-    }
-
-    /// A local model served via mistral.rs with in-situ Q4K quantization.
-    #[staticmethod]
-    fn mistralrs(alias: String, model_id: String) -> Self {
-        Self {
-            inner: LlmSpec::mistralrs(alias, model_id),
         }
     }
 

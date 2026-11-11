@@ -67,6 +67,7 @@ async fn xervo_nlp_model_analyze_populates_all_heads() {
             "warmup": "lazy",
             "required": false,
             "options": {
+                "generation": "v1",
                 "onnx_path": "onnx/cascade-int8.onnx",
                 "tokenizer_path": "tokenizer.json",
                 "label_maps_path": "label_maps.json",
@@ -103,10 +104,7 @@ async fn xervo_nlp_model_analyze_populates_all_heads() {
 
     // One sentence with a verb, proper nouns, and a clear dependency
     // structure — mirrors xervo's own (ignored) e2e test input.
-    let req = NlpRequest {
-        text: "Alice bought a book in Paris.",
-        tasks: NlpTasks::ALL,
-    };
+    let req = NlpRequest::new("Alice bought a book in Paris.", NlpTasks::ALL);
 
     // PRE-FIX: this errors with "argmax_axis only supports axis=1, got 2".
     // POST-FIX: it returns one populated result.

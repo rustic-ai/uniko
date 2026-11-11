@@ -215,41 +215,6 @@ impl EmbeddingConfig {
         }
     }
 
-    /// `google/embeddinggemma-300m` served via uni-xervo's
-    /// `local/mistralrs` provider on GPU.
-    ///
-    /// Same model weights as [`Self::embedding_gemma_300m`], but
-    /// loaded through mistralrs (candle-cuda) instead of ORT.
-    /// mistralrs's `EmbeddingModelBuilder` handles pooling internally
-    /// and probes the embedding dimension at load time, so we only
-    /// need to pass dtype here.  The Sentence-Transformers task
-    /// prompts (`document_prefix` / `query_prefix`) are applied at
-    /// xervo's embed call site, so they work identically across
-    /// runtimes.
-    ///
-    /// `dtype: "f32"` because mistralrs's candle backend on this stack
-    /// dispatches embeddings on CPU under some build configurations
-    /// (no candle-cuda compiled in, or no CUDA device visible) and
-    /// F16 CPU inference produces NaN outputs.  F32 always works.
-    /// Override `provider_options.dtype` if your build has working
-    /// candle-cuda dispatch.
-    pub fn embedding_gemma_300m_mistralrs() -> Self {
-        Self {
-            model_id: "google/embeddinggemma-300m".into(),
-            sparse_dimensions: None,
-            multivector_dimensions: None,
-            dimensions: 768,
-            batch_size: 16,
-            document_prefix: Some("title: none | text: ".into()),
-            query_prefix: Some("task: search result | query: ".into()),
-            execution_providers: None,
-            provider: "local/mistralrs".into(),
-            provider_options: Some(serde_json::json!({
-                "dtype": "f32",
-            })),
-        }
-    }
-
     /// BAAI/bge-m3 (`aapot/bge-m3-onnx`) — single-pass hybrid: 1024-d
     /// dense + 250002-d learned-sparse + 1024-d ColBERT.
     ///
@@ -296,9 +261,6 @@ impl EmbeddingConfig {
             "bge-large" => Self::bge_large_en_v15(),
             "bge-m3" => Self::bge_m3(),
             "embeddinggemma" | "gemma" => Self::embedding_gemma_300m(),
-            "embeddinggemma-mistralrs" | "gemma-mistralrs" => {
-                Self::embedding_gemma_300m_mistralrs()
-            }
             _ => return None,
         })
     }

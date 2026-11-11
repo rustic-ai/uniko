@@ -142,10 +142,6 @@ def test_llm_spec_each_provider():
         }
     )
     assert keyenv.key_env == "MY_KEY"
-    mistral = LlmSpecAdapter.validate_python(
-        {"provider": "mistralrs", "alias": "a", "model_id": "m"}
-    )
-    assert mistral.provider == "mistralrs"
 
 
 def test_llm_spec_missing_required_rejected():
@@ -170,6 +166,6 @@ def test_llm_spec_schema_has_discriminator():
 
 def test_llm_to_native_dispatches():
     spec = LlmSpecAdapter.validate_python(
-        {"provider": "mistralrs", "alias": "a", "model_id": "m"}
+        {"provider": "openai", "alias": "a", "model_id": "gpt-4o-mini"}
     )
     assert repr(llm_to_native(spec)).startswith("LlmSpec")

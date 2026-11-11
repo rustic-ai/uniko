@@ -264,7 +264,7 @@ pub async fn generate_answer_with_usage(
     // 2048 leaves headroom for ~1500 reasoning tokens + a 1-2 sentence
     // answer. For non-reasoning models this is just an upper bound;
     // they self-terminate at the EOS well before hitting it.
-    // Reasoning models (gemma4 / phi4 via mistralrs) need a token budget
+    // Reasoning models (gemma4 / phi4 run locally) need a token budget
     // for chain-of-thought; non-reasoning local models tolerate the
     // custom temperature. OpenAI's gpt-5/o-series rejects both — it
     // requires `max_completion_tokens` and only accepts the default

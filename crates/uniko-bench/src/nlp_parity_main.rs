@@ -643,7 +643,9 @@ async fn main() -> Result<()> {
             "required": false,
             // OnnxNlpModel reads onnx_path (not `artifact`); point it at
             // the same file the raw alias uses for identical weights.
+            // `generation` is pinned for the reason in embed_catalog.
             "options": {
+                "generation": "v1",
                 "onnx_path": cli.artifact,
                 "tokenizer_path": "tokenizer.json",
                 "label_maps_path": "label_maps.json",
@@ -687,10 +689,7 @@ async fn main() -> Result<()> {
             .await
             .with_context(|| format!("uniko analyze: {sentence}"))?;
         let mut xervo = nlp
-            .analyze(vec![NlpRequest {
-                text: sentence,
-                tasks: NlpTasks::ALL,
-            }])
+            .analyze(vec![NlpRequest::new(sentence, NlpTasks::ALL)])
             .await
             .map_err(|e| anyhow::anyhow!("xervo analyze '{sentence}': {e}"))?;
         let xervo = xervo

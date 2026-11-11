@@ -67,7 +67,6 @@ def test_llm_to_native_each_provider():
             "model_id": "m",
             "key_env": "K",
         },
-        {"provider": "mistralrs", "alias": "a", "model_id": "m"},
     ):
         spec = LlmSpecAdapter.validate_python(payload)
         assert repr(llm_to_native(spec)).startswith("LlmSpec")
