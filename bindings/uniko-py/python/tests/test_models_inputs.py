@@ -142,12 +142,30 @@ def test_llm_spec_each_provider():
         }
     )
     assert keyenv.key_env == "MY_KEY"
+    llamacpp = LlmSpecAdapter.validate_python(
+        {
+            "provider": "llamacpp",
+            "alias": "a",
+            "model_id": "qwen",
+            "base_url": "http://127.0.0.1:8080/v1",
+        }
+    )
+    assert llamacpp.provider == "llamacpp"
+    assert llamacpp.key_env is None
 
 
 def test_llm_spec_missing_required_rejected():
     with pytest.raises(ValidationError) as exc:
         LlmSpecAdapter.validate_python(
             {"provider": "openai_with_key_env", "alias": "a", "model_id": "m"}
+        )
+    assert exc.value.errors()[0]["type"] == "missing"
+
+
+def test_llm_spec_llamacpp_requires_base_url():
+    with pytest.raises(ValidationError) as exc:
+        LlmSpecAdapter.validate_python(
+            {"provider": "llamacpp", "alias": "a", "model_id": "qwen"}
         )
     assert exc.value.errors()[0]["type"] == "missing"
 

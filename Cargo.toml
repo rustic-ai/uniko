@@ -64,14 +64,19 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.3.0" }
 #
 # NOTE (2026-06-28): default-features disabled to drop `provider-candle`.
 # It pulls candle-cuda kernels that nvcc (CUDA 13) cannot compile against this
-# host's glibc/gcc-16. Trade-off: local candle LLM inference is unavailable at
-# runtime; LoCoMo uses remote `gpt-4o-mini`, so the bge-m3 GPU campaign is
-# unaffected. To restore local LLMs, re-add "provider-candle" (needs a
-# CUDA-compatible gcc<=15 + matching glibc for a GPU build), or reach for
-# uni-db 5.1's new `provider-llamacpp`, which needs no CUDA toolchain.
+# host's glibc/gcc-16. Trade-off: in-process candle LLM inference is unavailable
+# at runtime; LoCoMo uses remote `gpt-4o-mini`, so the bge-m3 GPU campaign is
+# unaffected. To restore it, re-add "provider-candle" (needs a CUDA-compatible
+# gcc<=15 + matching glibc for a GPU build) via the `candle` passthrough.
 #
 # `provider-mistralrs` is gone for good: uni-xervo 0.19.0 dropped mistralrs
-# entirely and uni-db 5.1 no longer exposes the feature.
+# entirely and uni-db 5.1 no longer exposes the feature. `provider-llamacpp`
+# below covers the same ground differently — it is an HTTP client for a
+# `llama-server` you run yourself, so open-weights models stay available
+# without compiling any inference kernels into this process. It is listed
+# unconditionally rather than behind a uniko passthrough feature because it
+# costs nothing to compile: uni-xervo gates it on `reqwest` + `base64`, which
+# every other remote provider here already pulls in.
 uni-db = { version = "5.1", default-features = false, features = [
     "mimalloc",
     "lance-backend",
@@ -86,6 +91,7 @@ uni-db = { version = "5.1", default-features = false, features = [
     "provider-voyageai",
     "provider-cohere",
     "provider-azure-openai",
+    "provider-llamacpp",
 ] }
 # Direct dep on uni-xervo so uniko-store can name `ModelRuntime` in
 # `KnowledgeBase::build_shared_runtime` / `open_with_runtime`. uni-db

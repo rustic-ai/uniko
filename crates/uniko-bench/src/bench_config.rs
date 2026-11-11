@@ -134,7 +134,7 @@ pub struct LlmAlias {
     /// HuggingFace model id or provider model name.
     pub model_id: String,
     /// xervo provider id (e.g. `remote/openai`, `remote/vertexai`,
-    /// `local/onnx`).
+    /// `remote/llamacpp`, `local/onnx`).
     pub provider: String,
     /// Optional OpenAI-compatible base URL override.
     #[serde(default)]
@@ -431,6 +431,16 @@ fn llm_alias_to_spec(a: &LlmAlias) -> ModelAliasSpec {
 fn provider_options(provider: &str, base_url: Option<&str>) -> serde_json::Value {
     match provider {
         "remote/openai" => match base_url {
+            Some(url) => serde_json::json!({"base_url": url}),
+            None => serde_json::json!({}),
+        },
+        // A `llama-server` address is site-specific, so there is no
+        // default to fall back to. Omitting `base_url` leaves the
+        // options empty and uni-xervo rejects the alias by name at
+        // catalog load, which is the right failure: silently inventing
+        // `localhost:8080` would make a misconfigured arm look like a
+        // model that answers badly.
+        "remote/llamacpp" => match base_url {
             Some(url) => serde_json::json!({"base_url": url}),
             None => serde_json::json!({}),
         },

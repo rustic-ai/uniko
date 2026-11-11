@@ -215,6 +215,61 @@ impl EmbeddingConfig {
         }
     }
 
+    /// An embedding model served by a llama.cpp `llama-server`, via
+    /// uni-xervo's `remote/llamacpp` provider.
+    ///
+    /// Inference runs in that server, so nothing is compiled into this
+    /// process and the ONNX execution-provider knobs do not apply.
+    ///
+    /// Both numeric arguments are required by the provider and have no
+    /// defensible default, because both are properties of how the server
+    /// was launched rather than of the model:
+    ///
+    /// - `dimensions` — the vector width the server returns. It must
+    ///   match the width declared on the node columns using this alias,
+    ///   exactly as for the ONNX presets.
+    /// - `max_input_tokens` — the total token budget *including* the
+    ///   `[CLS]`/`[SEP]` specials (512 for BGE). `llama-server` never
+    ///   silently truncates embedding input: encoder models are
+    ///   non-causal, so an over-long prompt is rejected with an HTTP
+    ///   error rather than cut down. uni-xervo therefore pre-trims
+    ///   against this budget via the server's native `/tokenize`
+    ///   endpoint. Setting it above the server's `--ubatch-size` or
+    ///   `--ctx-size` defeats that and surfaces the server's rejection
+    ///   instead.
+    ///
+    /// `base_url` is the OpenAI-compatible root **including** `/v1`,
+    /// e.g. `http://127.0.0.1:8080/v1`.
+    ///
+    /// Task prefixes are left unset: they belong to the model the server
+    /// happens to hold, which this constructor cannot know. Set
+    /// `document_prefix` / `query_prefix` yourself if it wants them (BGE
+    /// wants a query-side prefix only).
+    #[must_use]
+    pub fn llamacpp(
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+        dimensions: usize,
+        max_input_tokens: usize,
+    ) -> Self {
+        Self {
+            model_id: model_id.into(),
+            sparse_dimensions: None,
+            multivector_dimensions: None,
+            dimensions,
+            batch_size: 16,
+            document_prefix: None,
+            query_prefix: None,
+            execution_providers: None,
+            provider: "remote/llamacpp".into(),
+            provider_options: Some(serde_json::json!({
+                "base_url": base_url.into(),
+                "embedding_dimensions": dimensions,
+                "max_input_tokens": max_input_tokens,
+            })),
+        }
+    }
+
     /// BAAI/bge-m3 (`aapot/bge-m3-onnx`) — single-pass hybrid: 1024-d
     /// dense + 250002-d learned-sparse + 1024-d ColBERT.
     ///
@@ -943,6 +998,32 @@ impl UnikoConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `remote/llamacpp` requires `base_url`, `embedding_dimensions`
+    /// and `max_input_tokens`, and rejects unknown keys — so the
+    /// constructor must emit exactly those three, with
+    /// `embedding_dimensions` agreeing with the struct's `dimensions`
+    /// (the column width recall indexes against).
+    #[test]
+    fn llamacpp_embedding_emits_the_required_options() {
+        let cfg = EmbeddingConfig::llamacpp("bge-small", "http://127.0.0.1:8080/v1", 384, 512);
+
+        assert_eq!(cfg.provider, "remote/llamacpp");
+        assert_eq!(cfg.model_id, "bge-small");
+        assert_eq!(cfg.dimensions, 384);
+        assert!(
+            cfg.execution_providers.is_none(),
+            "ORT execution providers do not reach a remote server"
+        );
+        assert_eq!(
+            cfg.provider_options.expect("options"),
+            serde_json::json!({
+                "base_url": "http://127.0.0.1:8080/v1",
+                "embedding_dimensions": 384,
+                "max_input_tokens": 512,
+            })
+        );
+    }
 
     #[test]
     fn empty_json_deserialises_to_default() {
