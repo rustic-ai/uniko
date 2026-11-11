@@ -1,7 +1,7 @@
 {
   "models": {
-    "gen": { "alias": "llm/gen", "model_id": "google/gemma-3-4b-it", "provider": "local/mistralrs" },
-    "judge": { "alias": "llm/judge", "model_id": "google/gemma-3-4b-it", "provider": "local/mistralrs" },
+    "gen": { "alias": "llm/gen", "model_id": "google/gemma-3-4b-it", "provider": "remote/llamacpp", "base_url": "http://127.0.0.1:8080/v1" },
+    "judge": { "alias": "llm/judge", "model_id": "google/gemma-3-4b-it", "provider": "remote/llamacpp", "base_url": "http://127.0.0.1:8080/v1" },
     "embedder": { "preset": "bge-m3" },
     "reranker": { "enabled": true, "model_id": "colbert-maxsim", "style": "colbert", "top_n": 50, "apply_sigmoid": false }
   },

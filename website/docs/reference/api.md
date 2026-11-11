@@ -67,7 +67,8 @@ and `shutdown` when done.
 
 **`LlmSpec`** constructors: `openai(alias, model_id, base_url: Option<&str>)` (reads
 `OPENAI_API_KEY`) · `openai_with_key_env(alias, model_id, base_url, key_env)` ·
-`mistralrs(alias, model_id)` (local model).
+`llamacpp(alias, model_id, base_url)` / `llamacpp_with_key_env(alias, model_id, base_url, key_env)`
+(a llama.cpp `llama-server`).
 
 ---
 

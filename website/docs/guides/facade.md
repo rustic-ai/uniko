@@ -70,7 +70,8 @@ let memory = Uniko::builder()
 | `.raw_config(UnikoConfig)` | Drop in a fully-tuned config (see [Configuration](configuration.md)). |
 
 **`LlmSpec`** picks the generation model: `openai(alias, model, base_url)` (reads `OPENAI_API_KEY`),
-`openai_with_key_env(...)` for a custom key var, or `mistralrs(alias, model)` for a local model.
+`openai_with_key_env(...)` for a custom key var, or `llamacpp(alias, model, base_url)` for a
+llama.cpp `llama-server` you run yourself.
 
 !!! note "Capabilities, not wiring"
     You never construct a `KnowledgeBase`, a pipeline, or a model catalog. The builder is the only

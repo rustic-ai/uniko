@@ -201,7 +201,7 @@ assuming it fits.
 
 Request a file-size-limit increase for **each** project via
 <https://pypi.org/help/#file-size-limit> (cite the bundled ONNX Runtime +
-candle/mistralrs kernels; rustic-ai/uni-db obtained the same increases for its
+candle kernels; rustic-ai/uni-db obtained the same increases for its
 `uni-db-cuda`/`-metal` variants). The `github-release` job attaches the wheels
 to the GitHub Release (2 GB/asset) as a fallback if a PyPI upload is still
 rejected.

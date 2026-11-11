@@ -30,7 +30,7 @@ config.validate()?;                              // fail fast on bad combos
 
 uniko's NLP, embedding, and reranking models all resolve through the
 **uni-xervo** provider layer. A model is named by a provider id (e.g.
-`local/onnx`, `local/mistralrs`, `remote/openai`) plus a model id; xervo
+`local/onnx`, `remote/llamacpp`, `remote/openai`) plus a model id; xervo
 loads and warms it. Because the model selection is data, not code, you
 swap a model by editing config fields — no recompile of the pipeline.
 
@@ -43,7 +43,7 @@ flowchart LR
     N --> X
     R --> X
     X --> ONNX[local/onnx]
-    X --> MRS[local/mistralrs]
+    X --> LCP[remote/llamacpp]
     X --> REMOTE[remote/openai · remote/voyageai · ...]
 ```
 
@@ -92,7 +92,6 @@ The presets and their key properties, all defined in
 | `nomic-q` / `nomic-quantized` | `nomic_v15_quantized()` | `NomicEmbedTextV15Q`                    | 768  | Quantized — faster, lower memory. |
 | `minilm`           | `minilm_l6_v2()`                  | `AllMiniLML6V2`                         | 384  | Legacy default for existing databases; no task prefixes. |
 | `embeddinggemma` / `gemma` | `embedding_gemma_300m()`  | `onnx-community/embeddinggemma-300m-ONNX` | 768  | 300M-param Gemma-3 retrieval embedder via the `local/onnx` HF-Hub fallback. |
-| `embeddinggemma-mistralrs` / `gemma-mistralrs` | `embedding_gemma_300m_mistralrs()` | `google/embeddinggemma-300m` | 768  | Same weights via `local/mistralrs` (candle) on GPU. |
 | `bge-m3`           | `bge_m3()`                        | `aapot/bge-m3-onnx`                     | 1024 | **Hybrid**: also emits a 250,002-dim learned-sparse vector and a 1024-dim ColBERT multi-vector. See [Sparse + ColBERT hybrid retrieval](#sparse-colbert-hybrid-retrieval). |
 
 !!! warning
@@ -122,6 +121,23 @@ embed.provider_options = Some(serde_json::json!({
     "base_url": "http://litellm-cloud:4000/v1"
 }));
 ```
+
+A llama.cpp `llama-server` has its own constructor, because two of its
+options have no defensible default — both describe how you launched the
+server rather than which model it holds:
+
+```rust
+// model id, base_url (including /v1), dimensions, max_input_tokens
+let embed = EmbeddingConfig::llamacpp("bge-small", "http://127.0.0.1:8080/v1", 384, 512);
+```
+
+`llama-server` never silently truncates embedding input: encoder models
+are non-causal, so an over-long prompt is **rejected** rather than cut
+down. uni-xervo pre-trims against `max_input_tokens` using the server's
+own `/tokenize` endpoint, so keep that budget at or below the server's
+`--ubatch-size` and `--ctx-size`. It counts the `[CLS]`/`[SEP]` specials
+(512 for BGE). Task prefixes are left unset — set `document_prefix` /
+`query_prefix` yourself to match whichever model the server holds.
 
 ### The NLP cascade
 
@@ -584,12 +600,11 @@ offline build stays lean. Enable them per crate.
 | `uniko-memory`   | `llm`         | off     | Adds an LLM-rewritten abstractive path for F59 Summaries. By default, summaries are deterministic, extractive, and fully offline. |
 | `uniko-cortex`   | `llm`         | off     | Backs `uniko-memory/llm`. |
 | `uniko-extract`  | `pdf-ocr`     | off     | Tiered PDF/OCR extraction via `uni-xervo-pdf`. Not forwarded by any higher crate — see [OCR](#ocr-for-scanned-pdfs). |
-| `uniko-store`    | `mistralrs`   | off     | uni-db's mistral.rs provider, for running a local LLM in-process. |
-| `uniko-store`    | `candle`      | off     | uni-db's candle provider, the other local-LLM backend. |
+| `uniko-store`    | `candle`      | off     | uni-db's candle provider, for in-process LLM inference. |
 | `uniko-store`    | `batch-record`| off     | Diagnostic only: captures bulk-write batches for benchmark replay. Never enable in production. |
 
-`uniko-api` forwards exactly five features — `onnx`, `gpu-cuda`, `gpu-metal`,
-`mistralrs`, `candle`. It does **not** forward `llm` or `pdf-ocr`; enable those
+`uniko-api` forwards exactly four features — `onnx`, `gpu-cuda`, `gpu-metal`,
+`candle`. It does **not** forward `llm` or `pdf-ocr`; enable those
 on `uniko-memory` / `uniko-extract` directly.
 
 !!! tip

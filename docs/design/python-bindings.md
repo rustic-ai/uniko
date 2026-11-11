@@ -140,7 +140,7 @@ Mapped 1:1 unless a lifetime forces the flattening from §2.2. Async unless mark
 - `path` · `in_memory` · `embedding(EmbeddingConfig)` · `llm(LlmSpec)` · `raw_config(UnikoConfig)` · `streaming(bool)` · `scope_to_agent()` · `scope(RecallScope)` · `extractor(...)` *(built-in only — §6)* · `build()` *(async)*
 
 ### `uniko.LlmSpec` (sync constructors)
-- `LlmSpec.openai(alias, model_id, base_url=None)` · `openai_with_key_env(...)` · `mistralrs(alias, model_id)`
+- `LlmSpec.openai(alias, model_id, base_url=None)` · `openai_with_key_env(...)` · `llamacpp(alias, model_id, base_url, key_env=None)`
 
 ### `uniko.Agent` (handle)
 - `agent_id` *(property)*

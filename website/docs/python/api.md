@@ -138,7 +138,7 @@ and synchronous.
 | --- | --- | --- |
 | `openai` | `@staticmethod openai(alias: str, model_id: str, base_url: str \| None = None)` | Key read from `OPENAI_API_KEY`. |
 | `openai_with_key_env` | `@staticmethod openai_with_key_env(alias: str, model_id: str, key_env: str, base_url: str \| None = None)` | Key read from the named env var. |
-| `mistralrs` | `@staticmethod mistralrs(alias: str, model_id: str)` | Local model, in-situ Q4K quantization. |
+| `llamacpp` | `@staticmethod llamacpp(alias: str, model_id: str, base_url: str, key_env: str \| None = None)` | A model held by a llama.cpp `llama-server`. `base_url` includes `/v1`; pass `key_env` only if the server runs with `--api-key`. |
 
 ```python
 spec = uniko.LlmSpec.openai("answerer", "gpt-4o-mini")

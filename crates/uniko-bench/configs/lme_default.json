@@ -3,12 +3,14 @@
     "gen": {
       "alias": "llm/gen",
       "model_id": "google/gemma-3-4b-it",
-      "provider": "local/mistralrs"
+      "provider": "remote/llamacpp",
+      "base_url": "http://127.0.0.1:8080/v1"
     },
     "judge": {
       "alias": "llm/judge",
       "model_id": "google/gemma-3-4b-it",
-      "provider": "local/mistralrs"
+      "provider": "remote/llamacpp",
+      "base_url": "http://127.0.0.1:8080/v1"
     },
     "embedder": { "preset": "nomic" },
     "reranker": {
