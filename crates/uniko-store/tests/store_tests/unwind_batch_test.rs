@@ -468,7 +468,9 @@ async fn test_unwind_vs_loop_performance() {
     tx4.commit().await.unwrap();
     let loop_edge_elapsed = t0.elapsed();
 
-    // UNWIND-based edge creation.
+    // UNWIND-based edge creation. Same edge type as the loop arm above:
+    // these are Observation -> Message edges, which only OBSERVED_IN declares,
+    // and uni-db 5.0 enforces declared endpoints on write.
     let tx5 = session.tx().await.unwrap();
     let edge_list: Vec<Value> = obs_for_edges
         .iter()
@@ -485,7 +487,7 @@ async fn test_unwind_vs_loop_performance() {
         .query_with(
             "UNWIND $edges AS e \
              MATCH (a), (b) WHERE id(a) = e.src AND id(b) = e.dst \
-             CREATE (a)-[r:ABOUT]->(b) \
+             CREATE (a)-[r:OBSERVED_IN]->(b) \
              RETURN id(r) AS eid",
         )
         .param("edges", Value::List(edge_list))

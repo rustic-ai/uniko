@@ -277,7 +277,8 @@ impl PyUnikoBuilder {
 
 /// An LLM registration for `Agent.answer`.
 ///
-/// Construct via a provider helper (`LlmSpec.openai`, `LlmSpec.mistralrs`).
+/// Construct via a provider helper (`LlmSpec.openai`,
+/// `LlmSpec.llamacpp`).
 #[pyclass(name = "LlmSpec", module = "uniko")]
 pub struct PyLlmSpec {
     inner: LlmSpec,
@@ -315,11 +316,24 @@ impl PyLlmSpec {
         }
     }
 
-    /// A local model served via mistral.rs with in-situ Q4K quantization.
+    /// A chat model served by a llama.cpp `llama-server`.
+    ///
+    /// `base_url` is the OpenAI-compatible root including `/v1`, e.g.
+    /// `http://127.0.0.1:8080/v1`. Pass `key_env` only when the server
+    /// was started with `--api-key`.
     #[staticmethod]
-    fn mistralrs(alias: String, model_id: String) -> Self {
+    #[pyo3(signature = (alias, model_id, base_url, key_env=None))]
+    fn llamacpp(
+        alias: String,
+        model_id: String,
+        base_url: String,
+        key_env: Option<String>,
+    ) -> Self {
         Self {
-            inner: LlmSpec::mistralrs(alias, model_id),
+            inner: match key_env {
+                Some(env) => LlmSpec::llamacpp_with_key_env(alias, model_id, base_url, env),
+                None => LlmSpec::llamacpp(alias, model_id, base_url),
+            },
         }
     }
 

@@ -107,8 +107,9 @@ same builder, same handle. For the zero-config defaults (the benchmark-validated
 
 `.llm(...)` registers a generation model so `agent.answer(...)` can synthesize — recall and
 retrieval need no LLM. `LlmSpec::openai(alias, model_id, base_url)` reads `OPENAI_API_KEY` from the
-environment; there's also `LlmSpec::openai_with_key_env(...)` and `LlmSpec::mistralrs(...)` for a
-local model.
+environment; there's also `LlmSpec::openai_with_key_env(...)` and
+`LlmSpec::llamacpp(alias, model_id, base_url)`, which points at a llama.cpp `llama-server` you run
+yourself.
 
 !!! tip "Configuration lives on the builder"
     Embedders, NLP, and the reranker are set with `.embedding(EmbeddingConfig::...)` and friends, or

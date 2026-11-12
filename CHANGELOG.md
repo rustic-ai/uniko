@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`LlmSpec::mistralrs` and `EmbeddingConfig::embedding_gemma_300m_mistralrs`
+  are gone,** along with the `embeddinggemma-mistralrs` / `gemma-mistralrs`
+  embedder presets, the `mistralrs` feature on `uniko-store`, `uniko-memory`
+  and `uniko-api`, and the Python `LlmSpec.mistralrs` static method.
+  uni-xervo 0.19.0 dropped mistralrs entirely, so there is nothing left to
+  forward. Replace an in-process mistralrs LLM with `LlmSpec::llamacpp` (see
+  below) or, for a GPU wheel, the `candle` feature.
+- **Edge writes must match the schema's declared endpoints.** uni-db 5.0
+  enforces each edge type's declared source and target labels on write,
+  where nothing checked before — e.g. `MENTIONS` must run Message -> Entity,
+  and an Observation -> Message link must be `OBSERVED_IN`. Writes that
+  violate this, and used to succeed, now return an error. Enforcement is
+  write-only: stores written earlier may still hold such edges and stay
+  readable.
+
+### Added
+
+- **`LlmSpec::llamacpp` / `LlmSpec::llamacpp_with_key_env` and
+  `EmbeddingConfig::llamacpp`,** over uni-xervo's `remote/llamacpp` provider:
+  generation, and embeddings, served by a llama.cpp `llama-server` you run
+  yourself. Inference happens in that server, so open-weights models need no
+  inference kernels compiled into the host process and no CUDA or Metal
+  toolchain at build time. The provider is always compiled in — uni-xervo
+  gates it on `reqwest` + `base64`, which the other remote providers already
+  pull in — so there is no feature to enable. Exposed to Python as
+  `LlmSpec.llamacpp(alias, model_id, base_url, key_env=None)`.
+
+### Changed
+
+- **uni-db 5.1 and uni-xervo 0.19.1.** The 5.1 floor is required rather than
+  cosmetic: uni-db 5.0 declares `provider-mistralrs`, which uni-xervo 0.19
+  removed, so 5.0 cannot resolve against the uni-xervo this workspace needs.
+  `ort` moves to the exact release candidate uni-xervo 0.19.1 pins
+  (`=2.0.0-rc.15`); a lower floor resolves a second, incompatible copy.
+
+### Fixed
+
+- **NLP no longer degrades silently to rule-based extraction.** uni-xervo
+  >= 0.19 serves two kniv generations and, absent an explicit `generation`
+  option, infers one by probing the model repo for `onnx/onnx_meta.json`. The
+  v1 cascade repo ships that file too, so the probe read it as v7 and rejected
+  every v1 option key — and because `NlpPipeline::try_new` logs at debug and
+  returns `None`, the failure was invisible. The `nlp/default` alias now pins
+  `"generation": "v1"`.
+- `pdf-extract` 0.12 (`lopdf` ^0.42) and `candle` 0.11.1 (`zip` 9) clear five
+  security advisories; the `cargo deny` ignore list is down to three entries.
+
 ## [0.3.0] - 2026-09-26
 
 ### Breaking

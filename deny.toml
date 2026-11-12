@@ -12,13 +12,34 @@ yanked = "deny"
 #
 # Entries here are pruned when they stop matching: cargo-deny reports an
 # unmatched ignore as `advisory-not-detected`, and a dead entry would silently
-# swallow the advisory if it ever came back. Four were removed once their
-# upstreams shipped fixes (two rustls/TLS-stack, two pyo3).
+# swallow the advisory if it ever came back. Five have been removed once their
+# upstreams shipped fixes: two rustls/TLS-stack, two pyo3, and one `lopdf`
+# (pdf-extract 0.12 moved to lopdf 0.42). Separately, the zstd/zstd-safe and
+# `zip` advisories never had entries here -- they failed the check until they
+# cleared: zstd/zstd-safe via the 0.13.4 / 7.4.0 backports, and the four `zip`
+# ones once uni-xervo 0.19 moved to candle 0.11, which requires zip 9.
 ignore = [
-    "RUSTSEC-2023-0071", # `rsa` Marvin timing side-channel — no fixed upstream release; transitive via mistralrs (uni-xervo).
-    "RUSTSEC-2026-0187", # `lopdf` stack overflow on deeply nested PDFs (DoS) — transitive via pdf-extract; pinned to ^0.38, fix is 0.42; unblock when pdf-extract bumps.
-    "RUSTSEC-2026-0194", # `quick-xml` quadratic dup-attribute scan (DoS) — transitive via lance/opendal; pinned to ^0.40, fix is 0.41; unblock when they bump.
-    "RUSTSEC-2026-0195", # `quick-xml` unbounded namespace alloc in NsReader (DoS) — same transitive quick-xml pin as RUSTSEC-2026-0194.
+    # `rsa` Marvin timing side-channel. Fixed upstream in rsa 0.10.0 (the
+    # constant-time rewrite onto crypto-bigint), but unreachable: every
+    # release of the reqsign 3.x crates, up to the current latest, still
+    # requires `rsa ^0.9.2`, so the lock stays on 0.9.10. Three paths, all
+    # rooted at lance-io (uni-db's Lance stack): opendal ->
+    # opendal-service-azblob -> reqsign-azure-storage, plus lance-io's own
+    # direct reqsign-core and reqsign-google deps. Unblock when reqsign
+    # moves to rsa 0.10.
+    "RUSTSEC-2023-0071",
+    # `quick-xml` quadratic dup-attribute scan (DoS). Reachable only through
+    # object_store 0.13.2, which holds quick-xml 0.39.4; the fix is 0.41, and
+    # the graph already carries 0.41/0.42 for other consumers. Lance is NOT
+    # the holdout here -- lance 13 is already on object_store 0.14.2. What
+    # pins 0.13 is datafusion 54 (and its datasource crates), arrow-rs's
+    # parquet 58, uni-db's own crates, and uniko-store itself, which uses
+    # object_store directly for S3 blob storage. So all four have to move,
+    # and datafusion cannot until the arrow stack advances.
+    "RUSTSEC-2026-0194",
+    # `quick-xml` unbounded namespace alloc in NsReader (DoS) -- same
+    # object_store 0.13.2 pin as RUSTSEC-2026-0194.
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]
@@ -55,7 +76,7 @@ wildcards = "allow"
 # by subtree so `multiple-versions` still flags any NEW duplicate uniko itself
 # introduces outside these trees. Revisit as the upstreams converge.
 skip-tree = [
-    { crate = "uni-db" },        # lance / datafusion / arrow + uni-xervo (mistralrs, candle, tokenizers)
+    { crate = "uni-db" },        # lance / datafusion / arrow + uni-xervo (candle, tokenizers)
     { crate = "uni-xervo" },     # local-LLM + candle + tokenizers stack
     { crate = "uni-xervo-pdf" }, # hayro PDF rasterizer + OCR stack
     { crate = "pdf-extract" },   # lopdf PDF text extraction

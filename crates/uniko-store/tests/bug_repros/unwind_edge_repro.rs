@@ -98,6 +98,10 @@ async fn repro_unwind_match_id_slow() {
     let loop_ms = t0.elapsed().as_millis();
 
     // --- Approach 2: UNWIND with MATCH WHERE id() ---
+    // Same edge type as approach 1: the sources are Observations and the
+    // target is a Message, which only OBSERVED_IN declares. uni-db 5.0
+    // enforces declared endpoints on write, and holding the type constant is
+    // what the loop-vs-UNWIND comparison wants anyway.
     let tx2 = session.tx().await.unwrap();
     let edges: Vec<Value> = src_ids
         .iter()
@@ -114,7 +118,7 @@ async fn repro_unwind_match_id_slow() {
         .query_with(
             "UNWIND $edges AS e \
              MATCH (a), (b) WHERE id(a) = e.src AND id(b) = e.dst \
-             CREATE (a)-[r:ABOUT]->(b) \
+             CREATE (a)-[r:OBSERVED_IN]->(b) \
              RETURN id(r) AS eid",
         )
         .param("edges", Value::List(edges))
@@ -153,7 +157,7 @@ async fn repro_unwind_match_id_slow() {
     let prepared = tx3
         .prepare(
             "MATCH (a), (b) WHERE id(a) = $src AND id(b) = $dst \
-             CREATE (a)-[r:MENTIONS]->(b) RETURN id(r) AS eid",
+             CREATE (a)-[r:OBSERVED_IN]->(b) RETURN id(r) AS eid",
         )
         .await
         .unwrap();

@@ -2,7 +2,7 @@
 
 *An embedded, Rust-native cognitive-memory engine that compiles conversations into a queryable knowledge graph.*
 
-**Version 0.2.0 · Generated 2026-08-03**
+**Workspace version 0.3.0 · Generated 2026-08-03 · Revised 2026-11-11**
 
 ---
 
@@ -12,13 +12,13 @@ uniko is an embedded, Rust-native cognitive-memory library for AI agents. It lin
 
 The central thesis is **write-time compile: "compile once, query forever."** Raw messages are treated as source code; consolidation compiles them into reusable knowledge. Ingest runs a deterministic, LLM-free cascade — regex, tree-sitter, and a small quantized DeBERTa model (kniv-deberta, INT8) that emits POS/NER/SRL/DEP/CLS in a single shared-encoder ONNX pass — so ingestion is cheap, reproducible, and fully offline. Every message is written atomically: all CPU work and read-only lookups happen before a transaction opens, then one transaction commits the Message plus its edges, chunks, entities, and observations. Recall then queries the already-compiled Entities, Observations, and Facts rather than re-deriving them, so there is no LLM in the recall hot path.
 
-Architecturally, uniko is a strict stack of layered crates. **L1 uniko-store** is the sole boundary to `uni-db` — it owns the schema (25 node labels, 54 edge types), vector/fulltext/hybrid/sparse/ColBERT search, graph traversal and Personalized PageRank, bitemporal Facts, and SSI-aware concurrency with striped locks. **L2 uniko-pipes** supplies content-free pipeline machinery (the `Step` trait, circuit breaker, dead-letter queue, cancellation, content taxonomy). **L3 uniko-extract** turns messages, artifacts, and PDFs into graph nodes via the NLP cascade and atomic ingest. **L4 uniko-memory** is the public `Uniko` facade — the 3-phase recall cascade, P4 fact consolidation with drift and contradiction detection, the async pipeline, and the agent-tool surface. **L5 uniko-cortex** promotes recurring successful episode sequences into Procedures (P5) and clusters co-occurring entities into Topics (P6). A thin `uniko-api` facade plus an async-first PyO3 Python SDK form the outermost, logic-free surface. Layer numbers denote cognitive altitude, not build order.
+Architecturally, uniko is a strict stack of layered crates. **L1 uniko-store** is the sole boundary to `uni-db` — it owns the schema (26 node labels, 55 edge types), vector/fulltext/hybrid/sparse/ColBERT search, graph traversal and Personalized PageRank, bitemporal Facts, and SSI-aware concurrency with striped locks. **L2 uniko-pipes** supplies content-free pipeline machinery (the `Step` trait, circuit breaker, dead-letter queue, cancellation, content taxonomy). **L3 uniko-extract** turns messages, artifacts, and PDFs into graph nodes via the NLP cascade and atomic ingest. **L4 uniko-memory** is the public `Uniko` facade — the 3-phase recall cascade, P4 fact consolidation with drift and contradiction detection, the async pipeline, and the agent-tool surface. **L5 uniko-cortex** promotes recurring successful episode sequences into Procedures (P5) and clusters co-occurring entities into Topics (P6). A thin `uniko-api` facade plus an async-first PyO3 Python SDK form the outermost, logic-free surface. Layer numbers denote cognitive altitude, not build order.
 
 Knowledge in uniko is **derived, never merely stored**. Only Messages and Actions are observed directly; Entities, Observations, Facts, Topics, and Procedures are all derived and wired back to their evidence, so the schema itself *is* the provenance spine — every belief is walk-back-able to "why do we believe this?" Facts are bitemporal (a single BTIC valid-time interval with per-bound certainty), reinforced by Laplace-smoothed confidence, and subject to contradiction detection (F38) and entity drift (F39) that forces volatile-entity queries into deeper recall. Per-claim visibility scoping gates Fact and Observation access by viewer, team, and org.
 
 The headline benchmark proof comes from the repository's own harness on LoCoMo10 (1,986 questions, gemini-3.1 judge, 22-core CPU + 8 GB consumer GPU): **81.2% LLM-judge accuracy, 85.6% retrieval hit rate, 0.321 token-F1** — competitive on quality — while ingesting 5,882 turns in **7.5 minutes at $0** (no LLM on the write path) and answering at **4.04 s mean latency**. Against graph-backed peers measured in the KTH dmas-memory study, uniko ingests 33–76× faster at zero token cost and posts the fastest end-to-end Q&A wall-time of six systems. These are self-measured internal figures, not a third-party leaderboard, and the cost/latency tables use the 1,540-question non-adversarial subset — the two question sets should not be conflated.
 
-uniko is for founders and engineering leads shipping agents in their own process who want zero operational footprint, where ingest cost and offline capability matter, where conversation and provenance are central (tracking who-said-what across sessions and explaining beliefs), who organize memory around goals, and who prefer graph-native reasoning compiled at ingest over inference paid on every query. It ships today as six crates on crates.io (facade: `uniko-api = "0.2.0"`) and three interchangeable Python wheels (`uniko` CPU, `uniko-cuda`, `uniko-metal`). The Python SDK is alpha; HTTP/MCP servers, a CLI, multimodal ingest, rule induction, and cross-agent sharing are on the roadmap, not yet shipped.
+uniko is for founders and engineering leads shipping agents in their own process who want zero operational footprint, where ingest cost and offline capability matter, where conversation and provenance are central (tracking who-said-what across sessions and explaining beliefs), who organize memory around goals, and who prefer graph-native reasoning compiled at ingest over inference paid on every query. It ships today as six crates on crates.io (facade: `uniko-api = "0.3.0"`) and three interchangeable Python wheels (`uniko` CPU, `uniko-cuda`, `uniko-metal`). The Python SDK is alpha; HTTP/MCP servers, a CLI, multimodal ingest, rule induction, and cross-agent sharing are on the roadmap, not yet shipped.
 
 ---
 
@@ -45,7 +45,7 @@ uniko is for founders and engineering leads shipping agents in their own process
 
 uniko is an **embedded, Rust-native cognitive-memory engine for AI agents**. It links into your host process like SQLite — no server to run, no cluster to operate, no external services to keep in sync. Inside that one process it runs a single [uni-db](https://crates.io/crates/uni-db) store that fuses a property graph, vector indexes, a BM25 full-text index, and the Locy logic runtime into one engine, and it turns raw conversation into a typed, queryable, reasoned-over knowledge graph.
 
-Everything an agent "remembers" lives in **one property graph** — 25 node labels and 54 edge types (the source of truth is `crates/uniko-store/src/schema/constants.rs`: `labels::ALL` and `edges::ALL`). The organizing principle is that **knowledge is derived, never directly stored**: only `Message` and `Action` nodes are observed directly; every other node — `Entity`, `Observation`, `Fact`, `Topic`, `Procedure`, `Summary` — is *derived* from those observations and wired back to its evidence with graph edges. The schema *is* the provenance spine. You can always walk back from a belief to the message that produced it and answer "why do we believe this?"
+Everything an agent "remembers" lives in **one property graph** — 26 node labels and 55 edge types (the source of truth is `crates/uniko-store/src/schema/constants.rs`: `labels::ALL` and `edges::ALL`). The organizing principle is that **knowledge is derived, never directly stored**: only `Message` and `Action` nodes are observed directly; every other node — `Entity`, `Observation`, `Fact`, `Topic`, `Procedure`, `Summary` — is *derived* from those observations and wired back to its evidence with graph edges. The schema *is* the provenance spine. You can always walk back from a belief to the message that produced it and answer "why do we believe this?"
 
 The public entry point is one owning handle:
 
@@ -220,7 +220,7 @@ The proof point that ties back to the thesis: **ingest costs $0 and needs no net
 
 ### 1.9 What is shipped, and what is not
 
-Shipped (Phases 1–3): the full Rust engine (six crates on crates.io, `uniko-api = "0.2.0"` as the facade), the 3-phase recall cascade, P4 consolidation with drift/contradiction, P5 procedures, P6 topics, the Locy rule lifecycle, bitemporal Facts, visibility scoping, PDF/artifact ingest, and an alpha Python SDK (three wheels).
+Shipped (Phases 1–3): the full Rust engine (six crates on crates.io, `uniko-api = "0.3.0"` as the facade), the 3-phase recall cascade, P4 consolidation with drift/contradiction, P5 procedures, P6 topics, the Locy rule lifecycle, bitemporal Facts, visibility scoping, PDF/artifact ingest, and an alpha Python SDK (three wheels).
 
 Not yet shipped — do not build on these: HTTP/MCP server, CLI, cross-agent sharing, rule induction, and MCTS planning (Phases 4–6). The Python API is alpha and may change before 1.0. The largest known recall weakness is date-anchored/temporal questions, where retrieval tuning is ongoing.
 
@@ -271,8 +271,8 @@ Here is the full picture. The left column is altitude (meaning); the arrows show
   └────────┬──────────────┘         └───────────┬──────────────────────────────┘
            │                                    │
   ┌────────▼────────────────────────────────────▼──────────────────────────────┐
-  │  L1  STORE         uniko-store    typed façade over uni-db: schema (25       │
-  │                                   labels / 54 edges), search, Locy runtime,  │
+  │  L1  STORE         uniko-store    typed façade over uni-db: schema (26       │
+  │                                   labels / 55 edges), search, Locy runtime,  │
   │                                   Facts/BTIC, blob store, striped locks      │
   └────────────────────────────────┬───────────────────────────────────────────┘
                                    │
@@ -301,7 +301,7 @@ Note the two things that violate a naive "L1→L2→…→L5" reading:
 
 | Crate | Altitude | Depends on (intra-project) | Owns | Must **not** |
 |---|---|---|---|---|
-| **uniko-store** | L1 | `uni-db`, `uni-xervo` | The typed `KnowledgeBase` façade over uni-db: the full domain schema (25 node labels / 54 edge types in `schema/constants.rs`), all search (vector/FTS/hybrid/sparse/ColBERT), graph traversal + PPR, bitemporal Facts (BTIC), blob storage, the Locy runtime seam, the model-runtime seam, and the concurrency primitives (`StripedLocks`, `transact_with_retry`) that reconcile uni-db's SSI with check-then-create hot paths. | — (it *is* the uni-db boundary) |
+| **uniko-store** | L1 | `uni-db`, `uni-xervo` | The typed `KnowledgeBase` façade over uni-db: the full domain schema (26 node labels / 55 edge types in `schema/constants.rs`), all search (vector/FTS/hybrid/sparse/ColBERT), graph traversal + PPR, bitemporal Facts (BTIC), blob storage, the Locy runtime seam, the model-runtime seam, and the concurrency primitives (`StripedLocks`, `transact_with_retry`) that reconcile uni-db's SSI with check-then-create hot paths. | — (it *is* the uni-db boundary) |
 | **uniko-pipes** | L2 | `uniko-store` only | Content-free pipeline machinery: the `Step` trait + `PipelineContext`, the lock-free `CircuitBreaker`, the graph-backed `DeadLetterQueue`, the `ShutdownCoordinator` cancellation tree, `HealthTracker`/`WorkerStatus`, Prometheus metric helpers, the MIME/`Modality` taxonomy, and the wire task/outcome types (`IngestTask`, `StepOutcome`, `StepErrorPolicy`). | contain any content-processing logic |
 | **uniko-extract** | L3 | `uniko-store`, `uniko-pipes`, `uni-xervo` (direct) | Content intelligence: the write-time ONNX NLP cascade (POS/NER/DEP/SRL/CLS via xervo's shared DeBERTa encoder), entity extraction (regex + tree-sitter + ONNX NER), DEP/SRL-reconstructed observations, chunking, embedding helpers, PDF ingest, and the atomic per-message ingest transaction (`ingest_message_atomic`). Implements `Step` (`IngestStep`). | `use uni_db` / call `.db()` |
 | **uniko-cortex** | L5 | `uniko-store` only | Higher reasoning: P5 procedure promotion (`promote_procedures_once`, driven by the Locy `sequence_detector` rule) and P6 topic detection (`detect_topics_once`, weighted Label Propagation over the entity co-occurrence graph). Deliberately thin — algorithms only; all graph I/O delegated to store repository helpers. | `use uni_db` / call `.db()`; depend on `uniko-memory` |
@@ -337,15 +337,15 @@ The practical consequence: if a higher crate needs a new graph operation, you ad
 
 ### 2.4 The uni-db foundation
 
-Everything uniko does rests on `uni-db` (3.2.0 from crates.io, tracked as `^3`), an **embedded multi-model engine that combines graph, vector, full-text, and a logic runtime in a single in-process store** — nothing to keep in sync, nothing to deploy. `uniko-store` is a typed façade over it. Concretely, uni-db provides:
+Everything uniko does rests on `uni-db` (5.1 from crates.io, tracked as `^5.1`, with `default-features = false` and an explicit provider list in the workspace `Cargo.toml`), an **embedded multi-model engine that combines graph, vector, full-text, and a logic runtime in a single in-process store** — nothing to keep in sync, nothing to deploy. `uniko-store` is a typed façade over it. Concretely, uni-db provides:
 
-- **A property graph with OpenCypher.** uniko's entire memory is one property graph — 25 node labels, 54 edge types. Generic CRUD in store builds parameterized Cypher (`build_inline_props`/`build_set_clause`), with `validate_label`/`validate_edge_type`/`validate_property_name` gating every interpolated identifier while values are always `$pN`-bound.
+- **A property graph with OpenCypher.** uniko's entire memory is one property graph — 26 node labels, 55 edge types. Generic CRUD in store builds parameterized Cypher (`build_inline_props`/`build_set_clause`), with `validate_label`/`validate_edge_type`/`validate_property_name` gating every interpolated identifier while values are always `$pN`-bound.
 - **Vector, full-text (BM25), sparse, and multi-vector (ColBERT) indexes** in the same store as the graph. Store wraps `uni.vector.query`, `uni.fts.query`, `uni.sparse.query`, and a ColBERT MaxSim path. A hybrid embedder (BGE-M3) fuses dense + sparse + per-token ColBERT columns into a *single* `EmbedHybrid` forward pass. Default vector index is `HnswSq{m:16, ef_construction:100}`, Cosine metric, 384 dimensions.
 - **The Locy logic runtime** — rules, `ASSUME` (hypothetical fork-query-rollback), and `ABDUCE` (ranked modifications). Store exposes `create_rule`/`query_rule`/`execute_rule`/`assume`/`abduce`. Cortex's `sequence_detector` and memory's four stdlib rules run here. A recurring gotcha: **Locy is not Cypher** — a single comma-joined `MATCH` (a second `MATCH` is a parse error), `expr AS name` aggregates, and no `$param` in a post-FOLD `HAVING` (RC12), so threshold logic is pushed into Rust consumers.
 - **A native bitemporal type, `DataType::Btic`.** A `Fact`'s `valid_at` is one half-open interval `[lo, hi)` with per-bound granularity and certainty — *not* a `valid_from`/`valid_until` pair. Certainty upgrades `Approximate → Definite` once cumulative observation count crosses `CERTAINTY_THRESHOLD = 10`. Recall matches validity via the `btic_overlaps(f.valid_at, $window)` scalar Cypher function (Allen algebra: `a.lo < b.hi && b.lo < a.hi`).
 - **Serializable Snapshot Isolation (SSI) transactions** with retriable conflict classification, plus `bulk_insert_vertices`/`bulk_insert_edges` fast paths that bypass the Cypher executor. The bulk path is measured ~980× faster per row than Cypher (bulk ~150µs/edge vs Cypher ~147ms/edge at sess=24) because the VIDs are already known — but it doesn't return EIDs and doesn't re-validate property names, so ingest hot paths validate keys up front.
 
-Above uni-db sits **`uni-xervo`** (0.17.0), the model runtime: ONNX embedding/NLP/rerank/OCR plus remote (`openai`, `vertexai`), `mistralrs`, and `candle` providers. Store reaches it internally via `db.xervo()` and exposes it through the `model.rs` seam (`embed`, `embed_multivector`, `generate`, `rerank`, `model_runtime`). The default stack: BGE-small-en-v1.5 (384d) embedder, `ms-marco-MiniLM-L-6-v2` cross-encoder reranker (enabled by default), and `kniv-deberta-xsmall` INT8 for the NLP cascade.
+Above uni-db sits **`uni-xervo`** (0.19.1), the model runtime: ONNX embedding/NLP/rerank/OCR plus remote providers (`openai`, `gemini`, `vertexai`, `mistral`, `anthropic`, `voyageai`, `cohere`, `azure-openai`, and `llamacpp` — an HTTP client for a `llama-server` the operator runs) and the in-process `candle` provider. uni-xervo 0.19 removed `mistralrs` entirely and uni-db 5.1 no longer declares the feature; `provider-candle` is also off in this workspace (dropped with `default-features = false`) and returns only via the `candle` passthrough feature. Store reaches it internally via `db.xervo()` and exposes it through the `model.rs` seam (`embed`, `embed_multivector`, `generate`, `rerank`, `model_runtime`). The default stack: BGE-small-en-v1.5 (384d) embedder, `ms-marco-MiniLM-L-6-v2` cross-encoder reranker (enabled by default), and `kniv-deberta-xsmall` INT8 for the NLP cascade.
 
 #### Concurrency: why SSI alone isn't enough
 
@@ -531,7 +531,7 @@ These are the load-bearing rules the rest of this book assumes:
 
 1. **The uni-db seal** — product crates reach the graph only through `uniko-store`'s typed API; the CI ripgrep gate enforces it.
 2. **Altitude ≠ build order** — `uniko-memory` (L4) depends on `uniko-cortex` (L5); the one deliberate reverse-altitude edge.
-3. **`schema/constants.rs` is the schema source of truth** — 25 node labels, 54 edge types. `config/schema.json` is a generated snapshot (`cargo run --bin export-schema`), loaded only when `UnikoConfig::schema_path` is set; regenerate it alongside any schema change.
+3. **`schema/constants.rs` is the schema source of truth** — 26 node labels, 55 edge types. `config/schema.json` is a generated snapshot (`cargo run --bin export-schema`), loaded only when `UnikoConfig::schema_path` is set; regenerate it alongside any schema change.
 4. **`uni-db` is a separate project** — never edit the local `../uni/` checkout; on a suspected uni-db bug, build a minimal isolated repro (pattern: `crates/uniko-store/tests/unidb_bytes_return_repro.rs`) and file upstream.
 5. **SSI does not catch insert-phantoms** — every check-then-create on a non-unique index must hold the correct `StripedLocks` key across both the existence re-read and the commit.
 6. **"Retry" in the pipeline is data-only** — the circuit breaker's `Open→HalfOpen` probe is the sole automatic recovery mechanism; the DLQ persists but does not re-drive.
@@ -542,7 +542,7 @@ These are the load-bearing rules the rest of this book assumes:
 
 uniko keeps the entire memory of an agent in **one uni-db property graph** — graph structure, dense/sparse vectors, ColBERT multi-vectors, full-text/BM25 indexes, and the Locy logic runtime all live in the same embedded store, so there is nothing to keep in sync between a vector DB, a graph DB, and a rules engine. This chapter is the reference for the shape of that graph: every node label, every edge type, how knowledge is *derived* rather than stored, how Facts carry bitemporal validity and drift, and how visibility scoping is enforced.
 
-The single source of truth for the catalog is `crates/uniko-store/src/schema/constants.rs` — the two arrays `labels::ALL` (25 node labels) and `edges::ALL` (54 edge types), grouped by cognitive layer. Per-node property and index definitions live in sibling files (`schema/facts.rs`, `schema/entities.rs`, `schema/observations.rs`, `schema/messages.rs`, `schema/chunks.rs`, `schema/procedures.rs`, `schema/topics.rs`, …) and are installed by the idempotent, two-phase `register_schema` (`schema/mod.rs`).
+The single source of truth for the catalog is `crates/uniko-store/src/schema/constants.rs` — the two arrays `labels::ALL` (26 node labels) and `edges::ALL` (55 edge types), grouped by cognitive layer. Per-node property and index definitions live in sibling files (`schema/facts.rs`, `schema/entities.rs`, `schema/observations.rs`, `schema/messages.rs`, `schema/chunks.rs`, `schema/procedures.rs`, `schema/topics.rs`, …) and are installed by the idempotent, two-phase `register_schema` (`schema/mod.rs`).
 
 > **Counts drift easily — `constants.rs` is authoritative.** `labels::ALL` = 25 node labels, `edges::ALL` = 54 edge types. The downstream artifacts (`website/docs/reference/schema.md`, `concepts/data-model.md`, and the `config/schema.json` snapshot) currently agree with it, but they are *downstream*: regenerate the snapshot with `cargo run --bin export-schema` and update the docs in the same change as any schema edit. Two additions are the usual casualties — the `Pattern` label and the `CONTRADICTED_BY` edge, both Locy-consumer additions (`episode_pattern_detector`, `contradiction_detector`).
 
@@ -589,14 +589,14 @@ Two consequences worth internalizing:
 1. **Facts and Procedures are never deleted.** Contradiction closes a Fact's validity interval and records an `INVALIDATES` edge; the audit trail survives. Hard deletion of a Message re-evaluates dependent Facts and soft-invalidates (BTIC-closes) any that lose their last supporting Observation — it never silently drops the belief.
 2. **Ingest is LLM-free and atomic.** All write-time enrichment is deterministic CPU work (regex + tree-sitter + a small quantized DeBERTa cascade). Per-message ingest is *prep-then-commit*: all NLP/NER/SRL/dedup and read-only lookups happen before a transaction opens, then **one** transaction writes `Message` + edges + `Chunk`s + `Entity` upserts + `MENTIONS` + `Observation`s + `OBSERVED_IN`/`ABOUT` and commits once (`ingest_message_atomic`, `crates/uniko-extract/src/ingest/atomic.rs`). There is never a half-state like "a Message with no entities." LLM work (triple refinement, topic naming, answer synthesis) is async and optional and never touches the write path.
 
-### 3.2 Node label catalog (25)
+### 3.2 Node label catalog (26)
 
 `labels::ALL` is numbered by cognitive layer in source order. The layer numbers describe *cognitive altitude*, not build order or dependency direction.
 
 | Layer | Labels | Role |
 |---|---|---|
 | L0 | `Participant` | The actor: user, assistant, system, tool. First-class identity. |
-| L1 (working/task) | `Goal`, `Task`, `Session` | Goal-oriented working memory; `Session` groups Messages. |
+| L1 (working/task) | `Source`, `Goal`, `Task`, `Session` | `Source` is the stable logical origin of a record; the rest is goal-oriented working memory, with `Session` grouping Messages. |
 | L2 (episodic) | `Message`, `Action`, `Episode` | The **observed** substrate + agent-recorded experience. |
 | L3 (artifacts / document-IR) | `Artifact`, `ArtifactContent`, `Chunk`, `Page`, `Block` | Attachments, blob content, retrieval chunks, and the PDF Page/Block document-IR. |
 | L4 (semantic) | `Entity`, `Observation`, `Fact`, `Topic`, `Summary` | Derived knowledge. |
@@ -608,6 +608,7 @@ Two consequences worth internalizing:
 Notes on the less-obvious labels:
 
 - **`Working memory has no stored node.`** There is deliberately no `WorkingMemory` label — a goal's working set is *recomputed on demand* by traversing `Goal → Task → Session → Message → Fact → Entity`. It is always current, never cached (see `Goals::context` in `crates/uniko-memory/src/facade/goals.rs`).
+- **`Source`** (`schema/sources.rs`) is the *logical* origin of a record — a web page, a dataset, an uploaded file, an upstream system — kept separate from the `Artifact` that holds one fetch of it, because the source outlives any single revision of its bytes. Properties: `source_id` (caller-supplied stable identity, hash-indexed), nullable `name`/`uri`, `first_seen`, nullable `last_seen`, and nullable `retired_at` (retiring stops every revision of a source from grounding a current answer without deleting anything). Message, Artifact, Observation, and Fact also carry a denormalised nullable `source_id` (and `revision_id`) beside the `FROM_SOURCE` edge, so a recall scope filter is a property predicate instead of a traversal in every candidate query.
 - **`ArtifactContent`** holds the content-addressed bytes for the default Lance blob backend. It is shared/deduped: dropped only when its reference count reaches 1. `Page`/`Block` form the PDF document-IR (`Artifact → HAS_PAGE → Page → CONTAINS → Block`, blocks chained by `NEXT_IN_READING_ORDER`).
 - **`Pattern`** and the `CONTRADICTED_BY` edge back the `episode_pattern_detector` and `contradiction_detector` stdlib Locy rules. They are the two additions most often missed when the downstream catalogs are updated.
 - **`DeadLetter`** is a *standalone* node with **no edges** — it records a failed pipeline step (`step`, `error`, `node_ref`, `retry_count`, `max_retries`) and is not wired into the graph. `retry_count` is always written `0` and never read; DLQ retry is data-only and unimplemented (`crates/uniko-pipes/src/dead_letter.rs`).
@@ -628,7 +629,7 @@ Because who-said-what is structural, uniko can answer cross-session provenance q
 
 Ensuring the Session and sender exist is a cold-path, first-sight-only operation guarded by `lock_session_setup` (a striped RMW lock) to avoid duplicate `Session`/`Participant`/`PARTICIPATED_IN` and SSI antidependency aborts under concurrent ingest. On the warm path (both ids cached in the in-memory `SessionContext`), it does no DB work.
 
-### 3.3 Edge type catalog (54)
+### 3.3 Edge type catalog (55)
 
 `edges::ALL` grouped by layer, with endpoints and edge properties. Many edges are **polymorphic** (multiple valid source or target labels) — noted below.
 
@@ -636,6 +637,7 @@ Ensuring the Session and sender exist is a cold-path, first-sight-only operation
 
 | Edge | Endpoints | Props |
 |---|---|---|
+| `FROM_SOURCE` | Message, Artifact → Source | |
 | `OWNED_BY` | Goal → Participant | |
 | `PARENT_GOAL` | Goal → Goal | |
 | `PART_OF` | Task → Goal | |
@@ -1229,13 +1231,13 @@ The bulk fast paths bypass the Cypher executor entirely because VIDs are already
 
 ### 5.5 Schema
 
-`schema/constants.rs` is the single source of truth: **25 node labels** (`labels::ALL`) and **54 edge types** (`edges::ALL`), organized by cognitive layer. `config/schema.json` is a generated snapshot of exactly this (`cargo run --bin export-schema`) and is only consulted when `UnikoConfig::schema_path` points at it.
+`schema/constants.rs` is the single source of truth: **26 node labels** (`labels::ALL`) and **55 edge types** (`edges::ALL`), organized by cognitive layer. `config/schema.json` is a generated snapshot of exactly this (`cargo run --bin export-schema`) and is only consulted when `UnikoConfig::schema_path` points at it.
 
-**Node labels (25), by layer:**
+**Node labels (26), by layer:**
 
 ```
 L0  Participant
-L1  Goal  Task  Session
+L1  Source  Goal  Task  Session
 L2  Message  Action  Episode
 L3  Artifact  ArtifactContent  Chunk  Page  Block
 L4  Entity  Observation  Fact  Topic  Summary
@@ -1245,10 +1247,10 @@ L7  Organization  Team
 L8  KnowledgeBaseStats
 ```
 
-**Edge types (54), by layer:**
+**Edge types (55), by layer:**
 
 ```
-L1  OWNED_BY PARENT_GOAL PART_OF ASSIGNED_TO DEPENDS_ON SUBTASK_OF FOR_TASK FOR_GOAL PARTICIPATED_IN
+L1  FROM_SOURCE OWNED_BY PARENT_GOAL PART_OF ASSIGNED_TO DEPENDS_ON SUBTASK_OF FOR_TASK FOR_GOAL PARTICIPATED_IN
 L2  SENT_BY ADDRESSED_TO IN_SESSION NEXT PERFORMED_BY TRIGGERED_BY PRODUCED NEXT_ACTION
     RECORDED_BY INVOLVES MENTIONS FOLLOWED_BY
 L3  HAS_CHUNK HAS_CONTENT HAS_PAGE CONTAINS NEXT_IN_READING_ORDER CREATED_BY MODIFIED_BY ATTACHED_TO
@@ -1259,7 +1261,7 @@ L6  PROCESSED INVOLVED CREATED REINFORCED INVALIDATED PROMOTED APPLIED_RULE
 L7  MEMBER_OF PART_OF_TEAM TEAM_IN_ORG
 ```
 
-`register_schema` (`schema/mod.rs:180-232`) is **two-phase and idempotent**: Phase 1 registers every node type's properties + indexes; Phase 2 registers all edge types; then a single `.apply()`. Each node type is a submodule exposing `register_labels(builder, config)` / `register_edges(builder)`.
+`register_schema` (`schema/mod.rs:181-235`) is **two-phase and idempotent**: Phase 1 registers every node type's properties + indexes; Phase 2 registers all edge types; then a single `.apply()`. Each node type is a submodule exposing `register_labels(builder, config)` / `register_edges(builder)`.
 
 **Embed aliases** (defined as consts in `schema/mod.rs`): `EMBED_ALIAS`, `HYBRID_EMBED_ALIAS`, `NLP_ALIAS`, `RERANK_ALIAS`, `OCR_ALIAS`.
 
@@ -1435,7 +1437,7 @@ let rows = kb.query_rule(
 
 | Area | Default |
 |---|---|
-| Embedding | `BGESmallENV15`, 384-d, query-side prefix only (presets: nomic 768d, minilm 384d, bge-small 384d **default**, bge-large, bge-m3 hybrid, embeddinggemma) |
+| Embedding | `BGESmallENV15`, 384-d, query-side prefix only (`EmbeddingConfig::preset` names: `nomic`, `nomic-q`, `minilm`, `bge-small` **default**, `bge-large`, `bge-m3` hybrid, `embeddinggemma`/`gemma` — `config.rs:310-320`). `EmbeddingConfig::llamacpp(model_id, base_url, dimensions, max_input_tokens)` is a constructor, not a preset: it points the embed alias at a `llama-server`, and both numbers are required because they describe how that server was launched (`config.rs:249`) |
 | Reranker | **enabled**, `cross-encoder/ms-marco-MiniLM-L-6-v2`, top_n 50, sigmoid on; style ∈ {cross-encoder, generative, colbert} |
 | NLP | kniv-deberta xsmall INT8; `nlp_srl_enabled = true` |
 | Vector index | `HnswSq{m:16, ef_construction:100}`, metric Cosine (`VectorAlgorithm` ∈ HnswSq/Flat/Pq, IvfSq/Pq/Rq) |
@@ -1504,8 +1506,11 @@ let agent = memory.agent("assistant-1");
 | Constructor | Purpose |
 |---|---|
 | `LlmSpec::openai(alias, model, base_url)` | OpenAI-compatible endpoint |
-| `LlmSpec::openai_with_key_env(alias, model, key_env, base_url)` | Same, with API key from an env var |
-| `LlmSpec::mistralrs(alias, model)` | On-device local LLM (GPU wheels only) |
+| `LlmSpec::openai_with_key_env(alias, model, base_url, key_env)` | Same, with API key from an env var |
+| `LlmSpec::llamacpp(alias, model, base_url)` | A llama.cpp `llama-server` over its OpenAI-compatible routes (`base_url` includes `/v1`) |
+| `LlmSpec::llamacpp_with_key_env(alias, model, base_url, key_env)` | Same, for a server started with `--api-key` |
+
+`llamacpp` is a **remote** provider (`remote/llamacpp`): inference runs in a `llama-server` the operator starts, so no inference kernels compile into the host process and no CUDA or Metal toolchain is needed at build time. That makes it the route to open-weights generation from the base CPU wheel, with no feature enabled (`crates/uniko-memory/src/facade/uniko.rs:393-440`). A `llama-server` holds one loaded model, so `model_id` is only echoed back in the request body.
 
 **Handle graph.** `Uniko::agent(id)` returns an `Agent` bound to `(kb, agent_id)`, which caches its resolved `Viewer` for `AsAgent` scope. From `Agent` you reach `session(id) -> Session`, `goals() -> Goals`, `data() -> Data`, plus the read verbs and Locy surface.
 
@@ -2380,11 +2385,11 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-uniko-api = "0.2.0"
+uniko-api = "0.3.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
-Feature flags worth knowing (each forwards down the stack from `uniko-api`): `onnx` (local NLP cascade + ONNX NER in `uniko-extract`), `gpu-cuda` / `gpu-metal`, `mistralrs` / `candle` (local-LLM providers). Note: `uniko-api` declares **no** `llm` feature — LLM abstractive summaries live behind the `llm` feature on `uniko-memory`/`uniko-cortex` and are not re-exposed by the facade (`uniko-api/llm` does not compile). Note: the ONNX embedding/NLP *runtime* is statically linked regardless of the `onnx` facade feature; `onnx` only adds the extraction adapters.
+Feature flags worth knowing (each forwards down the stack from `uniko-api`): `onnx` (local NLP cascade + ONNX NER in `uniko-extract`), `gpu-cuda` / `gpu-metal`, `candle` (the in-process local-LLM provider). Note: `uniko-api` declares **no** `llm` feature — LLM abstractive summaries live behind the `llm` feature on `uniko-memory`/`uniko-cortex` and are not re-exposed by the facade (`uniko-api/llm` does not compile). Note: the ONNX embedding/NLP *runtime* is statically linked regardless of the `onnx` facade feature; `onnx` only adds the extraction adapters.
 
 ### 8.7 The Python SDK (`uniko-py`)
 
@@ -2394,7 +2399,7 @@ The Python SDK compiles to a `cdylib` loaded as `uniko._uniko`, wrapping the sam
 
 ```sh
 pip install uniko          # CPU, self-contained (~113 MiB bundled ONNX Runtime)
-pip install uniko-cuda     # NVIDIA CUDA (Linux x86_64), on-GPU local LLM
+pip install uniko-cuda     # NVIDIA CUDA (Linux x86_64), in-process on-GPU local LLM (candle)
 pip install uniko-metal    # Apple Silicon (macOS arm64)
 ```
 
@@ -2437,9 +2442,9 @@ ans  = await uni.agent("a").answer("where does alice like to hike?")
 print(ans.text, ans.citations())
 ```
 
-`LlmSpec` static constructors: `openai(alias, model_id, base_url=None)`, `openai_with_key_env(alias, model_id, key_env, base_url=None)`, `mistralrs(alias, model_id)`.
+`LlmSpec` static constructors: `openai(alias, model_id, base_url=None)`, `openai_with_key_env(alias, model_id, key_env, base_url=None)`, `llamacpp(alias, model_id, base_url, key_env=None)` (`bindings/uniko-py/src/facade.rs:294-337`).
 
-> `LlmSpec.mistralrs()` *constructs* a spec on all three wheels, but the mistralrs provider only *compiles* into the `uniko-cuda`/`uniko-metal` variants. Building with a mistralrs spec on the base CPU wheel fails **at runtime**, not at construction.
+> `llamacpp` is a remote provider, so open-weights generation works from the **base CPU wheel** — nothing is compiled in and `base_url` points at a `llama-server` you run yourself. Pass `key_env` only when that server was started with `--api-key`.
 
 ### 8.8 Python module map
 
@@ -2449,7 +2454,7 @@ print(ans.text, ans.citations())
 |---|---|
 | `Uniko` | `open`/`in_memory`/`builder` (staticmethods); `agent(id)`, `config()->dict`, `purge()`, `shutdown()` |
 | `UnikoBuilder` | `path`/`in_memory`/`llm`/`streaming`/`scope_to_agent`; terminal `build()` |
-| `LlmSpec` | `openai` / `openai_with_key_env` / `mistralrs` |
+| `LlmSpec` | `openai` / `openai_with_key_env` / `llamacpp` |
 | `Agent` | `recall`/`answer`/`query` (+ `_in` scoped), `define_rule`/`run_rule`/`abduce`/`assume`, `session(id)`, `data`/`goals` getters, `delete_session`/`forget_participant` |
 | `Session` | `observe(turn)`, `ingest(source)`, `submit`/`submit_source`/`flush`, `summarize`, `forget_turn`/`delete_turn`/`delete_document` |
 | `Turn` | ctor `Turn(sender_id, content)` + `id`/`content_type`/`at(datetime)`/`addressed_to`/`metadata(k,v)`/`attach`/`attachments` |
@@ -2496,8 +2501,8 @@ Input specs (`GoalSpec`/`TaskSpec`/`ScopeSpec`/`IngestSourceSpec`/`TurnSpec`/`Ll
 | Wheel | Platform | `uniko-api` features | GPU stack |
 |---|---|---|---|
 | `uniko` (base) | Linux x86_64/aarch64, macOS arm64, Windows x64 | `[onnx]` | none (CPU ONNX Runtime, statically bundled) |
-| `uniko-cuda` | Linux x86_64 | `[onnx, gpu-cuda, mistralrs, candle]` | ONNX Runtime CUDA EP + mistralrs/candle CUDA kernels |
-| `uniko-metal` | macOS arm64 | `[onnx, gpu-metal, mistralrs, candle]` | ONNX Runtime CoreML + mistralrs/candle Metal kernels |
+| `uniko-cuda` | Linux x86_64 | `[onnx, gpu-cuda, candle]` | ONNX Runtime CUDA EP + candle CUDA kernels |
+| `uniko-metal` | macOS arm64 | `[onnx, gpu-metal, candle]` | ONNX Runtime CoreML + candle Metal kernels |
 
 All wheels are `abi3` for CPython ≥ 3.10 — one wheel per platform spans every supported minor version. GPU wheels resolve host CUDA/cuDNN at load time rather than bundling them.
 
@@ -2528,7 +2533,7 @@ The corresponding Cargo feature flags, and where they land:
 |---|---|---|
 | `onnx` | (facade) adds `uniko-extract` ort extraction adapters; NLP runtime is always linked | all wheels |
 | `gpu-cuda` / `gpu-metal` | forwards uni-db GPU acceleration | cuda / metal wheels |
-| `mistralrs` / `candle` | local-LLM provider kernels via uni-xervo | cuda / metal wheels |
+| `candle` | in-process local-LLM provider kernels via uni-xervo (`uni-db/provider-candle`) | cuda / metal wheels |
 | `llm` (`uniko-memory`) | abstractive session summaries | off by default |
 | `batch-record` (`uniko-store`) | diagnostic bulk-batch capture (benchmarks only) | off |
 
@@ -2934,7 +2939,7 @@ The catalog is the xervo model manifest that maps aliases to concrete models/pro
 
 `config/catalog_minilm.json` is an alternate that swaps the embed alias to `AllMiniLML6V2` (legacy 384-d). It also still carries the **pre-2026-06 `task: "raw"` NLP alias shape** (`options: {artifact, max_batch_size}`) rather than the current `ModelTask::Nlp` shape (`{onnx_path, tokenizer_path, label_maps_path, max_seq_len}`), so loading it via `catalog_path` yields a stale, incompatible NLP alias — it needs regenerating. Either catalog must match the dimensions the KB was created with.
 
-Aliases used throughout the schema and search code are consts in `schema/mod.rs`: `EMBED_ALIAS`, `HYBRID_EMBED_ALIAS`, `NLP_ALIAS` (`"nlp/default"`), `RERANK_ALIAS`, `OCR_ALIAS`. LLM aliases (for `answer()`, triple refinement, topic naming, NL→Cypher) are registered separately through `LlmSpec` (`openai` / `openai_with_key_env` / `mistralrs`), which lowers to a uni-db `ModelAliasSpec` with `ModelTask::Generate` and a lazy warmup policy.
+Aliases used throughout the schema and search code are consts in `schema/mod.rs`: `EMBED_ALIAS`, `HYBRID_EMBED_ALIAS`, `NLP_ALIAS` (`"nlp/default"`), `RERANK_ALIAS`, `OCR_ALIAS`. LLM aliases (for `answer()`, triple refinement, topic naming, NL→Cypher) are registered separately through `LlmSpec` (`openai` / `openai_with_key_env` / `llamacpp`), which lowers to a uni-db `ModelAliasSpec` with `ModelTask::Generate` and a lazy warmup policy.
 
 Two catalog subtleties from the benchmark harness generalize to any embedded use:
 
@@ -2945,7 +2950,7 @@ Two catalog subtleties from the benchmark harness generalize to any embedded use
 
 `config/schema.json` is a **persisted snapshot** of the installed schema — not the source of truth. Regenerate it with `cargo run --bin export-schema` (which prints the resulting label/edge counts) whenever the schema changes, and commit it on its own. It is only ever read when a caller sets `UnikoConfig::schema_path`; the default (`None`) registers the schema programmatically from `constants.rs`.
 
-Always trust `constants.rs` (`labels::ALL` = 25, `edges::ALL` = 54). `register_schema` is idempotent and two-phase (labels, then edges, then a single `.apply()`); it installs everything from `constants.rs` regardless of what an older snapshot contains.
+Always trust `constants.rs` (`labels::ALL` = 26, `edges::ALL` = 55). `register_schema` is idempotent and two-phase (labels, then edges, then a single `.apply()`); it installs everything from `constants.rs` regardless of what an older snapshot contains.
 
 #### 10.1.5 NLP, OCR, and other model dependencies
 
@@ -2977,7 +2982,7 @@ The `RECALL_PROF` `eprintln!` lines in `recall/mod.rs` and `recall.rs` are uncon
 - **`mold`** on Linux — `.cargo/config.toml` unconditionally sets `-C link-arg=-fuse-ld=mold`, so it is a hard build dependency, not an optimization.
 - **`uv`** for the Python bindings and the docs site.
 
-Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 3.2.0` and `uni-xervo 0.17.0`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
+Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 5.1` and `uni-xervo 0.19.1`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
 
 > **The first build is slow.** `ort`, `tokenizers`, and `half` compile at `opt-level=3` even in the dev profile.
 
@@ -3017,7 +3022,7 @@ Feature flags forward straight down the stack (facade features on `uniko-api` re
 | `llm` | off | uniko-memory, uniko-cortex | LLM abstractive summaries; LLM topic naming |
 | `gpu-cuda` | off | uniko-store (+ down) | forward CUDA GPU to uni-db |
 | `gpu-metal` | off | uniko-store (+ down) | forward Metal GPU to uni-db |
-| `mistralrs` / `candle` | off | uniko-store | local-LLM providers via uni-xervo |
+| `candle` | off | uniko-store | the in-process local-LLM provider via uni-xervo (`uni-db/provider-candle`) |
 | `batch-record` | off | uniko-store | diagnostic bulk-batch capture for the bulk-vs-UNWIND bench |
 
 Note that `uni-db`'s `provider-onnx` is always-on and statically linked regardless of the `onnx` facade feature; the `onnx` feature only adds uniko-extract's `ort`-backed adapters.
@@ -3088,10 +3093,10 @@ uniko-store → uniko-pipes → uniko-extract → uniko-cortex → uniko-memory 
 
 Release-runbook gotchas that will bite an unprepared release engineer:
 
-- **Dry-run only verifies the leaf crate.** `cargo publish --dry-run` fully verifies only `uniko-store`; the other five use `cargo package --no-verify` because their packaged form needs `uniko-store 0.1.0` already on crates.io. Full-chain verification happens only at the real ordered publish.
+- **Dry-run only verifies the leaf crate.** `cargo publish --dry-run` fully verifies only `uniko-store`; the other five use `cargo package --no-verify`, because their packaged form resolves `uniko-store = "^<workspace version>"` against the index and errors until that exact version is published. That step is **advisory and never fails the release** (`.github/workflows/release.yml:90-105`); full-chain verification happens only at the real ordered publish, where each crate is on the index before the next packages.
 - **Publish from a clean clone.** `git clone --local . /tmp/…` first — libgit2's status walk fails over the gitignored `data/`, `target/`, `.venv` (millions of files), and `--allow-dirty` does **not** help.
 - **Brand-new crate names** need one manual `cargo publish` before Trusted Publishing can be configured.
-- **PyPI publishing is DISABLED** until per-project 100 MB file-size increases land — all three wheels exceed the default limit (the base wheel bundles ~113 MiB of ONNX Runtime; GPU wheels add candle+mistralrs kernels). It is gated behind a repo **variable** `PYPI_PUBLISH_ENABLED` (must be a variable, not env). Until then, `github-release` attaches the wheels (2 GB/asset limit) as the interim distribution channel.
+- **PyPI publishing is DISABLED** until per-project 100 MB file-size increases land — all three wheels exceed the default limit (the base wheel bundles ~113 MiB of ONNX Runtime; GPU wheels add candle kernels). It is gated behind a repo **variable** `PYPI_PUBLISH_ENABLED` (must be a variable, not env). Until then, `github-release` attaches the wheels (2 GB/asset limit) as the interim distribution channel.
 - **Pre-release rehearsal**: a `v0.1.0-rc.1` suffix is accepted; the guard compares the base version only.
 
 Pre-release suffixes and `ort` binary constraints (see §10.7) mean aarch64 Linux builds natively on `ubuntu-24.04-arm` (no cross/QEMU), and macOS is aarch64-only.
@@ -3121,9 +3126,9 @@ The Python SDK ships as **three interchangeable maturin wheels** that all instal
 
 | Wheel | Platform | ONNX Runtime EP | Local LLM | `uniko-api` features |
 |---|---|---|---|---|
-| `uniko` (base) | per-platform CPU | CPU (statically bundled, ~113 MiB) | none | `[onnx]` |
-| `uniko-cuda` | Linux x86_64 | CUDA EP | mistralrs + candle CUDA kernels | `[onnx, gpu-cuda, mistralrs, candle]` |
-| `uniko-metal` | macOS arm64 | CoreML | mistralrs + candle Metal kernels | `[onnx, gpu-metal, mistralrs, candle]` |
+| `uniko` (base) | per-platform CPU | CPU (statically bundled, ~113 MiB) | none in-process (a remote `llama-server` via `LlmSpec.llamacpp` works here) | `[onnx]` |
+| `uniko-cuda` | Linux x86_64 | CUDA EP | candle CUDA kernels | `[onnx, gpu-cuda, candle]` |
+| `uniko-metal` | macOS arm64 | CoreML | candle Metal kernels | `[onnx, gpu-metal, candle]` |
 
 The GPU crates are **not separate source trees**: `bindings/uniko-cuda/Cargo.toml` and `bindings/uniko-metal/Cargo.toml` point `[lib] path` at `../uniko-py/src/lib.rs`, and their Python package is **copied** in from `bindings/uniko-py/python` by `scripts/bootstrap-wheel-variants.sh` (copy, not symlink — maturin does not follow symlinks). The only real difference between the three is the `uniko-api` feature set. All are `abi3` for CPython ≥ 3.10; the GPU wheels resolve host CUDA/cuDNN at runtime rather than bundling it.
 
@@ -3146,11 +3151,11 @@ root `Cargo.toml` for the size/RSS trade-off and the
 
 GPU-build specifics:
 
-- `uniko-cuda` requires the **CUDA toolkit (`nvcc`) at build time** because candle+mistralrs compile CUDA kernels. `CUDA_COMPUTE_CAP=80` targets Ampere PTX, which forward-JITs to newer archs (Ada/Hopper/Blackwell).
+- `uniko-cuda` requires the **CUDA toolkit (`nvcc`) at build time** because candle compiles CUDA kernels. `CUDA_COMPUTE_CAP=80` targets Ampere PTX, which forward-JITs to newer archs (Ada/Hopper/Blackwell).
 - `--auditwheel skip` is used so CUDA runtime libs are resolved at load time, not bundled.
 - The `python/` directories in the GPU crates are gitignored and populated by `bootstrap-wheel-variants.sh`, which **must** run before `maturin build`.
 
-A runtime trap: `LlmSpec.mistralrs()` constructs a spec in **all** wheels including base CPU, but the mistralrs provider only **compiles** in the CUDA/Metal variants. Building with a mistralrs spec on the base wheel fails at runtime, not at construction.
+The old "open weights need a GPU wheel" trap is gone: `LlmSpec.llamacpp()` targets uni-xervo's `remote/llamacpp` provider, which is an HTTP client, so it works on **every** wheel including base CPU. What the `candle` feature (cuda/metal wheels only) still buys is *in-process* generation — a spec naming the in-process `candle` provider on the base wheel would fail at runtime, not at construction.
 
 For running GPU benchmarks, `crates/uniko-bench/run.sh` is the launcher: `--build` compiles with `--features gpu-cuda` plus a linker shim, and the run path sets `LD_LIBRARY_PATH` to the ORT CUDA EP, cuDNN-13, and CUDA libs. A `NO_GPU=1` escape hatch forces the CPU path.
 
@@ -3236,7 +3241,7 @@ Rules of the gate:
 
 #### Invariant 2 — never edit `../uni/`
 
-uni-db lives at `../uni/` as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 3.2.0 and uni-xervo 0.17.0 from crates.io. When you hit a uni-db bug, the discipline is:
+uni-db lives at `../uni/` (or `../uni-db/`) as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 5.1 and uni-xervo 0.19.1 from crates.io. When you hit a uni-db bug, the discipline is:
 
 1. Build a **minimal, isolated reproduction test** in `uniko-store` (the canonical pattern is `crates/uniko-store/tests/unidb_bytes_return_repro.rs`).
 2. File it upstream against `rustic-ai/uni-db`.
@@ -3246,15 +3251,15 @@ Never silently work around a uni-db bug without a repro that pins it there.
 
 #### Invariant 3 — schema source of truth
 
-`crates/uniko-store/src/schema/constants.rs` is authoritative for the graph model: `labels::ALL` = **25 node labels**, `edges::ALL` = **54 edge types**. The module doc in `schema/mod.rs` agrees. When in doubt, grep `constants.rs`.
+`crates/uniko-store/src/schema/constants.rs` is authoritative for the graph model: `labels::ALL` = **26 node labels**, `edges::ALL` = **55 edge types**. The module doc at `schema/mod.rs:3` still says 25/54 and is stale — it is a doc comment, not a registration list. When in doubt, grep `constants.rs`.
 
-`Pattern` and `CONTRADICTED_BY` are Locy-consumer additions (`episode_pattern_detector`, `contradiction_detector`) and are the two most commonly missed.
+`Pattern` and `CONTRADICTED_BY` are Locy-consumer additions (`episode_pattern_detector`, `contradiction_detector`); `Source` and `FROM_SOURCE` are the typed-provenance additions (issues #39/#41). Those four are the ones downstream catalogs most often miss.
 
 `config/schema.json` is a **snapshot**, not a second source of truth. It is generated by `cargo run --bin export-schema` and is only loaded when a caller explicitly sets `UnikoConfig::schema_path` (the default is `None`, i.e. programmatic `register_schema`). Because `schema_path` replaces the code schema wholesale, a stale snapshot silently yields a graph missing whatever was added since it was written — regenerate it in the same commit as any schema change, and check the printed label/edge counts match `constants.rs`.
 
 #### Invariant 4 — config defaults come from `UnikoConfig::default()`
 
-Effective runtime defaults are what the pipeline actually builds: `RecallConfig::from_uniko_config(...)`, seeded from `UnikoConfig::default()` (`crates/uniko-store/src/config.rs`, defaults around `config.rs:826-895`). The standalone `RecallConfig::default()` and `ChunkConfig::default()` **differ** and must not be quoted as runtime behavior. One trap in particular: `config.rs:636` has a stale comment saying the reranker is "disabled by default," but the `Default` impl sets `enabled: true` (ms-marco-MiniLM-L-6-v2, top_n=50). Trust the code.
+Effective runtime defaults are what the pipeline actually builds: `RecallConfig::from_uniko_config(...)`, seeded from `UnikoConfig::default()` (`crates/uniko-store/src/config.rs`, defaults around `config.rs:846-913`). The standalone `RecallConfig::default()` and `ChunkConfig::default()` **differ** and must not be quoted as runtime behavior. One trap in particular: `config.rs:654` has a stale comment saying the reranker is "disabled by default," but the `Default` impl sets `enabled: true` (`config.rs:452`; ms-marco-MiniLM-L-6-v2, top_n=50). Trust the code.
 
 Two more AGENTS.md house rules: **never `cargo test`** (nextest is the runner of record), and **never commit/push without explicit maintainer approval** — and never add AI-attribution trailers to any artifact.
 
@@ -3331,9 +3336,9 @@ Version is single-sourced: crate versions via `version.workspace = true`, the wh
 Release-time gotchas worth internalizing:
 
 - **Publish from a clean clone** (`git clone --local . /tmp/rel`). libgit2's status walk fails over the gitignored `data/`, `target/`, and `.venv` millions-of-files dirs, and `--allow-dirty` does **not** help.
-- **Dry-run only fully verifies the leaf crate** (`uniko-store`). The other five use `cargo package --no-verify` because their packaged form needs `uniko-store 0.1.0` already on crates.io. Full-chain verification only happens at the real, ordered publish.
+- **Dry-run only fully verifies the leaf crate** (`uniko-store`). The other five use `cargo package --no-verify`, because their packaged form resolves `uniko-store = "^<workspace version>"` against the index and errors until that exact version is published; the step is **advisory and never fails the release**. Full-chain verification only happens at the real, ordered publish.
 - **Brand-new crate names need a one-time manual `cargo publish`** before trusted publishing can be configured.
-- **PyPI publishing is currently DISABLED**, gated on the repo *variable* `PYPI_PUBLISH_ENABLED` (unset). All three wheels exceed PyPI's 100 MB default file-size limit (the base wheel bundles ~113 MiB of ONNX Runtime; GPU wheels add candle+mistralrs kernels), so per-project size increases must land first. Until then, `github-release` attaches the wheels (2 GB/asset limit) as the interim channel.
+- **PyPI publishing is currently DISABLED**, gated on the repo *variable* `PYPI_PUBLISH_ENABLED` (unset). All three wheels exceed PyPI's 100 MB default file-size limit (the base wheel bundles ~113 MiB of ONNX Runtime; GPU wheels add candle kernels), so per-project size increases must land first. Until then, `github-release` attaches the wheels (2 GB/asset limit) as the interim channel.
 - **`ort` links only pyke prebuilt binaries per target triple.** aarch64 Linux builds *natively* on `ubuntu-24.04-arm` (don't cross-compile/QEMU); macOS is aarch64-only (no x86_64-apple-darwin binary in the ort rc, and `onnx` is always-on).
 
 **The three wheel variants** (`uniko`, `uniko-cuda`, `uniko-metal`) are not separate source trees. `uniko-cuda` and `uniko-metal` point their `[lib] path` at `../uniko-py/src/lib.rs` and differ only in the Cargo feature set forwarded to `uniko-api`. Their Python packages are **copied** (not symlinked — maturin won't follow symlinks) from `bindings/uniko-py/python` by `scripts/bootstrap-wheel-variants.sh`, which must run before `maturin build`. All three set `module-name = uniko._uniko`, so they all `import uniko` and are **mutually exclusive** — only one can be installed at a time.
@@ -3420,7 +3425,7 @@ These are the sharp edges spread across the layers. They fall into a few familie
 - **`Value::Bytes` can't round-trip through a Cypher `RETURN`** — binary payloads must go through `Data.artifact_bytes`.
 - **`py_to_value` tests `bool` before `int`** (Python `bool` subclasses `int`); reordering silently coerces `True`/`False` to `1`/`0`.
 - **`recursion_limit = 512` and an 8 MB tokio worker stack** are required workarounds for deeply-nested store futures (Send-proof recursion and debug-build stack overflow). Don't lower them.
-- **`LlmSpec.mistralrs()` constructs a spec in all wheels** including base CPU, but the mistralrs provider only *compiles* in the cuda/metal variants — a mistralrs spec on the base wheel fails at *runtime*, not construction.
+- **`LlmSpec.llamacpp()` works on every wheel**, base CPU included: `remote/llamacpp` is an HTTP client for a `llama-server` you run yourself, not compiled-in inference. Only the in-process `candle` provider is wheel-gated (cuda/metal), and a spec naming it on the base wheel fails at *runtime*, not construction.
 - **The negative-surface guards are the API contract.** `uniko-api` is logic-free; the 9 `compile_fail` doctests in `tools.rs` and the `assert_exists` test in `tests/surface.rs` break if the re-export list drifts. Never add code to `uniko-api`.
 
 ### 11.8 Known limitations and TODOs
@@ -3562,7 +3567,7 @@ Two bench-specific gotchas worth carrying into any perf investigation: **a share
 
 **uni-db** — The embedded multi-model engine (OpenCypher + Locy + vector/FTS/sparse indexes + BTIC + SSI + bulk insert) that stores the entire memory graph. uniko-store is its sole boundary; product crates may not `use uni_db` or call `.db()` (CI-enforced seal).
 
-**uni-xervo** — The model runtime (`ModelRuntime`) providing ONNX embedding/NLP/rerank/OCR plus remote/mistralrs/candle LLM providers; reached through the `model.rs` seam.
+**uni-xervo** — The model runtime (`ModelRuntime`) providing ONNX embedding/NLP/rerank/OCR plus remote LLM providers (including `remote/llamacpp`) and the opt-in in-process `candle` provider; reached through the `model.rs` seam.
 
 **UnikoConfig** — The root runtime config (embedding/reranker/nlp/ocr + recall/consolidation/chunking/vector thresholds) with opinionated validated defaults (BGE-Small 384d, reranker on, SRL on).
 

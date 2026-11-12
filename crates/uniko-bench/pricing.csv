@@ -16,7 +16,7 @@ AllMiniLML6V2,local,0,0,0,fastembed local
 BGESmallENV15,local,0,0,0,fastembed local
 BGELargeENV15,local,0,0,0,fastembed local
 onnx-community/embeddinggemma-300m-ONNX,local,0,0,0,xervo local-onnx GPU
-google/embeddinggemma-300m,local,0,0,0,xervo local-mistralrs GPU
+google/embeddinggemma-300m,local,0,0,0,xervo local-onnx
 ms-marco-MiniLM-L-6-v2,local,0,0,,local cross-encoder reranker
-gemma-3,local,0,0,,mistralrs local
-phi-4,local,0,0,,mistralrs local
+gemma-3,local,0,0,,llama-server local
+phi-4,local,0,0,,llama-server local

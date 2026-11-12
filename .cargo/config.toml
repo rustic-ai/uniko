@@ -53,3 +53,16 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 # `crates/uniko-store/tests/stack_depth_repro.rs` for what that rules out.
 [env]
 RUST_MIN_STACK = "16777216"
+
+# ── Shared model cache ─────────────────────────────────────────────────
+# uni-xervo resolves its model cache as `.uni_cache` relative to the CURRENT
+# directory unless `UNI_CACHE_DIR` is set, and nextest runs each crate's
+# tests from that crate's own directory. So without this every crate keeps a
+# separate cache, and CI's serial warm pass over uniko-cortex (ci.yml) warms
+# only `crates/uniko-cortex/.uni_cache`: the other crates still cold-download
+# the same model in parallel, racing for it, and a loser fails with "Load
+# model ... failed. File doesn't exist". Pinning one absolute root makes that
+# warm pass cover the whole workspace. `relative = true` resolves the path
+# against this file's parent (the workspace root); a `UNI_CACHE_DIR` already
+# in the environment still wins, since `force` is left off.
+UNI_CACHE_DIR = { value = ".uni_cache", relative = true }

@@ -238,19 +238,23 @@ class _OpenAiKeyEnv(BaseModel):
         )
 
 
-class _MistralRs(BaseModel):
+class _LlamaCpp(BaseModel):
     model_config = _IN
-    provider: Literal["mistralrs"] = "mistralrs"
+    provider: Literal["llamacpp"] = "llamacpp"
     alias: str
     model_id: str
+    base_url: str
+    key_env: Optional[str] = None
 
     def to_native(self) -> Any:
-        return _native().LlmSpec.mistralrs(self.alias, self.model_id)
+        return _native().LlmSpec.llamacpp(
+            self.alias, self.model_id, self.base_url, self.key_env
+        )
 
 
 # Discriminated-union alias; validate raw dicts with ``LlmSpecAdapter``.
 LlmSpecModel = Annotated[
-    Union[_OpenAi, _OpenAiKeyEnv, _MistralRs],
+    Union[_OpenAi, _OpenAiKeyEnv, _LlamaCpp],
     Field(discriminator="provider"),
 ]
 

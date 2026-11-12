@@ -219,7 +219,7 @@ uniko-extract = { path = "../uniko/crates/uniko-extract", features = ["onnx"] }
 | `onnx` | off | Forwards to `uniko-extract/onnx`. |
 | `llm` | off | Enables the abstractive (LLM-rewritten) path for session Summary generation. When absent, summary generation stays **deterministic / extractive and fully offline**. |
 | `gpu-cuda`, `gpu-metal` | off | Forward to the matching `uniko-store` feature. |
-| `mistralrs`, `candle` | off | Forward to the matching `uniko-store` feature. |
+| `candle` | off | Forwards to the matching `uniko-store` feature. |
 
 ### `uniko-store`
 
@@ -227,14 +227,12 @@ uniko-extract = { path = "../uniko/crates/uniko-extract", features = ["onnx"] }
 |---------|---------|--------|
 | `gpu-cuda` | off | Enables NVIDIA CUDA acceleration in uni-db. Requires the CUDA toolkit at build time. |
 | `gpu-metal` | off | Enables Apple Metal / CoreML acceleration in uni-db (macOS only). |
-| `mistralrs` | off | Enables uni-db's mistral.rs provider, for running a local LLM in-process. |
-| `candle` | off | Enables uni-db's candle provider, the other local-LLM backend. |
+| `candle` | off | Enables uni-db's candle provider for in-process LLM inference. Open-weights models are also reachable with no feature at all through `LlmSpec::llamacpp`, which talks to a llama.cpp `llama-server` over HTTP: uni-db's `provider-llamacpp` is always on, because it costs nothing to compile. |
 | `batch-record` | off | Diagnostic-only: captures bulk-write batches in a process-global buffer so benchmarks can replay them. Never enable in production. |
 
 ### `uniko-api`
 
-The facade forwards exactly five features: `onnx`, `gpu-cuda`, `gpu-metal`, `mistralrs`, and
-`candle`. It does **not** forward `llm` or `pdf-ocr` — enable those on `uniko-memory` and
+The facade forwards exactly four features: `onnx`, `gpu-cuda`, `gpu-metal`, and `candle`. It does **not** forward `llm` or `pdf-ocr` — enable those on `uniko-memory` and
 `uniko-extract` directly if you need them.
 
 !!! warning "GPU features are build-time"

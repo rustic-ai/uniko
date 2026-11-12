@@ -351,7 +351,7 @@ impl UnikoBuilder {
 /// An LLM registration for [`Agent::answer`](crate::Agent::answer).
 ///
 /// Construct via a provider helper ([`LlmSpec::openai`],
-/// [`LlmSpec::mistralrs`]); the `alias` is the handle the answer path
+/// [`LlmSpec::llamacpp`]); the `alias` is the handle the answer path
 /// generates under.
 #[derive(Debug, Clone)]
 pub struct LlmSpec {
@@ -394,14 +394,49 @@ impl LlmSpec {
         }
     }
 
-    /// A local model served via mistral.rs with in-situ Q4K quantization.
-    pub fn mistralrs(alias: impl Into<String>, model_id: impl Into<String>) -> Self {
+    /// A chat model served by a llama.cpp
+    /// [`llama-server`](https://github.com/ggml-org/llama.cpp).
+    ///
+    /// `base_url` is the OpenAI-compatible root **including** `/v1`, e.g.
+    /// `http://127.0.0.1:8080/v1`. A `llama-server` process holds one
+    /// loaded model, so `model_id` is only echoed back in the request
+    /// body — pass whatever name the server was started with.
+    ///
+    /// Inference happens in that server, not in this process: no
+    /// inference kernels are compiled in and no CUDA or Metal toolchain
+    /// is needed at build time. That makes this the route to
+    /// open-weights generation on a build that leaves `candle` off.
+    ///
+    /// Assumes a server started without `--api-key`; use
+    /// [`LlmSpec::llamacpp_with_key_env`] when it requires a bearer
+    /// token.
+    pub fn llamacpp(
+        alias: impl Into<String>,
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Self {
         Self {
             alias: alias.into(),
-            provider_id: "local/mistralrs".to_string(),
+            provider_id: "remote/llamacpp".to_string(),
             model_id: model_id.into(),
-            options: serde_json::json!({ "isq": "Q4K" }),
+            options: serde_json::json!({ "base_url": base_url.into() }),
         }
+    }
+
+    /// A `llama-server` chat model whose bearer token is read from
+    /// `key_env` at call time.
+    ///
+    /// Matches a server started with `--api-key`; see
+    /// [`LlmSpec::llamacpp`] for the rest.
+    pub fn llamacpp_with_key_env(
+        alias: impl Into<String>,
+        model_id: impl Into<String>,
+        base_url: impl Into<String>,
+        key_env: impl Into<String>,
+    ) -> Self {
+        let mut spec = Self::llamacpp(alias, model_id, base_url);
+        spec.options["api_key_env"] = serde_json::Value::String(key_env.into());
+        spec
     }
 
     /// Lower into the uni-db catalog entry (kept private to avoid leaking
@@ -420,5 +455,43 @@ impl LlmSpec {
             retry: None,
             options: self.options,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `remote/llamacpp` rejects unknown option keys and requires
+    /// `base_url`, so the lowered alias must carry exactly that key and
+    /// nothing else when no token env is named.
+    #[test]
+    fn llamacpp_lowers_to_base_url_only() {
+        let spec = LlmSpec::llamacpp("gen", "qwen", "http://127.0.0.1:8080/v1").into_alias_spec();
+
+        assert_eq!(spec.provider_id, "remote/llamacpp");
+        assert_eq!(spec.model_id, "qwen");
+        assert_eq!(spec.task, ModelTask::Generate);
+        assert_eq!(
+            spec.options,
+            serde_json::json!({ "base_url": "http://127.0.0.1:8080/v1" }),
+            "an `api_key_env` the caller did not ask for would point the \
+             provider at an unset variable"
+        );
+    }
+
+    #[test]
+    fn llamacpp_with_key_env_adds_the_token_var() {
+        let spec =
+            LlmSpec::llamacpp_with_key_env("gen", "qwen", "http://host:8080/v1", "LLAMA_TOKEN")
+                .into_alias_spec();
+
+        assert_eq!(
+            spec.options,
+            serde_json::json!({
+                "base_url": "http://host:8080/v1",
+                "api_key_env": "LLAMA_TOKEN",
+            })
+        );
     }
 }

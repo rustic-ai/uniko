@@ -30,9 +30,8 @@ onnx = ["uniko-memory/onnx"]
 # time; `gpu-metal` is macOS-only.
 gpu-cuda = ["uniko-memory/gpu-cuda"]
 gpu-metal = ["uniko-memory/gpu-metal"]
-# Forward the mistralrs+candle local-LLM providers through the facade to uni-db
+# Forward the candle local-LLM provider through the facade to uni-db
 # (uniko-memory -> uniko-store -> uni-db). Consumed by the `uniko-cuda` /
 # `uniko-metal` wheel variants alongside `gpu-cuda`/`gpu-metal` so the GPU LLM
-# kernels compile. `mistralrs` on CUDA needs the CUDA toolkit (nvcc) at build time.
-mistralrs = ["uniko-memory/mistralrs"]
+# kernels compile. `candle` on CUDA needs the CUDA toolkit (nvcc) at build time.
 candle = ["uniko-memory/candle"]

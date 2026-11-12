@@ -64,8 +64,8 @@ path = "src/nlp_parity_main.rs"
 [features]
 # CPU by default so the standard workspace commands — `cargo check/clippy/
 # nextest --workspace`, used by CI and contributors — build without a CUDA
-# toolkit. A `gpu-cuda` default forces `nvcc` at build time (via
-# mistralrs-quant), which CUDA-less machines (CI, Macs, most laptops) don't
+# toolkit. A `gpu-cuda` default forces `nvcc` at build time (via candle's
+# CUDA kernels), which CUDA-less machines (CI, Macs, most laptops) don't
 # have, so the whole `--workspace` build fails. GPU is opt-in: pass
 # `--features gpu-cuda` (the bench's `run.sh` does this) or, on Mac,
 # `--features gpu-metal`.

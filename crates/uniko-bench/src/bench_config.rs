@@ -64,7 +64,7 @@
 //!
 //! The `embedder` field accepts either `{"preset": "<name>"}` for one
 //! of the hardcoded presets (`bge-small`, `bge-large`, `bge-m3`, `nomic`,
-//! `minilm`, `embeddinggemma`, `embeddinggemma-mistralrs`) or
+//! `minilm`, `embeddinggemma`) or
 //! `{"inline": <EmbeddingConfig>}` for a fully specified config. The
 //! `bge-m3` preset enables single-pass hybrid (dense + sparse + ColBERT);
 //! pair it with `recall.sparse_enabled` and/or `reranker.style = "colbert"`.
@@ -134,7 +134,7 @@ pub struct LlmAlias {
     /// HuggingFace model id or provider model name.
     pub model_id: String,
     /// xervo provider id (e.g. `remote/openai`, `remote/vertexai`,
-    /// `local/mistralrs`).
+    /// `remote/llamacpp`, `local/candle`).
     pub provider: String,
     /// Optional OpenAI-compatible base URL override.
     #[serde(default)]
@@ -342,7 +342,7 @@ impl BenchConfig {
             EmbedderChoice::Preset { preset } => EmbeddingConfig::preset(preset).ok_or_else(|| {
                 anyhow::anyhow!(
                     "unknown embedder preset {preset:?}; expected one of: nomic, minilm, \
-                     bge-small, bge-large, bge-m3, embeddinggemma, embeddinggemma-mistralrs"
+                     bge-small, bge-large, bge-m3, embeddinggemma"
                 )
             }),
         }
@@ -430,8 +430,17 @@ fn llm_alias_to_spec(a: &LlmAlias) -> ModelAliasSpec {
 /// [`ModelAliasSpec`] entries from a JSON-loaded [`LlmAlias`].
 fn provider_options(provider: &str, base_url: Option<&str>) -> serde_json::Value {
     match provider {
-        "local/mistralrs" => serde_json::json!({"isq": "Q4K"}),
         "remote/openai" => match base_url {
+            Some(url) => serde_json::json!({"base_url": url}),
+            None => serde_json::json!({}),
+        },
+        // A `llama-server` address is site-specific, so there is no
+        // default to fall back to. Omitting `base_url` leaves the
+        // options empty and uni-xervo rejects the alias by name at
+        // catalog load, which is the right failure: silently inventing
+        // `localhost:8080` would make a misconfigured arm look like a
+        // model that answers badly.
+        "remote/llamacpp" => match base_url {
             Some(url) => serde_json::json!({"base_url": url}),
             None => serde_json::json!({}),
         },
@@ -481,17 +490,20 @@ mod tests {
     }
 
     #[test]
-    fn auto_default_options_disabled_for_local_provider() {
+    fn auto_default_options_disabled_for_non_openai_provider() {
         let json = r#"{
             "models": {
-                "gen":   {"alias":"llm/gen","model_id":"gemma-3-4b-it","provider":"local/mistralrs"},
-                "judge": {"alias":"llm/judge","model_id":"gemma-3-4b-it","provider":"local/mistralrs"},
+                "gen":   {"alias":"llm/gen","model_id":"gemma-3-4b-it","provider":"remote/llamacpp","base_url":"http://127.0.0.1:8080/v1"},
+                "judge": {"alias":"llm/judge","model_id":"gemma-3-4b-it","provider":"remote/llamacpp","base_url":"http://127.0.0.1:8080/v1"},
                 "embedder": {"preset": "bge-small"},
                 "reranker": {"enabled":true,"model_id":"x","top_n":50,"apply_sigmoid":false}
             }
         }"#;
         let cfg: BenchConfig = serde_json::from_str(json).expect("parse");
-        assert!(!cfg.gen_use_default_options(), "off for local providers");
+        assert!(
+            !cfg.gen_use_default_options(),
+            "off for providers other than remote/openai"
+        );
     }
 
     #[test]

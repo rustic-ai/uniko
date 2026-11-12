@@ -87,10 +87,7 @@ impl NlpPipeline {
     pub async fn analyze(&self, text: &str) -> Result<NlpResult, UnikoError> {
         let mut out = self
             .model
-            .analyze(vec![NlpRequest {
-                text,
-                tasks: self.tasks(),
-            }])
+            .analyze(vec![NlpRequest::new(text, self.tasks())])
             .await
             .map_err(|e| UnikoError::Pipeline(format!("xervo NLP analyze: {e}")))?;
         let x = out
@@ -121,10 +118,7 @@ impl NlpPipeline {
         let tasks = self.tasks();
         let requests: Vec<NlpRequest<'_>> = sentences
             .iter()
-            .map(|s| NlpRequest {
-                text: s.as_str(),
-                tasks,
-            })
+            .map(|s| NlpRequest::new(s.as_str(), tasks))
             .collect();
         let results = self
             .model

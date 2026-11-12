@@ -18,14 +18,8 @@ default = []
 gpu-cuda = ["uni-db/gpu-cuda"]
 # Enable Apple Metal/CoreML acceleration in uni-db (macOS only).
 gpu-metal = ["uni-db/gpu-metal"]
-# Compile the mistralrs local-LLM provider in uni-db. On its own it is CPU; the
-# GPU kernels only switch on when combined with `gpu-cuda`/`gpu-metal` (uni-xervo
-# forwards `mistralrs?/cuda` / `mistralrs?/metal` only once mistralrs is present).
-# Building the CUDA path needs the CUDA toolkit (nvcc) at build time. Enabled by
-# the uniko-cuda / uniko-metal wheel variants; off in the CPU base wheel.
-mistralrs = ["uni-db/provider-mistralrs"]
 # Compile uni-xervo's native candle provider in uni-db. candle-core/-nn/
-# -transformers are already transitive deps of mistralrs, so this adds only
+# -transformers come in with it, so this adds only
 # xervo's candle glue (no duplicate candle crates). GPU kernels ride the same
 # `gpu-cuda`/`gpu-metal` `candle-*?/cuda|metal` forwards.
 candle = ["uni-db/provider-candle"]

@@ -56,19 +56,28 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.3.0" }
 # provider-onnx (embeddings + NLP + reranker), and every remote provider.
 # GPU accelerators (gpu-cuda / gpu-metal) are opt-in via uniko-store /
 # uniko-bench passthrough features.
-# Tracks the latest 3.x release (^3 = >=3.0.0, <4.0.0); `cargo update -p uni-db`
-# refreshes the lockfile to the newest compatible version.
+# Tracks the latest 5.x release (^5.1 = >=5.1.0, <6.0.0); `cargo update -p uni-db`
+# refreshes the lockfile to the newest compatible version. The 5.1 floor is
+# required, not cosmetic: 5.0 declared `provider-mistralrs`, which uni-xervo
+# 0.19 removed, so uni-db 5.0 cannot resolve against the uni-xervo this
+# workspace now needs.
 #
-# NOTE (2026-06-28): default-features disabled to drop `provider-candle` /
-# `provider-mistralrs`. Those pull candle-cuda kernels that nvcc (CUDA 13)
-# cannot compile against this host's glibc/gcc-16 — and uniko only names
-# `local/mistralrs` as a config string, never via API, so dropping them is
-# compile-safe. Trade-off: the local mistralrs LLM provider (LME `gemma-3-4b`
-# configs) is unavailable at runtime; LoCoMo uses remote `gpt-4o-mini`, so the
-# bge-m3 GPU campaign is unaffected. To restore local LLMs, re-add
-# "provider-candle"/"provider-mistralrs" (needs a CUDA-compatible gcc<=15 +
-# matching glibc for a GPU build).
-uni-db = { version = "4", default-features = false, features = [
+# NOTE (2026-06-28): default-features disabled to drop `provider-candle`.
+# It pulls candle-cuda kernels that nvcc (CUDA 13) cannot compile against this
+# host's glibc/gcc-16. Trade-off: in-process candle LLM inference is unavailable
+# at runtime; LoCoMo uses remote `gpt-4o-mini`, so the bge-m3 GPU campaign is
+# unaffected. To restore it, re-add "provider-candle" (needs a CUDA-compatible
+# gcc<=15 + matching glibc for a GPU build) via the `candle` passthrough.
+#
+# `provider-mistralrs` is gone for good: uni-xervo 0.19.0 dropped mistralrs
+# entirely and uni-db 5.1 no longer exposes the feature. `provider-llamacpp`
+# below covers the same ground differently — it is an HTTP client for a
+# `llama-server` you run yourself, so open-weights models stay available
+# without compiling any inference kernels into this process. It is listed
+# unconditionally rather than behind a uniko passthrough feature because it
+# costs nothing to compile: uni-xervo gates it on `reqwest` + `base64`, which
+# every other remote provider here already pulls in.
+uni-db = { version = "5.1", default-features = false, features = [
     "mimalloc",
     "lance-backend",
     "apoc-core",
@@ -82,18 +91,22 @@ uni-db = { version = "4", default-features = false, features = [
     "provider-voyageai",
     "provider-cohere",
     "provider-azure-openai",
+    "provider-llamacpp",
 ] }
 # Direct dep on uni-xervo so uniko-store can name `ModelRuntime` in
 # `KnowledgeBase::build_shared_runtime` / `open_with_runtime`. uni-db
-# uses uni-xervo internally but does not re-export the type. Version
-# pinned to whatever uni-db currently depends on (see
-# `../uni/Cargo.toml`). uni-db 4.1.0 depends on uni-xervo >=0.18.1, <1.0.0.
-uni-xervo = { version = "0.18.1", default-features = false }
+# uses uni-xervo internally but does not re-export the type. This MUST
+# resolve to the same version uni-db picks, or `ModelRuntime` is two
+# distinct types and `open_with_runtime` stops type-checking.
+# uni-db 5.1.0 depends on uni-xervo >=0.19.1, <1.0.0 — the floor excludes
+# 0.19.0, whose ort 2.0.0-rc.15 auto-device policy let CoreML claim nodes on
+# CPU-only macOS builds.
+uni-xervo = { version = "0.19.1", default-features = false }
 # Tiered PDF extraction (native text -> OCR -> doc-VLM). Pulls only traits +
 # the pure-Rust native (lopdf) + rasterizer (hayro) tiers; the inference
 # providers ride on `uni-xervo` itself. Built against the same crates.io
-# uni-xervo 0.18.1, so the `OcrModel` / `ModelRuntime` types unify.
-uni-xervo-pdf = { version = "0.18.1", default-features = false, features = [
+# uni-xervo 0.19.1, so the `OcrModel` / `ModelRuntime` types unify.
+uni-xervo-pdf = { version = "0.19.1", default-features = false, features = [
     "pdf-input",
     "hayro",
 ] }
@@ -143,7 +156,9 @@ tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
 
 # ML / embedding
-ort = "2.0.0-rc.12"
+# Pinned to the exact rc uni-xervo 0.19.1 requires (`=2.0.0-rc.15`). A lower
+# floor resolves to a second, incompatible ort copy.
+ort = "2.0.0-rc.15"
 tiktoken-rs = "0.12"
 ndarray = "0.17"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }

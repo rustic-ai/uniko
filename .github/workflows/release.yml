@@ -243,19 +243,19 @@ jobs:
 
   # ── Build the CUDA (NVIDIA) wheel variant — `uniko-cuda`, Linux x86_64 ─────
   # Full ONNX+CUDA+LLM: `gpu-cuda` enables `ort/cuda` (a prebuilt ORT CUDA EP
-  # sidecar via pyke) AND, with `mistralrs`+`candle`, compiles candle's CUDA
-  # kernels for local mistralrs LLM inference — needing the CUDA toolkit (nvcc)
+  # sidecar via pyke) AND, with `candle`, compiles candle's CUDA kernels for
+  # in-process LLM inference — needing the CUDA toolkit (nvcc)
   # at build time. Mirrors rustic-ai/uni-db's proven `uni-db-cuda` job: NVIDIA
   # ships the CUDA 13.0 toolkit as RHEL/AlmaLinux 9 RPMs, so build in the
   # manylinux_2_34 (AlmaLinux 9) container, install cuda-toolkit-13-0, and target
   # CUDA_COMPUTE_CAP=80 (Ampere; PTX forward-JITs onto Ada/Hopper/Blackwell).
-  # CUDA 13.0 is in mistralrs-quant 0.8.1's allowlist and AL9's glibc has no
-  # rsqrt/header clash, so no host-compiler shims are needed. cudarc
+  # AL9's glibc has no rsqrt/header clash, so no host-compiler shims are
+  # needed. cudarc
   # dynamic-loads the runtime libs (build-time nvcc/headers only). maturin's
   # auditwheel is skipped, then a manual `auditwheel repair` excludes the host
   # CUDA/cuDNN libs so they resolve at runtime instead of bloating the wheel.
   # NOTE: unrehearsed for uniko — validate via workflow_dispatch on a -rc tag;
-  # the candle+mistralrs CUDA compile is long (tens of minutes). Measured
+  # the candle CUDA compile is long (tens of minutes). Measured
   # 2026-08-03 on a dev host at CUDA_COMPUTE_CAP=80: 98.6 MiB *before* the
   # repair below, which then bundles OpenSSL 3 and friends — so the published
   # wheel is larger and PyPI's 100 MB/file limit is very likely exceeded;
@@ -307,7 +307,7 @@ jobs:
           sccache: "true"
           before-script-linux: |
             set -eux
-            # ── CUDA 13.0 toolkit (nvcc + headers) for candle/mistralrs kernels.
+            # ── CUDA 13.0 toolkit (nvcc + headers) for candle's kernels.
             # manylinux_2_34 is AlmaLinux 9 -> NVIDIA's rhel9 repo. cudarc
             # dynamic-loads the runtime libs, so only build-time nvcc/headers are
             # needed inside the container.
@@ -372,14 +372,14 @@ jobs:
   # ── Build the Metal (Apple Silicon) wheel variant — `uniko-metal` ─────────
   # `gpu-metal` enables `ort?/coreml` (fires because the uni-db pin always
   # enables `provider-onnx`); CoreML is statically linked in pyke's macOS ORT
-  # bundle, so no sidecar/auditwheel dance. The `mistralrs`+`candle` features
-  # additionally compile candle's Metal kernels for local LLM inference — the
+  # bundle, so no sidecar/auditwheel dance. The `candle` feature additionally
+  # compiles candle's Metal kernels for in-process LLM inference — the
   # macOS runner's Xcode/Metal SDK supplies that toolchain, so no extra
   # install is needed. macOS arm64 only (no x86_64-apple-darwin ORT prebuilt).
   build-metal:
     name: Wheel uniko-metal (macos/aarch64, Metal)
     # `macos-15-xlarge` (5-core M2 / 14 GB, billed per-minute), not the free 7 GB
-    # standard runner: this is the heaviest variant (onnx + candle + mistralrs)
+    # standard runner: this is the heaviest variant (onnx + candle)
     # and `--profile dist` links it as a single codegen unit. See the
     # codegen_units note in the build-wheels matrix for the OOM symptom and the
     # escape hatch. NOT `macos-14-xlarge` — macOS 14 runners are removed

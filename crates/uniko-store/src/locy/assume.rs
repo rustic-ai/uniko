@@ -86,16 +86,20 @@ impl<'a> AssumeBuilder<'a> {
             .await
             .map_err(|e| UnikoError::Locy(e.to_string()))?;
 
-        // The `THEN` body's rows surface as a `CommandResult::Assume`, not via
-        // `LocyResult::rows()` (which finds only the `Query` goal command). Pull
-        // the assume (or plain query) command's rows directly.
+        // The `THEN` body's rows surface under a `CommandResult::Assume`, not
+        // via `LocyResult::rows()` (which finds only the `Query` goal command).
+        // Pull the assume (or plain query) command's rows directly.
+        //
+        // `CommandResult::Assume` carries one result per body command since
+        // uni-db 5.0 (it was the body's rows itself before), so the body's rows
+        // sit one level down. `CommandResult::rows()` is upstream's depth-first
+        // search for them, and it is what the body needs: a spliced `THEN`
+        // block reports as a nested `Cypher` result, which this used to miss.
         let rows = result
             .command_results()
             .iter()
-            .find_map(|cr| match cr {
-                CommandResult::Assume(rows) | CommandResult::Query(rows) => Some(rows.clone()),
-                _ => None,
-            })
+            .find_map(CommandResult::rows)
+            .cloned()
             .unwrap_or_default();
         Ok(rows)
     }

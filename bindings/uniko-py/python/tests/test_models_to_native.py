@@ -67,7 +67,19 @@ def test_llm_to_native_each_provider():
             "model_id": "m",
             "key_env": "K",
         },
-        {"provider": "mistralrs", "alias": "a", "model_id": "m"},
+        {
+            "provider": "llamacpp",
+            "alias": "a",
+            "model_id": "qwen",
+            "base_url": "http://127.0.0.1:8080/v1",
+        },
+        {
+            "provider": "llamacpp",
+            "alias": "a",
+            "model_id": "qwen",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "key_env": "K",
+        },
     ):
         spec = LlmSpecAdapter.validate_python(payload)
         assert repr(llm_to_native(spec)).startswith("LlmSpec")

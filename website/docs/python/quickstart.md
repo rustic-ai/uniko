@@ -185,8 +185,9 @@ spec = uniko.LlmSpec.openai("llm/default", "gpt-4o-mini")   # key from OPENAI_AP
 uni = await uniko.Uniko.builder().in_memory().llm(spec).build()
 ```
 
-`LlmSpec` also offers `openai_with_key_env(alias, model_id, key_env)` and `mistralrs(alias,
-model_id)` for a local, in-situ quantized model.
+`LlmSpec` also offers `openai_with_key_env(alias, model_id, key_env)` and
+`llamacpp(alias, model_id, base_url)` for open-weights models you serve yourself from a
+llama.cpp `llama-server`.
 
 !!! warning "No LLM, no answer"
     ```python

@@ -67,6 +67,9 @@ pub trait ModalityPrepared: Send + Sync + std::fmt::Debug {
 /// `content_id` it will write *before* it opens the transaction, so it can
 /// take the striped locks first. A single `extract(kb, tx, ..)` gives it no
 /// point at which to ask.
+// `async_trait` puts a bare `#[must_use]` on each bodiless method, whose boxed
+// future is already `#[must_use]`; see `uniko_store::blob_store::BlobStore`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ModalityExtractor: Send + Sync + std::fmt::Debug {
     /// The modality this extractor handles.

@@ -24,6 +24,9 @@ use crate::types::StepOutcome;
 ///
 /// Return [`StepOutcome::Completed`] on success, or
 /// [`StepOutcome::Failed`] with the appropriate [`StepErrorPolicy`].
+// `async_trait` puts a bare `#[must_use]` on each bodiless method, whose boxed
+// future is already `#[must_use]`; see `uniko_store::blob_store::BlobStore`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Step: Send + Sync {
     /// Human-readable name for logging and metrics.

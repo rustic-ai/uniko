@@ -89,6 +89,12 @@ pub struct PutOutcome {
 /// All methods are content-addressed by `content_id` (SHA-256 hex).
 /// Implementations are idempotent on identical bytes: re-`put`-ing the
 /// same hash is a no-op.
+//
+// `async_trait` tags each bodiless method's generated signature with a bare
+// `#[must_use]`, and the boxed future it returns is already `#[must_use]`, so
+// clippy >= 1.99 reports `double_must_use` on code this file never wrote. The
+// allow has to sit on the trait: the attribute is emitted inside the macro.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait BlobStore: Send + Sync {
     /// Write bytes for `content_id`. Idempotent on identical bytes.

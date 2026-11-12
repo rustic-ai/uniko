@@ -78,7 +78,7 @@ serde schema.  Key fields:
 
 - `models.gen` / `models.judge` — required `LlmAlias` objects: `alias`, `model_id`, `provider`, optional `base_url`, optional `use_default_options`.
 - `models.extract_triples` — optional; set to an `LlmAlias` to use LLM triple extraction during P4 consolidation.
-- `models.embedder` — either `{ "preset": "<name>" }` or `{ "inline": <EmbeddingConfig> }`.  Presets: `bge-small`, `bge-large`, `bge-m3`, `nomic`, `minilm`, `embeddinggemma`, `embeddinggemma-mistralrs`.  `bge-m3` is single-pass hybrid (dense + sparse + ColBERT); pair with `recall.sparse_enabled` and/or `reranker.style = "colbert"`.
+- `models.embedder` — either `{ "preset": "<name>" }` or `{ "inline": <EmbeddingConfig> }`.  Presets: `bge-small`, `bge-large`, `bge-m3`, `nomic`, `minilm`, `embeddinggemma`.  `bge-m3` is single-pass hybrid (dense + sparse + ColBERT); pair with `recall.sparse_enabled` and/or `reranker.style = "colbert"`.
 - `recall.sparse_enabled` — add the learned-sparse channel (needs `bge-m3`).  `recall.vector_weight` / `recall.bm25_weight` — override hybrid fusion weights (`null` keeps the 0.5/0.5 default).
 - `models.reranker` — full `RerankerConfig` shape (`enabled`, `model_id`, `style`, `top_n`, `apply_sigmoid`, optional `execution_providers`).
 - `models.nlp` — `model_id`, `artifact`, `max_batch_size`, optional `execution_providers`.  Defaults to the xsmall deberta INT8 cascade.
