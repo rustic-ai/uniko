@@ -183,7 +183,7 @@ PyPI's default per-file limit is 100 MB. Measured 2026-08-03, all built with
 | --- | --- | --- | --- |
 | `uniko` | **74.0 MiB** | 197.4 MiB | comfortably under |
 | `uniko-cuda` | **98.6 MiB** *(before `auditwheel repair`)* | 306.6 MiB | marginal — see below |
-| `uniko-metal` | not measured (macOS-only) | — | unknown |
+| `uniko-metal` | **86.3 MiB** *(measured 2026-11-12, 0.4.0, local M-series build)* | 210.5 MiB | under, ~13.7 MiB margin |
 
 The base wheel no longer exceeds the limit. It did when this section was
 written, under a plain `--release` build; whole-graph thin LTO plus uni-db
@@ -282,10 +282,10 @@ Because the publishes are gated, the safest rehearsal is:
     x86_64 cross-build, so pyke fetches the native aarch64 ORT bundle inside the
     ARM manylinux container. This removes the old QEMU/cross-link fragility — if
     this cell regresses, keep it native rather than reaching for emulation.
-  - **macOS is aarch64-only.** rc.12 ships no `x86_64-apple-darwin` binary and
+  - **macOS is aarch64-only.** pyke published no `x86_64-apple-darwin` binary and
     our `onnx` feature is always-on, so an Intel-macOS wheel cannot link. Intel
     Macs are EOL; do not re-add x86_64 macOS without building ORT from source.
-- **`ort = 2.0.0-rc.12` is a pre-release.** crates.io accepts crates that depend
+- **`ort = 2.0.0-rc.15` is a pre-release.** crates.io accepts crates that depend
   on pre-release versions, so this does not block publishing.
 
 [crates.io]: https://crates.io

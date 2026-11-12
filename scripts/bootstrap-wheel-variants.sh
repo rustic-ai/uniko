@@ -3,10 +3,10 @@
 # package from bindings/uniko-py.
 #
 # The variant dirs (bindings/uniko-cuda, bindings/uniko-metal) track only
-# Cargo.toml, pyproject.toml, and README.md in git; their `python/` package is
-# copied in here (and gitignored) so maturin's `python-source = "python"` finds
-# the same `uniko` package the CPU wheel ships. Copy, not symlink — maturin does
-# not follow symlinks for python-source.
+# Cargo.toml, pyproject.toml, README.md, and a one-line build.rs in git; their
+# `python/` package is copied in here (and gitignored) so maturin's
+# `python-source = "python"` finds the same `uniko` package the CPU wheel
+# ships. Copy, not symlink — maturin does not follow symlinks for python-source.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
