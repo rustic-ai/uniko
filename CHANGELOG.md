@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **macOS wheels built as the release workflow builds them import again.**
+  ONNX Runtime 1.31's CoreML objects (via ort rc.15) call
+  `__isPlatformVersionAtLeast`, which lives in `libclang_rt.osx.a`; rustc
+  links with `-nodefaultlibs`, so a `--profile dist` wheel left the symbol
+  unresolved and `import uniko` failed with `symbol not found in flat
+  namespace`. A build script in `bindings/uniko-py`, included by the
+  `uniko-cuda` and `uniko-metal` variants, now links the archive on macOS —
+  the same fix uni-db 5.1.0 applied to its own wheels.
 - **NLP no longer degrades silently to rule-based extraction.** uni-xervo
   >= 0.19 serves two kniv generations and, absent an explicit `generation`
   option, infers one by probing the model repo for `onnx/onnx_meta.json`. The
