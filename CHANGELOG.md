@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uni-xervo 0.19.0 dropped mistralrs entirely, so there is nothing left to
   forward. Replace an in-process mistralrs LLM with `LlmSpec::llamacpp` (see
   below) or, for a GPU wheel, the `candle` feature.
+- **Edge writes must match the schema's declared endpoints.** uni-db 5.0
+  enforces each edge type's declared source and target labels on write,
+  where nothing checked before — e.g. `MENTIONS` must run Message -> Entity,
+  and an Observation -> Message link must be `OBSERVED_IN`. Writes that
+  violate this, and used to succeed, now return an error. Enforcement is
+  write-only: stores written earlier may still hold such edges and stay
+  readable.
 
 ### Added
 
