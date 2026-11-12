@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
 ### Breaking
 
 - **`LlmSpec::mistralrs` and `EmbeddingConfig::embedding_gemma_300m_mistralrs`
@@ -665,6 +667,7 @@ pip install uniko-cuda    # NVIDIA CUDA, Linux x86_64
 pip install uniko-metal   # Apple Silicon, macOS arm64
 ```
 
+[0.4.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.4.0
 [0.3.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.3.0
 [0.2.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.2.0
 [0.1.1]: https://github.com/rustic-ai/uniko/releases/tag/v0.1.1

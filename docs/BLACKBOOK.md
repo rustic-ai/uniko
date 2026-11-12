@@ -2,7 +2,7 @@
 
 *An embedded, Rust-native cognitive-memory engine that compiles conversations into a queryable knowledge graph.*
 
-**Workspace version 0.3.0 · Generated 2026-08-03 · Revised 2026-11-11**
+**Workspace version 0.4.0 · Generated 2026-08-03 · Revised 2026-11-11**
 
 ---
 
@@ -18,7 +18,7 @@ Knowledge in uniko is **derived, never merely stored**. Only Messages and Action
 
 The headline benchmark proof comes from the repository's own harness on LoCoMo10 (1,986 questions, gemini-3.1 judge, 22-core CPU + 8 GB consumer GPU): **81.2% LLM-judge accuracy, 85.6% retrieval hit rate, 0.321 token-F1** — competitive on quality — while ingesting 5,882 turns in **7.5 minutes at $0** (no LLM on the write path) and answering at **4.04 s mean latency**. Against graph-backed peers measured in the KTH dmas-memory study, uniko ingests 33–76× faster at zero token cost and posts the fastest end-to-end Q&A wall-time of six systems. These are self-measured internal figures, not a third-party leaderboard, and the cost/latency tables use the 1,540-question non-adversarial subset — the two question sets should not be conflated.
 
-uniko is for founders and engineering leads shipping agents in their own process who want zero operational footprint, where ingest cost and offline capability matter, where conversation and provenance are central (tracking who-said-what across sessions and explaining beliefs), who organize memory around goals, and who prefer graph-native reasoning compiled at ingest over inference paid on every query. It ships today as six crates on crates.io (facade: `uniko-api = "0.3.0"`) and three interchangeable Python wheels (`uniko` CPU, `uniko-cuda`, `uniko-metal`). The Python SDK is alpha; HTTP/MCP servers, a CLI, multimodal ingest, rule induction, and cross-agent sharing are on the roadmap, not yet shipped.
+uniko is for founders and engineering leads shipping agents in their own process who want zero operational footprint, where ingest cost and offline capability matter, where conversation and provenance are central (tracking who-said-what across sessions and explaining beliefs), who organize memory around goals, and who prefer graph-native reasoning compiled at ingest over inference paid on every query. It ships today as six crates on crates.io (facade: `uniko-api = "0.4.0"`) and three interchangeable Python wheels (`uniko` CPU, `uniko-cuda`, `uniko-metal`). The Python SDK is alpha; HTTP/MCP servers, a CLI, multimodal ingest, rule induction, and cross-agent sharing are on the roadmap, not yet shipped.
 
 ---
 
@@ -220,7 +220,7 @@ The proof point that ties back to the thesis: **ingest costs $0 and needs no net
 
 ### 1.9 What is shipped, and what is not
 
-Shipped (Phases 1–3): the full Rust engine (six crates on crates.io, `uniko-api = "0.3.0"` as the facade), the 3-phase recall cascade, P4 consolidation with drift/contradiction, P5 procedures, P6 topics, the Locy rule lifecycle, bitemporal Facts, visibility scoping, PDF/artifact ingest, and an alpha Python SDK (three wheels).
+Shipped (Phases 1–3): the full Rust engine (six crates on crates.io, `uniko-api = "0.4.0"` as the facade), the 3-phase recall cascade, P4 consolidation with drift/contradiction, P5 procedures, P6 topics, the Locy rule lifecycle, bitemporal Facts, visibility scoping, PDF/artifact ingest, and an alpha Python SDK (three wheels).
 
 Not yet shipped — do not build on these: HTTP/MCP server, CLI, cross-agent sharing, rule induction, and MCTS planning (Phases 4–6). The Python API is alpha and may change before 1.0. The largest known recall weakness is date-anchored/temporal questions, where retrieval tuning is ongoing.
 
@@ -2385,7 +2385,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-uniko-api = "0.3.0"
+uniko-api = "0.4.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
