@@ -134,7 +134,7 @@ pub struct LlmAlias {
     /// HuggingFace model id or provider model name.
     pub model_id: String,
     /// xervo provider id (e.g. `remote/openai`, `remote/vertexai`,
-    /// `remote/llamacpp`, `local/onnx`).
+    /// `remote/llamacpp`, `local/candle`).
     pub provider: String,
     /// Optional OpenAI-compatible base URL override.
     #[serde(default)]
@@ -490,17 +490,20 @@ mod tests {
     }
 
     #[test]
-    fn auto_default_options_disabled_for_local_provider() {
+    fn auto_default_options_disabled_for_non_openai_provider() {
         let json = r#"{
             "models": {
-                "gen":   {"alias":"llm/gen","model_id":"gemma-3-4b-it","provider":"local/onnx"},
-                "judge": {"alias":"llm/judge","model_id":"gemma-3-4b-it","provider":"local/onnx"},
+                "gen":   {"alias":"llm/gen","model_id":"gemma-3-4b-it","provider":"remote/llamacpp","base_url":"http://127.0.0.1:8080/v1"},
+                "judge": {"alias":"llm/judge","model_id":"gemma-3-4b-it","provider":"remote/llamacpp","base_url":"http://127.0.0.1:8080/v1"},
                 "embedder": {"preset": "bge-small"},
                 "reranker": {"enabled":true,"model_id":"x","top_n":50,"apply_sigmoid":false}
             }
         }"#;
         let cfg: BenchConfig = serde_json::from_str(json).expect("parse");
-        assert!(!cfg.gen_use_default_options(), "off for local providers");
+        assert!(
+            !cfg.gen_use_default_options(),
+            "off for providers other than remote/openai"
+        );
     }
 
     #[test]
