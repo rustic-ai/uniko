@@ -210,10 +210,10 @@ impl KnowledgeBase {
         }
         let db = builder.build().await?;
         apply_schema(&db, &config).await?;
-        if prefetch {
-            prefetch_models(&db).await;
-        }
-        Self {
+        // Check the store against the config (blob backend, embedding model)
+        // before prefetching: a mismatched reopen should fail at once, not
+        // after downloading a model it will never use.
+        let kb = Self {
             db: Arc::new(db),
             config,
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -221,7 +221,11 @@ impl KnowledgeBase {
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
         }
         .finalize_init()
-        .await
+        .await?;
+        if prefetch {
+            prefetch_models(&kb.db).await;
+        }
+        Ok(kb)
     }
 
     /// Build a single ONNX/Xervo runtime that multiple KBs can share.
