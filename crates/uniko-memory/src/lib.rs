@@ -48,7 +48,7 @@ pub(crate) mod value_convert;
 #[doc(inline)]
 pub use action::{RecordActionParams, RecordActionResult, record_action};
 #[doc(inline)]
-pub use agent::Agent;
+pub use agent::{Agent, ConsolidationReport, RuleView};
 pub use consolidation::CycleStats;
 #[doc(inline)]
 pub use episode::{RecordEpisodeParams, record_episode};
@@ -63,7 +63,7 @@ pub use fact::{AssertFactParams, InvalidateFactParams, assert_fact, invalidate_f
 #[doc(inline)]
 pub use goal::{CreateGoalParams, create_goal};
 #[doc(inline)]
-pub use policy::Viewer;
+pub use policy::{Viewer, Visibility};
 #[doc(inline)]
 pub use recall::{
     ContextBundle, Dimensions, RecallConfig, RecallItem, RecallKind, RecallOverrides, RecallSource,
@@ -79,6 +79,8 @@ pub use uniko_extract::ingest::{
     ingest_source, resolve_mime,
 };
 // Content-type taxonomy shared by ingest routing and recall channels.
+/// Cortex sweep outcomes, part of [`ConsolidationReport`].
+pub use uniko_cortex::{procedures::PromotionReport, topics::TopicReport};
 /// LLM circuit-breaker state, part of [`PipelineHealth`].
 pub use uniko_pipes::CircuitState;
 #[doc(no_inline)]
@@ -86,7 +88,7 @@ pub use uniko_pipes::content::{ContentType, Mime, Modality};
 /// Streaming-pipeline health, returned by [`Uniko::health`].
 pub use uniko_pipes::health::{PipelineHealth, WorkerHealth, WorkerStatus};
 #[doc(no_inline)]
-pub use uniko_store::operations::facts::FactUpsert;
+pub use uniko_store::operations::facts::{FactUpsert, fact_id_for};
 // The canonical error type and node-id alias that pervade every facade
 // method signature, surfaced so callers handle errors / name ids without
 // reaching into `uniko_store`.
@@ -97,9 +99,7 @@ pub use uniko_store::{DeletionReport, NodeId, UnikoError};
 #[doc(no_inline)]
 pub use uniko_store::Value;
 #[doc(no_inline)]
-pub use uniko_store::locy::{
-    AbducedModification, AbductionResult, AssumeBuilder, DerivationNode, DerivationTree, Record,
-};
+pub use uniko_store::locy::{AbducedModification, AbductionResult, AssumeBuilder, Record};
 // Decoding companion for the `Value::Temporal` arm: uni-db 3.2.0 dropped the
 // `TemporalValue::epoch_millis` accessor, so the conversion now lives in
 // `uniko_store` and is surfaced here for the bindings, which render temporal

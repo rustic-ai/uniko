@@ -355,6 +355,28 @@ impl Session {
         finalize_session(&self.kb, &self.ctx.session_id).await
     }
 
+    /// Record an action this session's agent took, attached to this
+    /// session unless `params.session_id` names another.
+    ///
+    /// The session must already exist (it does once a turn has been
+    /// observed); otherwise the action is recorded without the session
+    /// link.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when a referenced message or prior action is
+    /// missing, or a write fails.
+    pub async fn record_action(
+        &self,
+        mut params: crate::action::RecordActionParams,
+    ) -> Result<crate::action::RecordActionResult, UnikoError> {
+        params
+            .session_id
+            .get_or_insert_with(|| self.ctx.session_id.clone());
+        crate::agent::ensure_agent_participant(&self.kb, &self.agent_id).await?;
+        crate::action::record_action(&self.kb, &self.agent_id, params).await
+    }
+
     /// Generate (or refresh) a synopsis of this session.
     ///
     /// Extractive (deterministic) when no LLM was configured on the

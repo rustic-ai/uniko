@@ -8,6 +8,7 @@ use uniko_extract::ingest::{ModalityExtractor, ModalityRegistry};
 use uniko_pipes::config::PipelineConfig;
 use uniko_pipes::health::PipelineHealth;
 use uniko_store::config::{EmbeddingConfig, RerankerConfig, UnikoConfig};
+use uniko_store::repository::policy::Membership;
 use uniko_store::xervo::{ModelAliasSpec, ModelTask, WarmupPolicy};
 use uniko_store::{DeletionReport, KnowledgeBase, UnikoError};
 
@@ -117,6 +118,109 @@ impl Uniko {
     /// The validated configuration this instance runs with.
     pub fn config(&self) -> &UnikoConfig {
         self.kb.config()
+    }
+
+    /// Record that `participant_id` is a member of team `team_id`, so it
+    /// can see items with [`Visibility::Team`](crate::Visibility::Team)
+    /// for that team. Creates the participant and team when absent.
+    /// Returns `false` when the membership was already recorded.
+    ///
+    /// An `Agent` handle resolves its own memberships once, on its first
+    /// scoped read, so take a fresh handle from [`agent`](Uniko::agent) to
+    /// see a change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] for an empty id, or [`UnikoError`] on
+    /// a write failure.
+    pub async fn add_team_member(
+        &self,
+        participant_id: &str,
+        team_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .add_membership(Membership::ParticipantInTeam, participant_id, team_id)
+            .await
+    }
+
+    /// Undo [`add_team_member`](Uniko::add_team_member). Returns `false`
+    /// when the membership was not recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a write failure.
+    pub async fn remove_team_member(
+        &self,
+        participant_id: &str,
+        team_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .remove_membership(Membership::ParticipantInTeam, participant_id, team_id)
+            .await
+    }
+
+    /// Record that `participant_id` is a member of org `org_id`, so it can
+    /// see items with [`Visibility::Org`](crate::Visibility::Org) for that
+    /// org. Returns `false` when already recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] for an empty id, or [`UnikoError`] on
+    /// a write failure.
+    pub async fn add_org_member(
+        &self,
+        participant_id: &str,
+        org_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .add_membership(Membership::ParticipantInOrg, participant_id, org_id)
+            .await
+    }
+
+    /// Undo [`add_org_member`](Uniko::add_org_member). Returns `false`
+    /// when the membership was not recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a write failure.
+    pub async fn remove_org_member(
+        &self,
+        participant_id: &str,
+        org_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .remove_membership(Membership::ParticipantInOrg, participant_id, org_id)
+            .await
+    }
+
+    /// Record that team `team_id` belongs to org `org_id`: every member of
+    /// the team then sees that org's items too. Returns `false` when
+    /// already recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] for an empty id, or [`UnikoError`] on
+    /// a write failure.
+    pub async fn add_team_to_org(&self, team_id: &str, org_id: &str) -> Result<bool, UnikoError> {
+        self.kb
+            .add_membership(Membership::TeamInOrg, team_id, org_id)
+            .await
+    }
+
+    /// Undo [`add_team_to_org`](Uniko::add_team_to_org). Returns `false`
+    /// when it was not recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a write failure.
+    pub async fn remove_team_from_org(
+        &self,
+        team_id: &str,
+        org_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .remove_membership(Membership::TeamInOrg, team_id, org_id)
+            .await
     }
 
     /// A health snapshot of the streaming pipeline: queue depth and

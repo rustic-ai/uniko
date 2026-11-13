@@ -18,7 +18,6 @@ use uniko_store::locy::{AbductionResult, AssumeBuilder, Record};
 use uniko_store::xervo::{GenerationOptions, Message};
 use uniko_store::{DeletionReport, KnowledgeBase, NodeId, UnikoError, Value};
 
-use crate::consolidation::CycleStats;
 use crate::facade::{FinalizeReport, RecallScope, Session, finalize_session};
 use crate::nl_to_cypher::is_safe_read_only;
 use crate::pipeline::PipelineSystem;
@@ -26,6 +25,10 @@ use crate::policy::Viewer;
 use crate::query::{Answer, GeneratedAnswer, QueryRecordOptions, answer_query};
 use crate::recall::{ContextBundle, RecallConfig, RecallOverrides, Scope, ViewerScope, recall};
 use crate::rules::{AddRuleParams, add_rule};
+
+mod ops;
+pub(crate) use ops::ensure_agent_participant;
+pub use ops::{ConsolidationReport, RuleView};
 
 /// System prompt used by [`Agent::answer`] when generating a reply.
 const ANSWER_SYSTEM_PROMPT: &str = "You are a helpful assistant. Answer the question using only the \
@@ -382,29 +385,6 @@ impl Agent {
     /// Returns [`UnikoError`] on a read or write failure.
     pub async fn restore_source(&self, source_id: &str) -> Result<bool, UnikoError> {
         self.kb.restore_source(source_id).await
-    }
-
-    /// Run one consolidation cycle for this agent, now.
-    ///
-    /// Compiles unprocessed `Observation`s into `Fact`s — voting on the
-    /// canonical object, stamping each Fact with a bitemporal validity
-    /// interval, reinforcing or invalidating prior beliefs, and flagging
-    /// entity drift. Returns what the cycle did.
-    ///
-    /// This is the synchronous, always-available path: it needs no streaming
-    /// pipeline and runs on the calling task. A streaming instance also
-    /// consolidates on its own (a 20-observation threshold or a 15-minute
-    /// timer), so this is for callers that want to decide the moment — at the
-    /// end of a conversation, before a report, or in a batch job.
-    ///
-    /// Cheap when there is nothing to do: a cycle with no unprocessed
-    /// Observations returns zeroed [`CycleStats`] without writing.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UnikoError`] on a read, write, or embedding failure.
-    pub async fn consolidate(&self) -> Result<CycleStats, UnikoError> {
-        crate::consolidation::run_cycle(&self.kb, &self.agent_id, None).await
     }
 
     /// Session ids that have no session-level chunks yet.
