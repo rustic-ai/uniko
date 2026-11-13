@@ -74,13 +74,16 @@ pub use recall::{
 // ingest verbs -> *IngestResult.
 #[doc(no_inline)]
 pub use uniko_extract::ingest::{
-    ArtifactIngestResult, AtomicIngestResult, IngestContext, IngestData, IngestOutcome,
-    IngestSource, ModalityExtractor, ModalityPrepared, ModalityRegistry, PdfIngestResult,
-    ingest_source, resolve_mime,
+    ArtifactIngestResult, AtomicIngestResult, ExtractFn, ExtractRequest, IngestContext, IngestData,
+    IngestOutcome, IngestSource, ModalityExtractor, ModalityPrepared, ModalityRegistry,
+    PdfIngestResult, TextExtractor, ingest_source, resolve_mime,
 };
 // Content-type taxonomy shared by ingest routing and recall channels.
 /// Cortex sweep outcomes, part of [`ConsolidationReport`].
-pub use uniko_cortex::{procedures::PromotionReport, topics::TopicReport};
+pub use uniko_cortex::{
+    procedures::{MatchedProcedure, PromotionReport},
+    topics::TopicReport,
+};
 /// LLM circuit-breaker state, part of [`PipelineHealth`].
 pub use uniko_pipes::CircuitState;
 #[doc(no_inline)]
@@ -88,7 +91,7 @@ pub use uniko_pipes::content::{ContentType, Mime, Modality};
 /// Streaming-pipeline health, returned by [`Uniko::health`].
 pub use uniko_pipes::health::{PipelineHealth, WorkerHealth, WorkerStatus};
 #[doc(no_inline)]
-pub use uniko_store::operations::facts::{FactUpsert, fact_id_for};
+pub use uniko_store::operations::facts::{FactUpsert, fact_id_for, fact_id_for_scoped};
 // The canonical error type and node-id alias that pervade every facade
 // method signature, surfaced so callers handle errors / name ids without
 // reaching into `uniko_store`.

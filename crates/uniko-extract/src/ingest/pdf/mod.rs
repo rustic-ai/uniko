@@ -110,6 +110,7 @@ fn pdf_prov(prep: &PdfPrep) -> super::message::ChunkProvenance<'_> {
         category: prep.category.as_deref(),
         source_id: prep.source_id.as_deref(),
         revision_id: prep.revision_id.as_deref(),
+        visibility: None,
     }
 }
 

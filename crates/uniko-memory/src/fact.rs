@@ -24,9 +24,9 @@ use uniko_store::{KnowledgeBase, UnikoError};
 
 /// Inputs for [`assert_fact`].
 ///
-/// The triple `(subject, predicate, object)` is the Fact's identity;
-/// asserting the same triple again reinforces the existing Fact rather
-/// than creating a duplicate.
+/// The triple `(subject, predicate, object)` and the visibility scope are
+/// the Fact's identity; asserting the same triple again in the same scope
+/// reinforces the existing Fact rather than creating a duplicate.
 #[derive(Debug, Clone, Default)]
 pub struct AssertFactParams {
     /// Triple subject (e.g. `"user"`).
@@ -42,6 +42,12 @@ pub struct AssertFactParams {
     /// `observation_id`s of Observations that support this Fact.  Each
     /// resolvable one gets a `SUPPORTED_BY` edge (best-effort).
     pub supporting_observation_ids: Vec<String>,
+    /// Who may see the Fact. `None` (or [`Visibility::Public`]) asserts the
+    /// public Fact of this triple; a scope asserts a separate Fact held
+    /// under that scope, as consolidation does for scoped observations.
+    ///
+    /// [`Visibility::Public`]: crate::Visibility::Public
+    pub visibility: Option<crate::Visibility>,
 }
 
 /// Assert a Fact from a triple, embedding it and wiring provenance.
@@ -73,14 +79,19 @@ pub async fn assert_fact(
     };
     let embedding = embed_document(kb, &embed_text).await?;
 
+    let visibility = params
+        .visibility
+        .as_ref()
+        .map(crate::Visibility::as_property);
     let upsert = kb
-        .upsert_fact_by_triple(
+        .upsert_scoped_fact_by_triple(
             &params.subject,
             &params.predicate,
             params.object.as_deref(),
             count,
             observed_at,
             Some(embedding),
+            visibility.as_deref(),
         )
         .await?;
 

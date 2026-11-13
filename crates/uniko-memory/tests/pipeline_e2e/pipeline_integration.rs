@@ -68,6 +68,7 @@ fn test_message(id: &str) -> IngestTask {
         category: None,
         source_id: None,
         revision_id: None,
+        visibility: None,
     })
 }
 

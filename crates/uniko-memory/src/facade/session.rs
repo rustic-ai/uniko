@@ -559,6 +559,7 @@ pub struct Turn {
     category: Option<String>,
     source_id: Option<String>,
     revision_id: Option<String>,
+    visibility: Option<crate::Visibility>,
 }
 
 impl Turn {
@@ -576,6 +577,7 @@ impl Turn {
             category: None,
             source_id: None,
             revision_id: None,
+            visibility: None,
         }
     }
 
@@ -659,6 +661,19 @@ impl Turn {
         self
     }
 
+    /// Scope who may see this turn: its message, its chunks, the
+    /// observations extracted from it, and the facts consolidated from
+    /// those (held apart from the public fact of the same triple). Scoped
+    /// reads drop it for any viewer the visibility does not admit.
+    ///
+    /// Attachments are not scoped by this; give an attachment's own
+    /// content no wider audience than the turn's when that matters.
+    #[must_use]
+    pub fn visibility(mut self, visibility: crate::Visibility) -> Self {
+        self.visibility = Some(visibility);
+        self
+    }
+
     /// Attach a document/file shared in this turn.
     ///
     /// On [`observe`](Session::observe) each attachment is ingested and
@@ -691,6 +706,10 @@ impl Turn {
             category: self.category,
             source_id: self.source_id,
             revision_id: self.revision_id,
+            visibility: self
+                .visibility
+                .filter(|v| *v != crate::Visibility::Public)
+                .map(|v| v.as_property()),
         }
     }
 }

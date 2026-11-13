@@ -164,6 +164,7 @@ pub async fn ingest_item(
                         category: None,
                         source_id: None,
                         revision_id: None,
+                        visibility: None,
                     };
 
                     // Atomic per-message ingest: one tx for Message +

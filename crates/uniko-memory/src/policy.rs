@@ -15,9 +15,10 @@
 //! `Agent::set_visibility`; deletion writes `redacted:` values, which
 //! hide an item for good.
 //!
-//! Only Facts and Observations carry visibility. Messages and chunks are
-//! not filtered by it, so the text of a turn stays recallable even when
-//! the facts and observations drawn from it are scoped.
+//! Facts and Observations carry visibility, and so do Messages and their
+//! Chunks when the turn was scoped with `Turn::visibility`; the filter
+//! covers all four. Session-level transcript and observation chunks
+//! aggregate many turns, so they are built from public turns only.
 
 use std::collections::HashSet;
 
@@ -214,7 +215,7 @@ pub async fn filter_bundle(
     let policy_node_ids: Vec<NodeId> = bundle
         .items
         .iter()
-        .filter(|i| matches!(i.kind, RecallKind::Fact | RecallKind::Observation))
+        .filter(|i| carries_visibility(i.kind))
         .map(|i| i.node_id)
         .collect();
     if policy_node_ids.is_empty() {
@@ -287,10 +288,20 @@ fn visibility_for<'a>(
     item: &RecallItem,
     visibilities: &'a std::collections::HashMap<NodeId, String>,
 ) -> Option<&'a String> {
-    if !matches!(item.kind, RecallKind::Fact | RecallKind::Observation) {
+    if !carries_visibility(item.kind) {
         return None;
     }
     visibilities.get(&item.node_id)
+}
+
+/// The recall kinds whose nodes carry a `visibility` property: Facts and
+/// Observations, and Messages and their Chunks scoped by
+/// [`Turn::visibility`](crate::Turn::visibility).
+pub(crate) fn carries_visibility(kind: RecallKind) -> bool {
+    matches!(
+        kind,
+        RecallKind::Fact | RecallKind::Observation | RecallKind::Message | RecallKind::Chunk
+    )
 }
 
 #[cfg(test)]

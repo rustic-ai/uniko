@@ -8,7 +8,10 @@
 
 use std::collections::HashMap;
 
-use uniko_cortex::procedures::{LifecycleConfig, PromotionReport, promote_procedures_once};
+use uniko_cortex::procedures::{
+    LifecycleConfig, MatchedProcedure, PromotionReport, match_procedures, promote_procedures_once,
+    record_procedure_use,
+};
 use uniko_cortex::topics::{TopicConfig, TopicReport, detect_topics_once};
 use uniko_store::schema::constants::labels;
 use uniko_store::{NodeId, UnikoError, Value};
@@ -267,6 +270,47 @@ impl Agent {
             .await?
             .into_iter()
             .find(|r| r.name == name))
+    }
+
+    /// Active procedures whose precondition holds in `state`: what has
+    /// tended to work next, for an agent deciding its next step.
+    ///
+    /// Procedures are learned by [`consolidate`](Agent::consolidate) from
+    /// repeated successful action sequences; each has a precondition such
+    /// as `last_action_type=search`, matched against `state`'s keys.
+    /// Report how one worked out with
+    /// [`record_procedure_use`](Agent::record_procedure_use).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a read failure.
+    pub async fn match_procedures(
+        &self,
+        state: &HashMap<String, String>,
+    ) -> Result<Vec<MatchedProcedure>, UnikoError> {
+        match_procedures(&self.kb, state).await
+    }
+
+    /// Record whether following a procedure succeeded. Its effectiveness
+    /// moves with the result, and a procedure that keeps failing is
+    /// demoted out of [`match_procedures`](Agent::match_procedures).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when the procedure does not exist or a write
+    /// fails.
+    pub async fn record_procedure_use(
+        &self,
+        procedure_id: &str,
+        succeeded: bool,
+    ) -> Result<(), UnikoError> {
+        record_procedure_use(
+            &self.kb,
+            procedure_id,
+            succeeded,
+            LifecycleConfig::default(),
+        )
+        .await
     }
 
     /// Run a full consolidation pass for this agent, now: the

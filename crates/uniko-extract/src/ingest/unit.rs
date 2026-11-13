@@ -356,6 +356,7 @@ pub async fn ingest_turns_atomic(
                     category: turn.message.category.as_deref(),
                     source_id: turn.message.source_id.as_deref(),
                     revision_id: turn.message.revision_id.as_deref(),
+                    visibility: turn.message.visibility.as_deref(),
                 };
                 let (obs_nids, sc_updated) = match prepare_observations(inputs).await? {
                     ObservationPrepOutcome::Skip(_) => (Vec::new(), None),

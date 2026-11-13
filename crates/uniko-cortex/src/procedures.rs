@@ -337,6 +337,28 @@ async fn upsert_procedure(
     props.insert("effectiveness".into(), Value::Float(eff));
     if new {
         props.insert("created_at".into(), now.clone());
+        // Recall's phase-1 search finds procedures by their embedding, which
+        // nothing set before, so no procedure could surface in recall.
+        // Embed the description once, on creation; a failure only means
+        // this procedure is reachable by `match_procedures` and not recall.
+        let description =
+            format!("{name}: when {action_a} succeeds it is often followed by {action_b}.");
+        let text = match kb.config().embedding.document_prefix.as_deref() {
+            Some(prefix) => format!("{prefix}{description}"),
+            None => description,
+        };
+        match kb
+            .embed(uniko_store::schema::EMBED_ALIAS, &[text.as_str()])
+            .await
+        {
+            Ok(mut vectors) if !vectors.is_empty() => {
+                props.insert("embedding".into(), Value::Vector(vectors.remove(0)));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, procedure_id, "procedure embedding failed; stored without one");
+            }
+        }
     }
     props.insert("last_used_at".into(), now);
 

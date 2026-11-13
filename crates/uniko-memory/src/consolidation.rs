@@ -235,10 +235,21 @@ pub async fn run_cycle_with(
         return Ok(CycleStats::default());
     }
 
-    // Group by (subject, predicate); collect contributing observations
-    // and object surface forms for canonical selection.
-    let mut groups: HashMap<(String, String), GroupBuilder> = HashMap::new();
+    // Group by (subject, predicate, scope); collect contributing
+    // observations and object surface forms for canonical selection. The
+    // scope is the observation's visibility (`""` for public), so scoped
+    // observations consolidate into Facts held under the same scope and
+    // never merge into, reinforce or contradict a Fact in another scope.
+    // Forgotten observations (`redacted:`) are marked processed below but
+    // derive nothing.
+    let mut groups: HashMap<(String, String, String), GroupBuilder> = HashMap::new();
     for obs in &observations {
+        let scope = uniko_store::operations::facts::scoped_visibility(obs.visibility.as_deref())
+            .unwrap_or("")
+            .to_string();
+        if scope.starts_with("redacted:") {
+            continue;
+        }
         // Normalize the subject in the grouping key so case/punctuation
         // variants ("Melanie" / "melanie" / "Melanie.") consolidate into a
         // single Fact instead of fragmenting. Mirrors `normalize_object`
@@ -247,6 +258,7 @@ pub async fn run_cycle_with(
             .entry((
                 uniko_store::text::normalize_canonical(&obs.subject),
                 obs.predicate.clone(),
+                scope,
             ))
             .or_default();
         entry.contributing.push(obs.node_id);
@@ -273,8 +285,8 @@ pub async fn run_cycle_with(
     // the cluster assignment alongside the votes — F38 must compare
     // in cluster-space, not raw-string space.
     phase("group_observations");
-    let group_keys: Vec<(String, String)> = groups.keys().cloned().collect();
-    let mut group_priors: HashMap<(String, String), Vec<PriorFact>> =
+    let group_keys: Vec<(String, String, String)> = groups.keys().cloned().collect();
+    let mut group_priors: HashMap<(String, String, String), Vec<PriorFact>> =
         match kb.find_stale_open_facts_batched(&group_keys).await {
             Ok(map) => map
                 .into_iter()
@@ -352,6 +364,7 @@ pub async fn run_cycle_with(
     struct FactPlan {
         subject: String,
         predicate: String,
+        scope: String,
         canonical: Option<String>,
         contributing: Vec<NodeId>,
         prior_stale: Vec<(NodeId, Btic, String)>,
@@ -360,9 +373,9 @@ pub async fn run_cycle_with(
     }
 
     let mut plans: Vec<FactPlan> = Vec::with_capacity(groups.len());
-    for ((subject, predicate), group) in groups {
+    for ((subject, predicate, scope), group) in groups {
         let priors = group_priors
-            .remove(&(subject.clone(), predicate.clone()))
+            .remove(&(subject.clone(), predicate.clone(), scope.clone()))
             .unwrap_or_default();
 
         // Build the cluster map for this group from the shared
@@ -425,6 +438,7 @@ pub async fn run_cycle_with(
         plans.push(FactPlan {
             subject,
             predicate,
+            scope,
             canonical,
             contributing: group.contributing,
             prior_stale,
@@ -458,6 +472,7 @@ pub async fn run_cycle_with(
             observation_count: plan.contributing.len() as i64,
             observed_at: plan.first_observed,
             embedding,
+            visibility: (!plan.scope.is_empty()).then(|| plan.scope.clone()),
         })
         .collect();
     let upserts = kb.batch_upsert_facts(upsert_inputs).await?;

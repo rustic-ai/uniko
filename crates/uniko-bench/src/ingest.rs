@@ -187,6 +187,7 @@ pub async fn ingest_into_kb_with_observer(
                 category: None,
                 source_id: None,
                 revision_id: None,
+                visibility: None,
             };
 
             // Atomic ingest: Message + entities + observations in one tx.

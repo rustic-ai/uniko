@@ -841,7 +841,7 @@ pub async fn recall(
             if bundle
                 .items
                 .iter()
-                .any(|i| matches!(i.kind, RecallKind::Fact | RecallKind::Observation))
+                .any(|i| crate::policy::carries_visibility(i.kind))
             {
                 tracing::warn!(
                     "recall() returning policy-scoped items UNFILTERED \

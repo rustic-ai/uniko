@@ -31,6 +31,9 @@ pub struct UnprocessedObs {
     /// source observation had no temporal modifier or used the rule-based
     /// fallback path.
     pub temporal_anchor: Option<DateTime<Utc>>,
+    /// The Observation's visibility, when set. Facts derived from it are
+    /// held under the same scope.
+    pub visibility: Option<String>,
 }
 
 impl KnowledgeBase {
@@ -54,7 +57,8 @@ impl KnowledgeBase {
                       RETURN id(o) AS nid, o.subject AS subject, o.predicate AS predicate, \
                              o.object AS object, o.content AS content, \
                              o.observed_at AS observed_at, \
-                             o.temporal_anchor AS temporal_anchor \
+                             o.temporal_anchor AS temporal_anchor, \
+                             o.visibility AS visibility \
                       ORDER BY o.observed_at ASC \
                       LIMIT $lim";
         let result = session
@@ -133,5 +137,9 @@ fn decode_unprocessed_obs(row: &uni_db::Row) -> Option<UnprocessedObs> {
         content: row.get::<String>("content").unwrap_or_default(),
         observed_at,
         temporal_anchor,
+        visibility: row
+            .get::<String>("visibility")
+            .ok()
+            .filter(|v| !v.is_empty()),
     })
 }

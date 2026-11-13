@@ -3391,3 +3391,279 @@ async fn agent_records_actions_episodes_and_observations() {
     let report = agent.consolidate().await.expect("consolidate");
     assert!(report.cycle.observations_processed >= 1, "{report:?}");
 }
+
+/// A turn scoped with `Turn::visibility` hides its message, chunks and
+/// observations from viewers it does not admit, and stays out of the
+/// session-level chunks.
+#[tokio::test]
+async fn turn_visibility_scopes_the_message_and_what_derives_from_it() {
+    use crate::Visibility;
+
+    let memory = match Uniko::builder().in_memory().scope_to_agent().build().await {
+        Ok(memory) => memory,
+        Err(e) => {
+            eprintln!("skipping: instance unavailable: {e}");
+            return;
+        }
+    };
+    memory.add_team_member("alice", "eng").await.unwrap();
+    let writer = memory.agent("writer");
+    let mut session = writer.session("scoped-session");
+    let scoped = match session
+        .observe(
+            Turn::new("writer", "The zeppelin hangar opens next quarter in Lisbon")
+                .id("scoped-1")
+                .visibility(Visibility::Team("eng".into())),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("observe failed: {e}"),
+    };
+    session
+        .observe(Turn::new("writer", "Lunch is at noon on Friday").id("public-1"))
+        .await
+        .unwrap();
+
+    let kb = writer.kb();
+    let (_, props) = kb
+        .get_node(scoped.message.message_node_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        props.get("visibility"),
+        Some(&Value::String("team:eng".into())),
+        "the message carries the turn's visibility"
+    );
+    for obs in &scoped.message.extracted_observations {
+        let (_, props) = kb.get_node(*obs).await.unwrap().unwrap();
+        assert_eq!(
+            props.get("visibility"),
+            Some(&Value::String("team:eng".into()))
+        );
+    }
+    let mut hidden: Vec<i64> = vec![scoped.message.message_node_id];
+    hidden.extend(&scoped.message.chunk_node_ids);
+    hidden.extend(&scoped.message.extracted_observations);
+
+    let query = "zeppelin hangar Lisbon";
+    let alice = recall_ids(&memory.agent("alice"), query).await.unwrap();
+    assert!(
+        alice.iter().any(|id| hidden.contains(id)),
+        "alice (eng) sees the scoped turn: {alice:?}"
+    );
+    let bob = recall_ids(&memory.agent("bob"), query).await.unwrap();
+    assert!(
+        !bob.iter().any(|id| hidden.contains(id)),
+        "bob sees nothing of it: {bob:?}"
+    );
+
+    // Session-level chunks are built from public turns only.
+    session.finalize().await.expect("finalize");
+    let chunks = kb.query_nodes(labels::CHUNK, None, None).await.unwrap();
+    let transcript_has_public = chunks.iter().any(|(_, p)| {
+        matches!(p.get("chunk_type"), Some(Value::String(t)) if t == "session")
+            && matches!(p.get("text"), Some(Value::String(text)) if text.contains("Lunch"))
+    });
+    assert!(
+        transcript_has_public,
+        "the transcript keeps the public turn"
+    );
+    for (_, props) in &chunks {
+        if let Some(Value::String(text)) = props.get("text")
+            && matches!(props.get("chunk_type"), Some(Value::String(t)) if t == "session" || t == "observation")
+        {
+            assert!(
+                !text.contains("zeppelin"),
+                "a session-level chunk leaked the scoped turn: {text}"
+            );
+        }
+    }
+}
+
+/// Consolidation keeps a scoped observation's fact apart from the public
+/// fact of the same triple.
+#[tokio::test]
+async fn consolidation_keeps_scoped_facts_apart() {
+    use crate::{AddObservationParams, Visibility};
+
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("consolidator");
+    let mut session = agent.session("facts");
+    match session
+        .observe(Turn::new("user", "notes about the budget").id("budget-1"))
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("observe failed: {e}"),
+    }
+    let observe = |visibility: Option<Visibility>| AddObservationParams {
+        message_id: "budget-1".into(),
+        content: "the budget is capped at ten thousand".into(),
+        subject: "budget".into(),
+        predicate: Some("capped_at".into()),
+        object: Some("ten thousand".into()),
+        visibility,
+        ..AddObservationParams::default()
+    };
+    agent.add_observation(observe(None)).await.unwrap();
+    agent
+        .add_observation(observe(Some(Visibility::Private("cfo".into()))))
+        .await
+        .unwrap();
+    agent.consolidate().await.expect("consolidate");
+
+    let facts: Vec<_> = agent
+        .kb()
+        .query_nodes(labels::FACT, None, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|(_, p)| matches!(p.get("predicate"), Some(Value::String(s)) if s == "capped_at"))
+        .collect();
+    let visibilities: Vec<Option<&Value>> =
+        facts.iter().map(|(_, p)| p.get("visibility")).collect();
+    assert_eq!(
+        facts.len(),
+        2,
+        "one public and one scoped fact: {visibilities:?}"
+    );
+    assert!(
+        visibilities.contains(&Some(&Value::String("private:cfo".into()))),
+        "{visibilities:?}"
+    );
+}
+
+/// Procedures learned by `consolidate` are matched and scored through
+/// `Agent`, and carry the embedding recall searches them by.
+#[tokio::test]
+async fn agent_matches_and_scores_learned_procedures() {
+    use crate::RecordEpisodeParams;
+    use chrono::{Duration, Utc};
+
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("planner");
+    let base = Utc::now() - Duration::hours(2);
+    for i in 0..3 {
+        for (offset, action) in [(0, "scan"), (30, "report")] {
+            let result = agent
+                .record_episode(RecordEpisodeParams {
+                    action_type: action.into(),
+                    outcome: Some("success".into()),
+                    timestamp: Some(base + Duration::minutes(i * 5) + Duration::seconds(offset)),
+                    state: Some(serde_json::json!({ "topic": action })),
+                    ..RecordEpisodeParams::default()
+                })
+                .await;
+            match result {
+                Ok(_) => {}
+                Err(e) if is_model_unavailable(&e) => {
+                    eprintln!("skipping: embeddings unavailable");
+                    return;
+                }
+                Err(e) => panic!("record_episode failed: {e}"),
+            }
+        }
+    }
+    let report = agent.consolidate().await.expect("consolidate");
+    assert!(report.procedures.created >= 1, "{report:?}");
+
+    let state = HashMap::from([("last_action_type".to_string(), "scan".to_string())]);
+    let matched = agent.match_procedures(&state).await.expect("match");
+    let procedure = matched
+        .iter()
+        .find(|m| m.name == "scan → report")
+        .expect("the learned procedure matches");
+
+    let (_, props) = agent
+        .kb()
+        .get_node_by_ext_id(labels::PROCEDURE, "procedure_id", &procedure.procedure_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        props.contains_key("embedding"),
+        "new procedures are embedded"
+    );
+
+    agent
+        .record_procedure_use(&procedure.procedure_id, true)
+        .await
+        .expect("record use");
+    let err = agent
+        .record_procedure_use("no-such-procedure", true)
+        .await
+        .unwrap_err();
+    assert!(!err.to_string().is_empty());
+}
+
+/// A `TextExtractor` indexes an image as the text its function returns.
+#[tokio::test]
+async fn text_extractor_indexes_images_as_extracted_text() {
+    use std::sync::Arc;
+
+    use crate::{Modality, TextExtractor};
+
+    let extractor = TextExtractor::new(Modality::Image, |req| {
+        assert_eq!(req.modality, Modality::Image);
+        Ok(format!(
+            "a photo of a red zeppelin over the harbour ({} bytes)",
+            req.bytes.len()
+        ))
+    });
+    let memory = match Uniko::builder()
+        .in_memory()
+        .extractor(Arc::new(extractor))
+        .build()
+        .await
+    {
+        Ok(memory) => memory,
+        Err(e) => {
+            eprintln!("skipping: instance unavailable: {e}");
+            return;
+        }
+    };
+    let agent = memory.agent("viewer");
+    let session = agent.session("photos");
+    // A PNG signature is enough for the MIME sniffer.
+    let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+    let outcome = match session.ingest(IngestSource::bytes(png.to_vec())).await {
+        Ok(outcome) => outcome,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("ingest failed: {e}"),
+    };
+    let IngestOutcome::Artifact(artifact) = outcome else {
+        panic!("an extracted image is an artifact");
+    };
+    assert!(
+        !artifact.chunk_node_ids.is_empty(),
+        "the caption was chunked"
+    );
+
+    let view = agent
+        .data()
+        .artifact(&artifact.artifact_id)
+        .await
+        .unwrap()
+        .expect("artifact view");
+    assert!(view.text.contains("red zeppelin"), "{}", view.text);
+    assert_eq!(view.kind, "image");
+}
