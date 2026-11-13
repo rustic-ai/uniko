@@ -57,7 +57,7 @@ have a `_sync` twin in the **Sync** column; assume the async signature shown and
 the name for the blocking form.
 
 !!! tip "`__version__`"
-    `uniko.__version__` tracks the crate version (currently `0.2.0`), single-sourced from Cargo
+    `uniko.__version__` tracks the crate version (currently `0.4.0`), single-sourced from Cargo
     via `env!("CARGO_PKG_VERSION")` rather than hardcoded. It falls back to the deliberately
     invalid sentinel `"0+unknown"` if the native module fails to expose it.
 
@@ -80,6 +80,9 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
     ```python
     uni = await (uniko.Uniko.builder()
         .path("./data/kb")
+        .config({"recall_limit": 10, "recall_token_budget": 4096})
+        .embedding("bge-small")
+        .reranker(None)
         .llm(uniko.LlmSpec.openai("answerer", "gpt-4o-mini"))
         .streaming(True)
         .scope_to_agent()
@@ -92,12 +95,22 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 | `in_memory` | `@staticmethod in_memory() -> Awaitable[Uniko]` | `in_memory_sync` | Ephemeral, zero-config defaults. |
 | `builder` | `@staticmethod builder() -> UnikoBuilder` | — (sync) | Configure capabilities, then `build()`. |
 | `agent` | `agent(agent_id: str) -> Agent` | — (sync) | Mint an agent identity (cheap). |
-| `config` | `config() -> dict[str, Any]` | — (sync) | The resolved configuration as a dict. |
+| `config` | `config() -> dict[str, Any]` | — (sync) | The full configuration this instance runs with, as nested dicts. |
+| `health` | `health() -> PipelineHealth \| None` | — (sync) | Streaming-pipeline health; `None` without `streaming(True)`. |
+| `add_team_member` | `add_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `add_team_member_sync` | Record a team membership; `False` when already recorded. |
+| `remove_team_member` | `remove_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `remove_team_member_sync` | Remove it; `False` when not recorded. |
+| `add_org_member` | `add_org_member(participant_id: str, org_id: str) -> Awaitable[bool]` | `add_org_member_sync` | Record a direct org membership. |
+| `remove_org_member` | `remove_org_member(participant_id: str, org_id: str) -> Awaitable[bool]` | `remove_org_member_sync` | Remove it. |
+| `add_team_to_org` | `add_team_to_org(team_id: str, org_id: str) -> Awaitable[bool]` | `add_team_to_org_sync` | Put a team in an org; its members get the org. |
+| `remove_team_from_org` | `remove_team_from_org(team_id: str, org_id: str) -> Awaitable[bool]` | `remove_team_from_org_sync` | Take it out again. |
 | `purge` | `purge() -> Awaitable[DeletionReport]` | `purge_sync` | Erase the whole graph (dev/test reset). |
 | `shutdown` | `shutdown() -> Awaitable[None]` | `shutdown_sync` | Drain workers and close. **Consumes the handle.** |
 
-`config()` returns a plain dict with keys: `embedding_model_id`, `embedding_dimensions`,
-`recall_limit`, `recall_token_budget`, `recall_min_score`.
+`config()` returns every configuration field, nested the way the engine holds them
+(`embedding`, `reranker`, `nlp` and `ocr` are sub-dicts), in the same shape
+`UnikoBuilder.config()` accepts, so you can read it, change a value and build with it.
+`embedding.provider_options` is shown as `"<redacted>"` when set, because it can hold API keys.
+The fields and their defaults are listed in the [configuration guide](../guides/configuration.md).
 
 !!! warning "`shutdown` needs sole ownership"
     `shutdown` consumes the handle and requires that all derived `Agent`/`Session` objects are
@@ -122,10 +135,58 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | --- | --- | --- | --- |
 | `path` | `path(path: str) -> UnikoBuilder` | — (sync) | File-backed store at `path`. |
 | `in_memory` | `in_memory() -> UnikoBuilder` | — (sync) | Ephemeral store (default). |
+| `config` | `config(config: dict \| UnikoConfigModel) -> UnikoBuilder` | — (sync) | Base configuration, merged onto the defaults. |
+| `embedding` | `embedding(embedding: str \| dict) -> UnikoBuilder` | — (sync) | Embedding model: a preset name or an `embedding` section. |
+| `reranker` | `reranker(reranker: str \| dict \| None) -> UnikoBuilder` | — (sync) | Reranker: `"bge-base"`, `"minilm"`, a `reranker` section, or `None` for off. |
 | `llm` | `llm(spec: LlmSpec) -> UnikoBuilder` | — (sync) | Generation model — **required for `answer()`**. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
+| `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |
+| `extractor` | `extractor(modality: str, extract: Callable[[ExtractRequest], str]) -> UnikoBuilder` | — (sync) | Index `"image"`, `"audio"` or `"video"` sources as the text `extract` returns. |
 | `build` | `build() -> Awaitable[Uniko]` | `build_sync` | Terminal: produce the `Uniko` instance. |
+
+### Configuration
+
+`config()` takes a dict, or a `uniko.models.UnikoConfigModel`, with any subset of the fields.
+What you leave out keeps its default, nested sections included:
+
+```python
+uni = (uniko.Uniko.builder()
+    .config({"recall_limit": 10, "reranker": {"top_n": 40}})
+    .build_sync())
+```
+
+- **Unknown keys raise `ConfigError`** naming the key, with a suggestion for a near miss
+  (`'recal_limit' (did you mean 'recall_limit'?)`). A wrong value type raises `ConfigError`
+  naming its key, too.
+- **`embedding()` and `reranker()` win** over the matching section of `config()`, whichever is
+  called first.
+- **Validation runs once, at `build()`**: a `reranker.top_n` below `recall_limit`, a queue
+  capacity of `0`, and similar constraints raise `ConfigError` there, not in the setter.
+- **Embedding presets**: `nomic`, `nomic-q`, `minilm`, `bge-small` (the default), `bge-large`,
+  `bge-m3`, `gemma`.
+- **Reopening a store with a different embedding model raises `ConfigError`**. Its vectors were
+  made with the original model and are not comparable with another's.
+- `blob_storage` and `vector_algorithm` are replaced whole rather than merged, since a different
+  variant has different keys: `{"blob_storage": {"kind": "fs", "root": "/data/blobs"}}`.
+
+---
+
+### Extractors
+
+`extractor` lets a model you run index images, audio or video. Uniko calls `extract` with an
+`ExtractRequest` (`modality`, `data` as bytes, `mime`, `path`, `metadata`) and stores the
+returned text as the artifact's content, chunked and embedded like a document; the original
+bytes are not kept. The function runs on a worker thread and holds the GIL only while it
+runs. An exception in it fails that ingest.
+
+```python
+def caption(request: uniko.ExtractRequest) -> str:
+    return my_vision_model.describe(request.data)
+
+memory = uniko.Uniko.builder().extractor("image", caption).build_sync()
+memory.agent("a").session("s").ingest_sync(uniko.IngestSource.from_path("photo.png"))
+```
 
 ---
 
@@ -173,6 +234,7 @@ answer = await agent.answer("when is the deadline?")   # needs .llm(...)
 | --- | --- | --- | --- |
 | `recall` | `recall(query: str) -> Awaitable[ContextBundle]` | `recall_sync` | Ranked, prompt-ready context. |
 | `recall_in` | `recall_in(query: str, scope: Scope) -> Awaitable[ContextBundle]` | `recall_in_sync` | Recall confined to a `Scope`. |
+| `recall_with` | `recall_with(query: str, scope: Scope \| None = None, *, limit=None, token_budget=None, min_score=None, reranker=None, reference_ts=None) -> Awaitable[ContextBundle]` | `recall_with_sync` | Recall with per-call overrides; each `None` keeps the configured value. |
 | `answer` | `answer(question: str) -> Awaitable[Answer]` | `answer_sync` | Recall + the configured LLM. |
 | `answer_in` | `answer_in(question: str, scope: Scope) -> Awaitable[Answer]` | `answer_in_sync` | Scoped `answer`. |
 | `query` | `query(cypher: str) -> Awaitable[list[dict[str, Any]]]` | `query_sync` | Read-only Cypher; mutations rejected. |
@@ -195,6 +257,9 @@ answer = await agent.answer("when is the deadline?")   # needs .llm(...)
 | `run_rule` | `run_rule(name: str, return_cols: list[str], params: dict \| None = None) -> Awaitable[list[dict]]` | `run_rule_sync` | Evaluate a named rule. |
 | `abduce` | `abduce(program: str, params: dict \| None = None) -> Awaitable[AbductionResult]` | `abduce_sync` | Run an abductive program. |
 | `assume` | `assume(assume_block: str) -> AssumeBuilder` | — (sync) | Open a hypothetical-mutation builder. |
+| `list_rules` | `list_rules() -> Awaitable[list[RuleView]]` | `list_rules_sync` | Every rule, stdlib ones included. |
+| `explain_rule` | `explain_rule(name: str) -> Awaitable[RuleView \| None]` | `explain_rule_sync` | A rule's source and state. |
+| `delete_rule` | `delete_rule(name: str) -> Awaitable[bool]` | `delete_rule_sync` | Stop a rule and mark it pruned. Stdlib rules raise `ConfigError`. |
 
 `assume` is synchronous and returns an [`AssumeBuilder`](#assumebuilder); the awaitable lives on the
 builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoning-with-locy.md).
@@ -206,9 +271,66 @@ builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoni
 | `session` | `session(session_id: str) -> Session` | — (sync) | Open a conversation thread. |
 | `delete_session` | `delete_session(session_id: str) -> Awaitable[DeletionReport]` | `delete_session_sync` | Hard-delete a session and cascade. |
 | `finalize_session` | `finalize_session(session_id: str) -> Awaitable[FinalizeReport]` | `finalize_session_sync` | Build/refresh a session's retrieval surfaces without its `Session` handle. |
-| `consolidate` | `consolidate() -> Awaitable[CycleStats]` | `consolidate_sync` | Run one consolidation cycle now: Observations → Facts. |
+| `retire_source` | `retire_source(source_id: str) -> Awaitable[bool]` | `retire_source_sync` | Hide everything recorded under a source id from recall, reversibly. |
+| `restore_source` | `restore_source(source_id: str) -> Awaitable[bool]` | `restore_source_sync` | Undo `retire_source`. |
+| `consolidate` | `consolidate() -> Awaitable[ConsolidationReport]` | `consolidate_sync` | Consolidate now: Observations → Facts, then procedure promotion and topic detection. |
 | `unfinalized_session_ids` | `unfinalized_session_ids() -> Awaitable[list[str]]` | `unfinalized_session_ids_sync` | Sessions with no session-level chunks yet — drives a backfill loop. |
 | `forget_participant` | `forget_participant(participant_id: str) -> Awaitable[DeletionReport]` | `forget_participant_sync` | Forget a participant. |
+
+### Procedures
+
+| Method | Signature | Sync | Description |
+| --- | --- | --- | --- |
+| `match_procedures` | `match_procedures(state: dict[str, str]) -> Awaitable[list[MatchedProcedure]]` | `match_procedures_sync` | Active procedures whose precondition holds, e.g. `{"last_action_type": "search"}`. |
+| `record_procedure_use` | `record_procedure_use(procedure_id: str, succeeded: bool) -> Awaitable[None]` | `record_procedure_use_sync` | Score how following one worked out. |
+
+`consolidate` learns procedures from repeated successful sequences of recorded episodes;
+`MatchedProcedure` has `procedure_id`, `name` and `effectiveness`.
+
+### Facts, actions, episodes, observations
+
+| Method | Signature | Sync | Description |
+| --- | --- | --- | --- |
+| `assert_fact` | `assert_fact(subject, predicate, object=None, *, observed_at=None, supporting_observation_ids=None, visibility=None) -> Awaitable[FactUpsert]` | `assert_fact_sync` | Write a fact directly; asserting an existing triple reinforces it. |
+| `invalidate_fact` | `invalidate_fact(fact_id, *, replacement_fact_id=None, reason=None) -> Awaitable[None]` | `invalidate_fact_sync` | Close a fact's validity interval. |
+| `record_action` | `record_action(action_type, *, action_id, input, output, status, started_at, ended_at, error, triggered_by_message_id, session_id, previous_action_id) -> Awaitable[ActionResult]` | `record_action_sync` | Record a tool call or other action. `input` / `output` are any JSON-shaped value. |
+| `record_episode` | `record_episode(action_type, *, episode_id, outcome, state, delta, importance, timestamp, triggered_by_message_id, involved_action_ids) -> Awaitable[int]` | `record_episode_sync` | Record an outcome; procedure promotion learns from these. |
+| `add_observation` | `add_observation(message_id, content, subject, *, predicate, object, temporal_phrase, temporal_anchor, observed_at, confidence, visibility) -> Awaitable[int]` | `add_observation_sync` | Add an observation anchored to a stored message. |
+| `set_visibility` | `set_visibility(node_id: int, visibility: str) -> Awaitable[bool]` | `set_visibility_sync` | Scope a Fact or Observation. |
+
+All keyword arguments default to `None`. The agent's participant is created if it has not
+spoken yet.
+
+### Visibility
+
+Memory can be scoped to `"public"`, `"private:<participant_id>"`, `"team:<team_id>"` or
+`"org:<org_id>"`: a whole turn with `Turn.visibility`, a single item with the `visibility`
+argument of `assert_fact` and `add_observation`, or an existing Fact or Observation with
+`set_visibility`. Scoped reads then leave out what the reader may not see:
+
+```python
+memory = uniko.Uniko.builder().scope_to_agent().build_sync()
+memory.add_team_member_sync("alice", "eng")
+
+writer = memory.agent("writer")
+writer.add_observation_sync("msg-1", "launch moves to march", "launch", visibility="team:eng")
+
+memory.agent("alice").recall_sync("launch")   # includes it
+memory.agent("bob").recall_sync("launch")     # does not
+```
+
+- **Unscoped reads see everything.** Scope them with `scope_to_agent()`, `scope(Viewer(...))`,
+  or per call with `Scope.as_viewer` / `Scope.as_participant`.
+- **A scoped turn scopes everything drawn from it:** its message, its chunks, its
+  observations, and the facts consolidated from them. Its attachments are not scoped.
+- **Session-level chunks and summaries are built from public turns only,** since one chunk
+  spans many turns. A forgotten turn is left out of them too.
+- **A scoped fact is a separate fact.** The same triple asserted or observed under
+  `team:eng` and publicly gives two facts, so neither reinforces nor contradicts the other.
+  `set_visibility` on an existing fact changes that fact in place.
+- **Forgotten items stay hidden:** `set_visibility` refuses to change them.
+- **An `Agent` resolves its own memberships once,** on its first scoped read. Take a fresh one
+  from `memory.agent(...)` to see a membership change.
 
 ---
 
@@ -240,7 +362,9 @@ assert result.message_node_id > 0
 | `submit_source` | `submit_source(source: IngestSource) -> Awaitable[None]` | `submit_source_sync` | Fire-and-forget streaming doc/blob. |
 | `flush` | `flush() -> Awaitable[None]` | `flush_sync` | Wait for the streaming pipeline to drain. |
 | `finalize` | `finalize() -> Awaitable[FinalizeReport]` | `finalize_sync` | Build/refresh the session-level retrieval surfaces. |
-| `summarize` | `summarize() -> Awaitable[int \| None]` | `summarize_sync` | New summary node id, or `None` if nothing new. |
+| `commit_unit` | `commit_unit(turns: Sequence[Turn]) -> Awaitable[UnitResult]` | `commit_unit_sync` | Several turns as one atomic, idempotent write. |
+| `summarize` | `summarize() -> Awaitable[SummarizeReport]` | `summarize_sync` | Finalize, then write a summary of anything new. |
+| `record_action` | `record_action(action_type, *, ...) -> Awaitable[ActionResult]` | `record_action_sync` | `Agent.record_action`, linked to this session. |
 
 !!! note "Streaming lane requires `streaming(True)`"
     `submit` / `submit_source` are fire-and-forget — they return immediately and process in the
@@ -418,6 +542,7 @@ A `Turn` is reusable — feeding it to `observe`/`submit` does not consume it.
 | `.metadata` | `.metadata(key: str, value: Any)` | Add one metadata entry. |
 | `.attach` | `.attach(source: IngestSource)` | Attach one source. |
 | `.attachments` | `.attachments(sources: list[IngestSource])` | Attach many. |
+| `.visibility` | `.visibility(visibility: str)` | Scope the turn and what derives from it; see [Visibility](#visibility). |
 
 ```python
 turn = (uniko.Turn("alice", "see the attached report")
@@ -457,6 +582,11 @@ Confines reads to a subset of the graph. Chainable.
 | `.participants` | `.participants(participants: list[str])` | Restrict to these participants. |
 | `.since` | `.since(since: datetime)` | Inclusive lower bound. |
 | `.until` | `.until(until: datetime)` | Exclusive upper bound. |
+| `.as_participant` | `.as_participant(participant_id: str)` | Read as this participant, memberships looked up at recall time. |
+| `.as_viewer` | `.as_viewer(viewer: Viewer)` | Read as this explicit viewer. |
+
+`Viewer(participant_id, teams=None, orgs=None)` is a viewer identity with the memberships given
+rather than looked up; it has `participant_id`, `teams` and `orgs` properties.
 
 ```python
 scope = uniko.Scope().sessions(["s1"]).since(cutoff)
@@ -534,7 +664,28 @@ The result of `observe`.
 | `sender_id` | `str \| None` |
 | `extracted_entities` | `list[tuple[int, str]]` |
 | `extracted_observations` | `list[int]` |
-| `attachment_count` | `int` |
+| `attachments` | `list[IngestOutcome]` — one per attachment, in order |
+
+### `UnitResult`
+
+Returned by `Session.commit_unit`. Implements `__len__`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `turns` | `list[ObserveResult]` | One result per turn, in the unit's order. |
+| `was_replay` | `bool` | The unit was already committed with identical content, so nothing was written. |
+
+`message_node_ids()` returns each turn's `message_node_id`, in order.
+
+### `SummarizeReport`
+
+Returned by `Session.summarize`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `summary` | `int \| None` | Node id of the new summary, or `None` when there was nothing new. |
+| `finalize` | `FinalizeReport \| None` | What finalizing the session built first, when that succeeded. |
+| `finalize_error` | `str \| None` | Why finalizing failed, when it did; the summary is still attempted. |
 
 ### `DeletionReport`
 
@@ -560,9 +711,26 @@ Returned by `Session.finalize` and `Agent.finalize_session`.
 | `rebuilt` | `bool` | `True` when this call wrote to the graph; `False` when the surfaces were already current. |
 | `ended_at` | `datetime \| None` | The Session's latest message time, stamped by `finalize`. A Session is *open* while this is null, so finalizing removes it from the inactivity auto-close sweep. |
 
+### `ConsolidationReport`
+
+Returned by `Agent.consolidate`: `cycle` (`CycleStats`), `procedures` (`PromotionReport`:
+`created`, `reinforced`, `promoted`) and `topics` (`TopicReport`: `created`, `updated`,
+`entities_assigned`). Topic detection covers the whole store, not only the agent.
+
+### `FactUpsert`, `ActionResult`, `RuleView`
+
+- `FactUpsert` — from `assert_fact`: `node_id` (for `set_visibility`), `fact_id` (for
+  `invalidate_fact`; a scoped fact's id ends in its visibility), `was_created`,
+  `observation_count`.
+- `ActionResult` — from `record_action`: `action_node`, and `overflow_artifact` when the output
+  was too large to keep inline.
+- `RuleView` — from `list_rules` / `explain_rule`: `name`, `source_type` (`stdlib`, `authored`,
+  `derived`), `status`, `confidence`, and from `explain_rule` the `source` and
+  `natural_language`.
+
 ### `CycleStats`
 
-Returned by `Agent.consolidate`.
+The `cycle` part of a `ConsolidationReport`.
 
 | Field | Type |
 | --- | --- |
@@ -651,8 +819,28 @@ Returned by `Session.ingest`.
 | `artifact_node_id` | `int` |
 | `chunk_node_ids` | `list[int]` |
 | `was_deduplicated` | `bool` |
-| `page_count` | `int \| None` |
-| `extraction_failed` | `bool \| None` |
+| `page_count` | `int \| None` (PDFs) |
+| `extraction_failed` | `bool \| None` (PDFs) |
+| `extraction_error` | `str \| None` — why PDF extraction failed |
+| `page_node_ids` | `list[int]` — the PDF's pages, in order |
+| `block_node_ids` | `list[int]` — the PDF's layout blocks |
+
+### `PipelineHealth`
+
+Returned by `Uniko.health`.
+
+| Field | Type |
+| --- | --- |
+| `ingest` | `WorkerHealth` |
+| `consolidation` | `WorkerHealth` |
+| `llm_circuit` | `"closed" \| "open" \| "half_open"` |
+| `uptime_secs` | `int` |
+
+`WorkerHealth` has `status` (`"healthy"`, `"degraded"`, `"backpressured"` or `"stalled"`),
+`queue_depth`, `queue_capacity`, `items_processed`, `items_failed` and `avg_latency_ms`.
+
+The closed sets of strings the API passes (`GoalView.phase`, `RecallItem.kind`,
+`WorkerHealth.status`, and others) have `Literal` aliases in `uniko.types` for type checking.
 
 ### `AbductionResult`
 
@@ -697,7 +885,7 @@ print(ContextBundle.model_json_schema())               # OpenAPI-ready
 | --- | --- |
 | `uniko.models.outputs` | Pydantic mirrors of the frozen snapshots — `ContextBundle`, `RecallItem`, `Answer`, `ObserveResult`, `FinalizeReport`, `DeletionReport`, the views, and more. Each has a `from_native(native)` classmethod. |
 | `uniko.models.inputs` | Validated input payloads (`extra="forbid"`) — `GoalSpec`, `TaskSpec`, `ScopeSpec`, `TurnSpec`, `IngestSourceSpec`, `LlmSpecModel` — each with `to_native()`. |
-| `uniko.models.config` | `UnikoConfigModel`, mirroring the subset `Uniko.config()` returns. |
+| `uniko.models.config` | `UnikoConfigModel`, the full configuration `Uniko.config()` returns and `UnikoBuilder.config()` accepts, with nested `EmbeddingConfigModel`, `RerankerConfigModel`, `NlpConfigModel` and `OcrConfigModel`. Unknown keys are rejected. |
 | `uniko.models.adapters` | Free functions (`observe`, `ingest`, `recall_in`, `answer_in`, …) that take a native handle, accept specs, and return models. Each has a `*_sync` twin. |
 | `uniko.models.typed` | `TypedUniko`, `TypedUnikoBuilder`, `TypedAgent`, `TypedSession`, `TypedData`, `TypedGoals` — wrapper handles whose snapshot-returning methods hand back Pydantic models. |
 
@@ -749,13 +937,14 @@ Each is an `issubclass` of `UnikoError` and carries a fixed `.kind`.
 | --- | --- | --- |
 | `ConfigError` | `"config"` | `answer()` without an LLM; using a handle after `shutdown`; bad configuration. |
 | `LlmError` | `"llm"` | The generation model failed. |
-| `TimeoutError` | `"timeout"` | An operation timed out. |
+| `UnikoTimeoutError` | `"timeout"` | An operation timed out. |
 | `ConflictError` | `"conflict"` | Transient SSI / antidependency abort — **retriable**. |
 | `UnsupportedError` | `"unsupported"` | No extractor for the modality. |
 
-!!! note "`uniko.TimeoutError`"
-    `uniko.TimeoutError` is a `UnikoError` subclass, distinct from the built-in
-    `builtins.TimeoutError`. Catch `uniko.TimeoutError` (or the base) for engine timeouts.
+!!! note "`UnikoTimeoutError`, formerly `uniko.TimeoutError`"
+    The class was renamed so that `from uniko import *` no longer shadows the built-in
+    `TimeoutError`. `uniko.TimeoutError` still resolves to it, with a `DeprecationWarning`,
+    until the next minor release.
 
 ### Storage-domain errors
 

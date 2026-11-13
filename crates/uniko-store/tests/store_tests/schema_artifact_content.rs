@@ -129,3 +129,88 @@ async fn reopen_with_mismatched_blob_storage_is_hard_error() {
         "expected mismatch error, got: {msg}"
     );
 }
+
+/// Open without prefetching models, so these tests never download one.
+async fn open_no_prefetch(
+    path: &std::path::Path,
+    config: UnikoConfig,
+) -> uniko_store::Result<KnowledgeBase> {
+    KnowledgeBase::open_with_xervo_no_prefetch(path, config, Vec::new()).await
+}
+
+#[tokio::test]
+async fn reopen_with_a_different_embedding_model_is_hard_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().to_path_buf();
+    let original = UnikoConfig::default();
+    {
+        let kb = open_no_prefetch(&path, original.clone())
+            .await
+            .expect("first open");
+        kb.shutdown().await.unwrap();
+    }
+
+    // Same dimensions, different model: the case that would otherwise
+    // mix incompatible vectors silently.
+    let mut swapped = original.clone();
+    swapped.embedding.model_id = format!("{}-other", original.embedding.model_id);
+    let err = open_no_prefetch(&path, swapped)
+        .await
+        .err()
+        .expect("reopening with a different model_id must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("embedding mismatch"), "got: {msg}");
+    assert!(
+        msg.contains(&original.embedding.model_id),
+        "error must name the stored model, got: {msg}"
+    );
+
+    // Different dimensions must fail too, whichever check catches it.
+    let mut wider = original.clone();
+    wider.embedding.dimensions = original.embedding.dimensions * 2;
+    assert!(
+        open_no_prefetch(&path, wider).await.is_err(),
+        "reopening with different dimensions must fail"
+    );
+
+    // The original config still opens.
+    let kb = open_no_prefetch(&path, original)
+        .await
+        .expect("reopen with the original embedding");
+    kb.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reopen_records_embedding_on_a_store_that_predates_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().to_path_buf();
+    let config = UnikoConfig::default();
+    {
+        let kb = open_no_prefetch(&path, config.clone())
+            .await
+            .expect("first open");
+        // Simulate a store written before the identity was recorded.
+        let session = kb.db().session();
+        let tx = session.tx().await.unwrap();
+        tx.query("MATCH (s:KnowledgeBaseStats) SET s.embedding = null")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        kb.shutdown().await.unwrap();
+    }
+
+    {
+        let kb = open_no_prefetch(&path, config.clone())
+            .await
+            .expect("an unrecorded store opens and records its embedding");
+        kb.shutdown().await.unwrap();
+    }
+
+    let mut swapped = config.clone();
+    swapped.embedding.model_id = format!("{}-other", config.embedding.model_id);
+    let err = open_no_prefetch(&path, swapped)
+        .await
+        .err()
+        .expect("once recorded, a different model must fail");
+    assert!(err.to_string().contains("embedding mismatch"), "got: {err}");
+}

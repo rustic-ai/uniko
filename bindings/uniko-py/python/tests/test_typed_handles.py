@@ -104,7 +104,8 @@ async def test_typed_config_model() -> None:
     uni = await TypedUniko.in_memory()
     cfg = uni.config()
     assert isinstance(cfg, UnikoConfigModel)
-    assert isinstance(cfg.embedding_dimensions, int)
+    assert isinstance(cfg.embedding.dimensions, int)
+    assert cfg.embedding.model_id
 
 
 def test_typed_sync_journey() -> None:

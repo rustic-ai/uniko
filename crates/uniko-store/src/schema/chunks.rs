@@ -50,6 +50,8 @@ pub(crate) fn register_labels<'a>(
         // visible; `true` = the owning turn/document was forgotten and the
         // recall post-filter drops this chunk. NULL default → no backfill.
         .property_nullable("redacted", DataType::Bool)
+        // Inherited from the owning Message (mirrors `:Message.visibility`).
+        .property_nullable("visibility", DataType::String)
         // Modality-specific scalars (page_number, time bounds, bbox, …)
         // ride in this JSON bag until a Cypher query needs to filter on
         // one — at which point that field gets promoted to its own

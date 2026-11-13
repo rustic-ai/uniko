@@ -11,9 +11,14 @@
 //!
 //! The policy is applied as a *filter* over the recall cascade's
 //! [`crate::recall::ContextBundle`] just before it's handed to the
-//! caller.  We never query unfiltered visibility from outside this
-//! module; consolidation and ingest write the field and the recall
-//! filter reads it back at assembly time.
+//! caller. [`Visibility`] is the typed form callers write with
+//! `Agent::set_visibility`; deletion writes `redacted:` values, which
+//! hide an item for good.
+//!
+//! Facts and Observations carry visibility, and so do Messages and their
+//! Chunks when the turn was scoped with `Turn::visibility`; the filter
+//! covers all four. Session-level transcript and observation chunks
+//! aggregate many turns, so they are built from public turns only.
 
 use std::collections::HashSet;
 
@@ -85,6 +90,89 @@ impl Viewer {
     }
 }
 
+/// Who may see a Fact or Observation.
+///
+/// Written with [`Agent::set_visibility`](crate::Agent::set_visibility);
+/// recall then drops the item for any viewer it does not admit. `Team`
+/// and `Org` resolve through the memberships recorded with
+/// [`Uniko::add_team_member`](crate::Uniko::add_team_member) and its
+/// siblings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Visibility {
+    /// Every viewer. The default for an item that was never scoped.
+    Public,
+    /// Only the participant with this id.
+    Private(String),
+    /// Members of this team.
+    Team(String),
+    /// Members of this org, directly or through one of its teams.
+    Org(String),
+}
+
+impl Visibility {
+    /// The stored form: `public`, `private:{id}`, `team:{id}`, `org:{id}`.
+    #[must_use]
+    pub fn as_property(&self) -> String {
+        match self {
+            Self::Public => "public".to_string(),
+            Self::Private(id) => format!("private:{id}"),
+            Self::Team(id) => format!("team:{id}"),
+            Self::Org(id) => format!("org:{id}"),
+        }
+    }
+
+    /// Parse the stored form back. An empty value is `Public`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] for an unknown scheme or an empty id.
+    pub fn parse(raw: &str) -> Result<Self, UnikoError> {
+        let raw = raw.trim();
+        if raw.is_empty() || raw == "public" {
+            return Ok(Self::Public);
+        }
+        let (scheme, id) = raw.split_once(':').ok_or_else(|| {
+            UnikoError::Config(format!(
+                "visibility '{raw}': expected public, private:<id>, team:<id> or org:<id>"
+            ))
+        })?;
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(UnikoError::Config(format!(
+                "visibility '{raw}' has an empty id"
+            )));
+        }
+        match scheme {
+            "private" => Ok(Self::Private(id.to_string())),
+            "team" => Ok(Self::Team(id.to_string())),
+            "org" => Ok(Self::Org(id.to_string())),
+            _ => Err(UnikoError::Config(format!(
+                "visibility '{raw}': unknown scheme '{scheme}'"
+            ))),
+        }
+    }
+
+    fn validate(&self) -> Result<(), UnikoError> {
+        match self {
+            Self::Public => Ok(()),
+            Self::Private(id) | Self::Team(id) | Self::Org(id) if id.trim().is_empty() => Err(
+                UnikoError::Config("visibility id must not be empty".to_string()),
+            ),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Set `node_id`'s visibility; see [`Agent::set_visibility`](crate::Agent::set_visibility).
+pub(crate) async fn set_visibility(
+    kb: &KnowledgeBase,
+    node_id: NodeId,
+    visibility: &Visibility,
+) -> Result<bool, UnikoError> {
+    visibility.validate()?;
+    kb.set_visibility(node_id, &visibility.as_property()).await
+}
+
 /// Decide whether a single visibility string admits `viewer`.
 ///
 /// Exposed for callers that want to enforce visibility outside the
@@ -127,7 +215,7 @@ pub async fn filter_bundle(
     let policy_node_ids: Vec<NodeId> = bundle
         .items
         .iter()
-        .filter(|i| matches!(i.kind, RecallKind::Fact | RecallKind::Observation))
+        .filter(|i| carries_visibility(i.kind))
         .map(|i| i.node_id)
         .collect();
     if policy_node_ids.is_empty() {
@@ -200,10 +288,20 @@ fn visibility_for<'a>(
     item: &RecallItem,
     visibilities: &'a std::collections::HashMap<NodeId, String>,
 ) -> Option<&'a String> {
-    if !matches!(item.kind, RecallKind::Fact | RecallKind::Observation) {
+    if !carries_visibility(item.kind) {
         return None;
     }
     visibilities.get(&item.node_id)
+}
+
+/// The recall kinds whose nodes carry a `visibility` property: Facts and
+/// Observations, and Messages and their Chunks scoped by
+/// [`Turn::visibility`](crate::Turn::visibility).
+pub(crate) fn carries_visibility(kind: RecallKind) -> bool {
+    matches!(
+        kind,
+        RecallKind::Fact | RecallKind::Observation | RecallKind::Message | RecallKind::Chunk
+    )
 }
 
 #[cfg(test)]

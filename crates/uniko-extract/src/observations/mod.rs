@@ -194,6 +194,9 @@ pub struct ObservationInputs<'a> {
     pub source_id: Option<&'a str>,
     /// The parent's revision id (issue #41), inherited likewise.
     pub revision_id: Option<&'a str>,
+    /// The parent message's visibility, inherited likewise so a scoped
+    /// turn's observations are scoped too.
+    pub visibility: Option<&'a str>,
 }
 
 /// Output of a successful [`prepare_observations`] call.
@@ -216,6 +219,8 @@ pub struct ObservationPrep {
     pub source_id: Option<String>,
     /// Provenance inherited from the parent message.
     pub revision_id: Option<String>,
+    /// Visibility inherited from the parent message.
+    pub visibility: Option<String>,
 }
 
 impl ObservationPrep {
@@ -370,6 +375,7 @@ pub async fn prepare_observations(
         category: input.category.map(str::to_string),
         source_id: input.source_id.map(str::to_string),
         revision_id: input.revision_id.map(str::to_string),
+        visibility: input.visibility.map(str::to_string),
         all_obs,
         used_model,
         sender_ref,
@@ -406,6 +412,7 @@ pub async fn apply_observations(
         category,
         source_id,
         revision_id,
+        visibility,
         ..
     } = prep;
 
@@ -425,6 +432,9 @@ pub async fn apply_observations(
             }
             if let Some(ref revision_id) = revision_id {
                 props.insert("revision_id".into(), Value::String(revision_id.clone()));
+            }
+            if let Some(ref visibility) = visibility {
+                props.insert("visibility".into(), Value::String(visibility.clone()));
             }
             // Normalize the subject (the grouping/ABOUT key) so it keys
             // identically with Entity names and consolidation grouping. The

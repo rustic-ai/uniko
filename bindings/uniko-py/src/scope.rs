@@ -3,15 +3,80 @@
 
 //! The [`PyScope`] per-call recall scope: dimensional hard-filters.
 //!
-//! Passed to `Agent.recall_in` / `query_in` / `answer_in` to narrow a single
-//! call by session / participant / time. Visibility scoping (`as_viewer`)
-//! needs an async `Viewer` resolution against the store and is deferred; the
-//! instance-level `scope_to_agent` covers the common visibility case.
+//! Passed to `Agent.recall_in` / `recall_with` / `query_in` / `answer_in` to
+//! narrow a single call by session / participant / time.
+//!
+//! [`PyViewer`] is an explicit viewer identity for `Scope.as_viewer` and
+//! `UnikoBuilder.scope`.
 
 use pyo3::prelude::*;
-use uniko_api::tools::Scope;
+use uniko_api::tools::{Scope, Viewer};
 
 use crate::convert::py_to_datetime;
+
+/// A viewer identity: a participant and the teams and orgs it belongs to.
+///
+/// Recall drops every Fact and Observation whose visibility does not admit
+/// it. Pass one to `Scope.as_viewer` for a single call, or to
+/// `UnikoBuilder.scope` for every agent. The memberships are taken as
+/// given; `Scope.as_participant` looks them up instead.
+#[pyclass(name = "Viewer", module = "uniko", frozen)]
+pub struct PyViewer {
+    inner: Viewer,
+}
+
+impl PyViewer {
+    /// The wrapped viewer.
+    pub(crate) fn viewer(&self) -> Viewer {
+        self.inner.clone()
+    }
+}
+
+#[pymethods]
+impl PyViewer {
+    #[new]
+    #[pyo3(signature = (participant_id, teams=None, orgs=None))]
+    fn new(participant_id: String, teams: Option<Vec<String>>, orgs: Option<Vec<String>>) -> Self {
+        Self {
+            inner: Viewer::from_parts(
+                participant_id,
+                teams.unwrap_or_default(),
+                orgs.unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// The participant the viewer is.
+    #[getter]
+    fn participant_id(&self) -> String {
+        self.inner.participant_id.clone()
+    }
+
+    /// Teams the viewer belongs to, sorted.
+    #[getter]
+    fn teams(&self) -> Vec<String> {
+        let mut teams: Vec<String> = self.inner.teams.iter().cloned().collect();
+        teams.sort();
+        teams
+    }
+
+    /// Orgs the viewer belongs to, sorted.
+    #[getter]
+    fn orgs(&self) -> Vec<String> {
+        let mut orgs: Vec<String> = self.inner.orgs.iter().cloned().collect();
+        orgs.sort();
+        orgs
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Viewer(participant_id={:?}, teams={:?}, orgs={:?})",
+            self.inner.participant_id,
+            self.teams(),
+            self.orgs()
+        )
+    }
+}
 
 /// A per-call recall scope: session / participant / time filters.
 #[pyclass(name = "Scope", module = "uniko")]
@@ -78,6 +143,14 @@ impl PyScope {
     /// with `scope_to_agent()`.
     fn as_participant<'py>(slf: PyRef<'py, Self>, participant_id: String) -> PyRef<'py, Self> {
         slf.map(|s| s.as_participant(participant_id));
+        slf
+    }
+
+    /// Scope visibility to an explicit viewer for this call, overriding the
+    /// agent's own scope.
+    fn as_viewer<'py>(slf: PyRef<'py, Self>, viewer: &PyViewer) -> PyRef<'py, Self> {
+        let viewer = viewer.viewer();
+        slf.map(|s| s.as_viewer(viewer));
         slf
     }
 

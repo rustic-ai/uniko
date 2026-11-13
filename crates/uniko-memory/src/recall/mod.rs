@@ -9,8 +9,10 @@
 pub mod intent;
 pub mod mmr;
 pub mod modality;
+mod overrides;
 
 pub use intent::{IntentProfile, build_intent, build_intent_at};
+pub use overrides::RecallOverrides;
 
 use std::collections::HashMap;
 
@@ -839,7 +841,7 @@ pub async fn recall(
             if bundle
                 .items
                 .iter()
-                .any(|i| matches!(i.kind, RecallKind::Fact | RecallKind::Observation))
+                .any(|i| crate::policy::carries_visibility(i.kind))
             {
                 tracing::warn!(
                     "recall() returning policy-scoped items UNFILTERED \

@@ -52,11 +52,14 @@ there are **no API tokens stored in the repo**.
 | `build-sdist` | no | Builds the source distribution. |
 | `build-cuda-linux` | no | Builds the `uniko-cuda` wheel (Linux x86_64, CUDA 13 toolkit). |
 | `build-metal` | no | Builds the `uniko-metal` wheel (macOS arm64). |
+| `smoke-wheels` | no | Installs each base wheel on its platform, imports it, writes one turn and recalls it (`scripts/ci/smoke_wheel.py`). |
+| `smoke-metal` | no | The same for the `uniko-metal` wheel. |
+| `smoke-cuda` | no | Imports the `uniko-cuda` wheel and opens a store inside NVIDIA's CUDA runtime image (no GPU). |
 | `publish-crates` | **yes** | Publishes the 6 crates to crates.io via OIDC, in dependency order. |
-| `publish-pypi-uniko` | **yes** | Publishes the base wheels + sdist to PyPI via OIDC. |
-| `publish-pypi-cuda` | **yes** | Publishes the `uniko-cuda` wheel. |
-| `publish-pypi-metal` | **yes** | Publishes the `uniko-metal` wheel. |
-| `github-release` | **yes** | Creates the GitHub Release and attaches all artifacts. |
+| `publish-pypi-uniko` | **yes** | Publishes the base wheels + sdist to PyPI via OIDC, once `smoke-wheels` passes. |
+| `publish-pypi-cuda` | **yes** | Publishes the `uniko-cuda` wheel, once `smoke-cuda` passes. |
+| `publish-pypi-metal` | **yes** | Publishes the `uniko-metal` wheel, once `smoke-metal` passes. |
+| `github-release` | **yes** | Creates the GitHub Release and attaches all artifacts, once every smoke job passes. |
 | `publish-package-index` | no | Rebuilds the PEP 503 index on the docs site from the Release assets. |
 
 ### Build profile
@@ -260,11 +263,12 @@ artifact is not lost, only one of its three routes is.
 Because the publishes are gated, the safest rehearsal is:
 
 1. Push a pre-release tag, e.g. `git push origin v0.1.0-rc.1`.
-2. Let `validate-crates`, `build-wheels`, and `build-sdist` run.
-3. Download the wheel artifacts from the run and smoke-test locally:
+2. Let `validate-crates`, the wheel builds, `build-sdist` and the smoke jobs
+   run. The smoke jobs install and import every wheel, so a wheel that builds
+   but cannot be imported fails here. To repeat a check locally:
    ```sh
    pip install ./uniko-0.1.0-cp310-abi3-manylinux_2_28_x86_64.whl
-   python -c "import uniko; print(uniko.__version__)"
+   python -I scripts/ci/smoke_wheel.py
    ```
 4. **Do not approve** the `release` environment. Cancel the run (or just leave the
    gated jobs unapproved) and delete the rc tag.

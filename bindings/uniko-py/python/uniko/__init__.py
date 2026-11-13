@@ -29,3 +29,19 @@ __all__ = getattr(
 # is a deliberately-invalid PEP 440 local sentinel (never a hardcoded release
 # number) so a stale/missing export can never masquerade as a real version.
 __version__ = getattr(_uniko, "__version__", "0+unknown")
+
+
+def __getattr__(name: str) -> object:
+    # `uniko.TimeoutError` was renamed `UnikoTimeoutError` so that
+    # `from uniko import *` no longer shadows the builtin `TimeoutError`.
+    # The old name still resolves, with a warning, until the next minor release.
+    if name == "TimeoutError":
+        import warnings
+
+        warnings.warn(
+            "uniko.TimeoutError is deprecated; use uniko.UnikoTimeoutError",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _uniko.UnikoTimeoutError
+    raise AttributeError(f"module 'uniko' has no attribute {name!r}")

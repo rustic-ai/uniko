@@ -48,6 +48,11 @@ pub struct IngestMessage {
     /// changed bytes is rejected.
     #[serde(default)]
     pub revision_id: Option<String>,
+    /// Who may see this message and what is derived from it: its chunks,
+    /// its observations and the facts consolidated from them. One of
+    /// `public`, `private:{id}`, `team:{id}`, `org:{id}`; `None` is public.
+    #[serde(default)]
+    pub visibility: Option<String>,
 }
 
 /// An artifact (file, document, URL) to ingest.

@@ -8,8 +8,19 @@ twin blocks the calling thread and returns the resolved value directly.
 """
 
 import datetime
-from collections.abc import Sequence
-from typing import Any, Awaitable
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Awaitable, final
+
+from uniko.models.config import UnikoConfigModel
+from uniko.types import (
+    CircuitState,
+    GoalPhase,
+    IngestKind,
+    RecallKind,
+    RecallSourceKind,
+    TaskPhase,
+    WorkerStatus,
+)
 
 __version__: str
 
@@ -31,20 +42,22 @@ class UnikoError(Exception):
 
 class ConfigError(UnikoError): ...
 class LlmError(UnikoError): ...
-class TimeoutError(UnikoError): ...
+class UnikoTimeoutError(UnikoError): ...
 class ConflictError(UnikoError): ...
 class IdConflictError(UnikoError): ...
 class UnsupportedError(UnikoError): ...
 
 # ── Output value types (frozen snapshots) ─────────────────────────────────
 
+@final
 class RecallSource:
-    kind: str
+    kind: RecallSourceKind
     message_id: str | None
     artifact_id: str | None
     chunk_id: str | None
     def __repr__(self) -> str: ...
 
+@final
 class RecallItem:
     @property
     def category(self) -> str | None: ...
@@ -53,12 +66,13 @@ class RecallItem:
     @property
     def revision_id(self) -> str | None: ...
     node_id: int
-    kind: str
+    kind: RecallKind
     score: float
     content: str
     sources: list[RecallSource]
     def __repr__(self) -> str: ...
 
+@final
 class ContextBundle:
     items: list[RecallItem]
     total_tokens: int
@@ -68,6 +82,7 @@ class ContextBundle:
     def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
 
+@final
 class Answer:
     text: str
     model: str | None
@@ -78,6 +93,7 @@ class Answer:
     def citations(self) -> list[RecallSource]: ...
     def __repr__(self) -> str: ...
 
+@final
 class ObserveResult:
     message_node_id: int
     chunk_node_ids: list[int]
@@ -86,9 +102,10 @@ class ObserveResult:
     sender_id: str | None
     extracted_entities: list[tuple[int, str]]
     extracted_observations: list[int]
-    attachment_count: int
+    attachments: list[IngestOutcome]
     def __repr__(self) -> str: ...
 
+@final
 class DeletionReport:
     nodes_deleted: int
     edges_deleted: int
@@ -98,6 +115,7 @@ class DeletionReport:
     root_existed: bool
     def __repr__(self) -> str: ...
 
+@final
 class FinalizeReport:
     transcript_chunks: list[int]
     observation_chunks: list[int]
@@ -105,6 +123,7 @@ class FinalizeReport:
     ended_at: datetime.datetime | None
     def __repr__(self) -> str: ...
 
+@final
 class CycleStats:
     observations_processed: int
     facts_created: int
@@ -113,6 +132,7 @@ class CycleStats:
     drift_alerts: int
     def __repr__(self) -> str: ...
 
+@final
 class MessageView:
     message_id: str
     sender_id: str
@@ -123,6 +143,7 @@ class MessageView:
     attachments: list[str]
     def __repr__(self) -> str: ...
 
+@final
 class ArtifactView:
     artifact_id: str
     kind: str
@@ -132,30 +153,33 @@ class ArtifactView:
     attached_to_message: str | None
     def __repr__(self) -> str: ...
 
+@final
 class GoalView:
     goal_id: str
     title: str
     description: str | None
     status: str
-    phase: str
+    phase: GoalPhase
     created_at: datetime.datetime | None
     deadline: datetime.datetime | None
     completed_at: datetime.datetime | None
     metrics: Any | None
     def __repr__(self) -> str: ...
 
+@final
 class TaskView:
     task_id: str
     title: str
     description: str | None
     status: str
-    phase: str
+    phase: TaskPhase
     priority: float | None
     goal_id: str | None
     created_at: datetime.datetime | None
     completed_at: datetime.datetime | None
     def __repr__(self) -> str: ...
 
+@final
 class GoalContext:
     goal: GoalView
     tasks: list[TaskView]
@@ -165,16 +189,115 @@ class GoalContext:
     entities: list[str]
     def __repr__(self) -> str: ...
 
+@final
 class IngestOutcome:
-    kind: str
+    kind: IngestKind
     artifact_id: str
     artifact_node_id: int
     chunk_node_ids: list[int]
     was_deduplicated: bool
     page_count: int | None
     extraction_failed: bool | None
+    extraction_error: str | None
+    page_node_ids: list[int]
+    block_node_ids: list[int]
     def __repr__(self) -> str: ...
 
+@final
+class ConsolidationReport:
+    cycle: CycleStats
+    procedures: PromotionReport
+    topics: TopicReport
+    def __repr__(self) -> str: ...
+
+@final
+class PromotionReport:
+    created: int
+    reinforced: int
+    promoted: int
+    def __repr__(self) -> str: ...
+
+@final
+class TopicReport:
+    created: int
+    updated: int
+    entities_assigned: int
+    def __repr__(self) -> str: ...
+
+@final
+class FactUpsert:
+    node_id: int
+    fact_id: str
+    was_created: bool
+    observation_count: int
+    def __repr__(self) -> str: ...
+
+@final
+class ActionResult:
+    action_node: int
+    overflow_artifact: int | None
+    def __repr__(self) -> str: ...
+
+@final
+class MatchedProcedure:
+    procedure_id: str
+    name: str
+    effectiveness: float
+    def __repr__(self) -> str: ...
+
+@final
+class ExtractRequest:
+    modality: str
+    data: bytes
+    mime: str
+    path: str | None
+    metadata: dict[str, Any]
+    def __repr__(self) -> str: ...
+
+@final
+class RuleView:
+    name: str
+    source_type: str
+    status: str
+    confidence: float
+    source: str | None
+    natural_language: str | None
+    def __repr__(self) -> str: ...
+
+@final
+class UnitResult:
+    turns: list[ObserveResult]
+    was_replay: bool
+    def message_node_ids(self) -> list[int]: ...
+    def __len__(self) -> int: ...
+    def __repr__(self) -> str: ...
+
+@final
+class SummarizeReport:
+    summary: int | None
+    finalize: FinalizeReport | None
+    finalize_error: str | None
+    def __repr__(self) -> str: ...
+
+@final
+class WorkerHealth:
+    status: WorkerStatus
+    queue_depth: int
+    queue_capacity: int
+    items_processed: int
+    items_failed: int
+    avg_latency_ms: float
+    def __repr__(self) -> str: ...
+
+@final
+class PipelineHealth:
+    ingest: WorkerHealth
+    consolidation: WorkerHealth
+    llm_circuit: CircuitState
+    uptime_secs: int
+    def __repr__(self) -> str: ...
+
+@final
 class AbductionResult:
     modifications: list[dict[str, Any]]
     def __len__(self) -> int: ...
@@ -182,6 +305,7 @@ class AbductionResult:
 
 # ── Input / value-object builders ─────────────────────────────────────────
 
+@final
 class LlmSpec:
     @staticmethod
     def openai(alias: str, model_id: str, base_url: str | None = ...) -> LlmSpec: ...
@@ -195,6 +319,7 @@ class LlmSpec:
     ) -> LlmSpec: ...
     def __repr__(self) -> str: ...
 
+@final
 class IngestSource:
     @staticmethod
     def from_text(content: str) -> IngestSource: ...
@@ -210,8 +335,25 @@ class IngestSource:
     def with_source(self, source_id: str) -> IngestSource: ...
     def with_revision(self, revision_id: str) -> IngestSource: ...
 
+@final
+class Viewer:
+    def __new__(
+        cls,
+        participant_id: str,
+        teams: Sequence[str] | None = None,
+        orgs: Sequence[str] | None = None,
+    ) -> Viewer: ...
+    @property
+    def participant_id(self) -> str: ...
+    @property
+    def teams(self) -> list[str]: ...
+    @property
+    def orgs(self) -> list[str]: ...
+    def __repr__(self) -> str: ...
+
+@final
 class Scope:
-    def __init__(self) -> None: ...
+    def __new__(cls) -> Scope: ...
     def sessions(self, sessions: list[str]) -> Scope: ...
     def participants(self, participants: list[str]) -> Scope: ...
     def since(self, since: datetime.datetime) -> Scope: ...
@@ -221,9 +363,11 @@ class Scope:
     def sources(self, sources: Sequence[str]) -> Scope: ...
     def include_superseded(self) -> Scope: ...
     def as_participant(self, participant_id: str) -> Scope: ...
+    def as_viewer(self, viewer: Viewer) -> Scope: ...
 
+@final
 class Turn:
-    def __init__(self, sender_id: str, content: str) -> None: ...
+    def __new__(cls, sender_id: str, content: str) -> Turn: ...
     def id(self, message_id: str) -> Turn: ...
     def content_type(self, content_type: str) -> Turn: ...
     def at(self, timestamp: datetime.datetime) -> Turn: ...
@@ -235,7 +379,9 @@ class Turn:
     def category(self, category: str) -> Turn: ...
     def source(self, source_id: str) -> Turn: ...
     def revision(self, revision_id: str) -> Turn: ...
+    def visibility(self, visibility: str) -> Turn: ...
 
+@final
 class AssumeBuilder:
     def then_query(self, query: str) -> AssumeBuilder: ...
     def param(self, key: str, value: Any) -> AssumeBuilder: ...
@@ -245,6 +391,7 @@ class AssumeBuilder:
 
 # ── Handles ────────────────────────────────────────────────────────────────
 
+@final
 class Data:
     def message(self, message_id: str) -> Awaitable[MessageView | None]: ...
     def message_sync(self, message_id: str) -> MessageView | None: ...
@@ -254,12 +401,13 @@ class Data:
     def artifact_bytes_sync(self, artifact_id: str) -> bytes | None: ...
     def __repr__(self) -> str: ...
 
+@final
 class Goals:
     # Reads.
     def all(self) -> Awaitable[list[GoalView]]: ...
     def all_sync(self) -> list[GoalView]: ...
-    def in_phase(self, phase: str) -> Awaitable[list[GoalView]]: ...
-    def in_phase_sync(self, phase: str) -> list[GoalView]: ...
+    def in_phase(self, phase: GoalPhase) -> Awaitable[list[GoalView]]: ...
+    def in_phase_sync(self, phase: GoalPhase) -> list[GoalView]: ...
     def active(self) -> Awaitable[list[GoalView]]: ...
     def active_sync(self) -> list[GoalView]: ...
     def planned(self) -> Awaitable[list[GoalView]]: ...
@@ -270,8 +418,8 @@ class Goals:
     def get_sync(self, goal_id: str) -> GoalView | None: ...
     def tasks(self) -> Awaitable[list[TaskView]]: ...
     def tasks_sync(self) -> list[TaskView]: ...
-    def tasks_in(self, phase: str) -> Awaitable[list[TaskView]]: ...
-    def tasks_in_sync(self, phase: str) -> list[TaskView]: ...
+    def tasks_in(self, phase: TaskPhase) -> Awaitable[list[TaskView]]: ...
+    def tasks_in_sync(self, phase: TaskPhase) -> list[TaskView]: ...
     def tasks_of(self, goal_id: str) -> Awaitable[list[TaskView]]: ...
     def tasks_of_sync(self, goal_id: str) -> list[TaskView]: ...
     def context(self, goal_id: str) -> Awaitable[GoalContext | None]: ...
@@ -344,6 +492,7 @@ class Goals:
     ) -> int: ...
     def __repr__(self) -> str: ...
 
+@final
 class Session:
     @property
     def session_id(self) -> str: ...
@@ -360,15 +509,47 @@ class Session:
     def finalize(self) -> Awaitable[FinalizeReport]: ...
     def finalize_sync(self) -> FinalizeReport: ...
     async def __aenter__(self) -> Session: ...
-    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> bool: ...
+    async def __aexit__(
+        self, exc_type: object = None, exc: object = None, tb: object = None
+    ) -> bool: ...
     def __enter__(self) -> Session: ...
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool: ...
-    def commit_unit(
-        self, turns: Sequence[Turn]
-    ) -> Awaitable[tuple[list[ObserveResult], bool]]: ...
-    def commit_unit_sync(self, turns: Sequence[Turn]) -> tuple[list[ObserveResult], bool]: ...
-    def summarize(self) -> Awaitable[tuple[int | None, str | None]]: ...
-    def summarize_sync(self) -> tuple[int | None, str | None]: ...
+    def __exit__(
+        self, exc_type: object = None, exc: object = None, tb: object = None
+    ) -> bool: ...
+    def commit_unit(self, turns: Sequence[Turn]) -> Awaitable[UnitResult]: ...
+    def commit_unit_sync(self, turns: Sequence[Turn]) -> UnitResult: ...
+    def record_action(
+        self,
+        action_type: str,
+        *,
+        action_id: str | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
+        status: str | None = None,
+        started_at: datetime.datetime | None = None,
+        ended_at: datetime.datetime | None = None,
+        error: str | None = None,
+        triggered_by_message_id: str | None = None,
+        session_id: str | None = None,
+        previous_action_id: str | None = None,
+    ) -> Awaitable[ActionResult]: ...
+    def record_action_sync(
+        self,
+        action_type: str,
+        *,
+        action_id: str | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
+        status: str | None = None,
+        started_at: datetime.datetime | None = None,
+        ended_at: datetime.datetime | None = None,
+        error: str | None = None,
+        triggered_by_message_id: str | None = None,
+        session_id: str | None = None,
+        previous_action_id: str | None = None,
+    ) -> ActionResult: ...
+    def summarize(self) -> Awaitable[SummarizeReport]: ...
+    def summarize_sync(self) -> SummarizeReport: ...
     def forget_turn(self, message_id: str) -> Awaitable[DeletionReport]: ...
     def forget_turn_sync(self, message_id: str) -> DeletionReport: ...
     def delete_turn(self, message_id: str) -> Awaitable[DeletionReport]: ...
@@ -377,6 +558,7 @@ class Session:
     def delete_document_sync(self, artifact_id: str) -> DeletionReport: ...
     def __repr__(self) -> str: ...
 
+@final
 class Agent:
     @property
     def agent_id(self) -> str: ...
@@ -388,6 +570,28 @@ class Agent:
     def query_sync(self, cypher: str) -> list[dict[str, Any]]: ...
     def recall_in(self, query: str, scope: Scope) -> Awaitable[ContextBundle]: ...
     def recall_in_sync(self, query: str, scope: Scope) -> ContextBundle: ...
+    def recall_with(
+        self,
+        query: str,
+        scope: Scope | None = None,
+        *,
+        limit: int | None = None,
+        token_budget: int | None = None,
+        min_score: float | None = None,
+        reranker: bool | None = None,
+        reference_ts: datetime.datetime | None = None,
+    ) -> Awaitable[ContextBundle]: ...
+    def recall_with_sync(
+        self,
+        query: str,
+        scope: Scope | None = None,
+        *,
+        limit: int | None = None,
+        token_budget: int | None = None,
+        min_score: float | None = None,
+        reranker: bool | None = None,
+        reference_ts: datetime.datetime | None = None,
+    ) -> ContextBundle: ...
     def answer_in(self, question: str, scope: Scope) -> Awaitable[Answer]: ...
     def answer_in_sync(self, question: str, scope: Scope) -> Answer: ...
     def query_in(
@@ -422,24 +626,169 @@ class Agent:
     def restore_source(self, source_id: str) -> Awaitable[bool]: ...
     def retire_source_sync(self, source_id: str) -> bool: ...
     def restore_source_sync(self, source_id: str) -> bool: ...
-    def consolidate(self) -> Awaitable[CycleStats]: ...
-    def consolidate_sync(self) -> CycleStats: ...
+    def consolidate(self) -> Awaitable[ConsolidationReport]: ...
+    def consolidate_sync(self) -> ConsolidationReport: ...
+    def assert_fact(
+        self,
+        subject: str,
+        predicate: str,
+        object: str | None = None,
+        *,
+        observed_at: datetime.datetime | None = None,
+        supporting_observation_ids: Sequence[str] | None = None,
+        visibility: str | None = None,
+    ) -> Awaitable[FactUpsert]: ...
+    def assert_fact_sync(
+        self,
+        subject: str,
+        predicate: str,
+        object: str | None = None,
+        *,
+        observed_at: datetime.datetime | None = None,
+        supporting_observation_ids: Sequence[str] | None = None,
+        visibility: str | None = None,
+    ) -> FactUpsert: ...
+    def invalidate_fact(
+        self,
+        fact_id: str,
+        *,
+        replacement_fact_id: str | None = None,
+        reason: str | None = None,
+    ) -> Awaitable[None]: ...
+    def invalidate_fact_sync(
+        self,
+        fact_id: str,
+        *,
+        replacement_fact_id: str | None = None,
+        reason: str | None = None,
+    ) -> None: ...
+    def record_action(
+        self,
+        action_type: str,
+        *,
+        action_id: str | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
+        status: str | None = None,
+        started_at: datetime.datetime | None = None,
+        ended_at: datetime.datetime | None = None,
+        error: str | None = None,
+        triggered_by_message_id: str | None = None,
+        session_id: str | None = None,
+        previous_action_id: str | None = None,
+    ) -> Awaitable[ActionResult]: ...
+    def record_action_sync(
+        self,
+        action_type: str,
+        *,
+        action_id: str | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
+        status: str | None = None,
+        started_at: datetime.datetime | None = None,
+        ended_at: datetime.datetime | None = None,
+        error: str | None = None,
+        triggered_by_message_id: str | None = None,
+        session_id: str | None = None,
+        previous_action_id: str | None = None,
+    ) -> ActionResult: ...
+    def record_episode(
+        self,
+        action_type: str,
+        *,
+        episode_id: str | None = None,
+        outcome: str | None = None,
+        state: Any | None = None,
+        delta: Any | None = None,
+        importance: float | None = None,
+        timestamp: datetime.datetime | None = None,
+        triggered_by_message_id: str | None = None,
+        involved_action_ids: Sequence[str] | None = None,
+    ) -> Awaitable[int]: ...
+    def record_episode_sync(
+        self,
+        action_type: str,
+        *,
+        episode_id: str | None = None,
+        outcome: str | None = None,
+        state: Any | None = None,
+        delta: Any | None = None,
+        importance: float | None = None,
+        timestamp: datetime.datetime | None = None,
+        triggered_by_message_id: str | None = None,
+        involved_action_ids: Sequence[str] | None = None,
+    ) -> int: ...
+    def add_observation(
+        self,
+        message_id: str,
+        content: str,
+        subject: str,
+        *,
+        predicate: str | None = None,
+        object: str | None = None,
+        temporal_phrase: str | None = None,
+        temporal_anchor: datetime.datetime | None = None,
+        observed_at: datetime.datetime | None = None,
+        confidence: float | None = None,
+        visibility: str | None = None,
+    ) -> Awaitable[int]: ...
+    def add_observation_sync(
+        self,
+        message_id: str,
+        content: str,
+        subject: str,
+        *,
+        predicate: str | None = None,
+        object: str | None = None,
+        temporal_phrase: str | None = None,
+        temporal_anchor: datetime.datetime | None = None,
+        observed_at: datetime.datetime | None = None,
+        confidence: float | None = None,
+        visibility: str | None = None,
+    ) -> int: ...
+    def set_visibility(self, node_id: int, visibility: str) -> Awaitable[bool]: ...
+    def set_visibility_sync(self, node_id: int, visibility: str) -> bool: ...
+    def list_rules(self) -> Awaitable[list[RuleView]]: ...
+    def list_rules_sync(self) -> list[RuleView]: ...
+    def explain_rule(self, name: str) -> Awaitable[RuleView | None]: ...
+    def explain_rule_sync(self, name: str) -> RuleView | None: ...
+    def delete_rule(self, name: str) -> Awaitable[bool]: ...
+    def delete_rule_sync(self, name: str) -> bool: ...
+    def match_procedures(
+        self, state: Mapping[str, str]
+    ) -> Awaitable[list[MatchedProcedure]]: ...
+    def match_procedures_sync(
+        self, state: Mapping[str, str]
+    ) -> list[MatchedProcedure]: ...
+    def record_procedure_use(
+        self, procedure_id: str, succeeded: bool
+    ) -> Awaitable[None]: ...
+    def record_procedure_use_sync(self, procedure_id: str, succeeded: bool) -> None: ...
     def unfinalized_session_ids(self) -> Awaitable[list[str]]: ...
     def unfinalized_session_ids_sync(self) -> list[str]: ...
     def forget_participant(self, participant_id: str) -> Awaitable[DeletionReport]: ...
     def forget_participant_sync(self, participant_id: str) -> DeletionReport: ...
     def __repr__(self) -> str: ...
 
+@final
 class UnikoBuilder:
     def path(self, path: str) -> UnikoBuilder: ...
     def in_memory(self) -> UnikoBuilder: ...
+    def config(self, config: Mapping[str, Any] | UnikoConfigModel) -> UnikoBuilder: ...
+    def embedding(self, embedding: str | Mapping[str, Any]) -> UnikoBuilder: ...
+    def reranker(self, reranker: str | Mapping[str, Any] | None) -> UnikoBuilder: ...
     def llm(self, spec: LlmSpec) -> UnikoBuilder: ...
     def streaming(self, on: bool) -> UnikoBuilder: ...
     def scope_to_agent(self) -> UnikoBuilder: ...
+    def scope(self, viewer: Viewer | None) -> UnikoBuilder: ...
+    def extractor(
+        self, modality: str, extract: Callable[[ExtractRequest], str]
+    ) -> UnikoBuilder: ...
     def build(self) -> Awaitable[Uniko]: ...
     def build_sync(self) -> Uniko: ...
     def __repr__(self) -> str: ...
 
+@final
 class Uniko:
     @staticmethod
     def open(path: str) -> Awaitable[Uniko]: ...
@@ -453,6 +802,23 @@ class Uniko:
     def builder() -> UnikoBuilder: ...
     def agent(self, agent_id: str) -> Agent: ...
     def config(self) -> dict[str, Any]: ...
+    def health(self) -> PipelineHealth | None: ...
+    def add_team_member(self, participant_id: str, team_id: str) -> Awaitable[bool]: ...
+    def add_team_member_sync(self, participant_id: str, team_id: str) -> bool: ...
+    def remove_team_member(
+        self, participant_id: str, team_id: str
+    ) -> Awaitable[bool]: ...
+    def remove_team_member_sync(self, participant_id: str, team_id: str) -> bool: ...
+    def add_org_member(self, participant_id: str, org_id: str) -> Awaitable[bool]: ...
+    def add_org_member_sync(self, participant_id: str, org_id: str) -> bool: ...
+    def remove_org_member(
+        self, participant_id: str, org_id: str
+    ) -> Awaitable[bool]: ...
+    def remove_org_member_sync(self, participant_id: str, org_id: str) -> bool: ...
+    def add_team_to_org(self, team_id: str, org_id: str) -> Awaitable[bool]: ...
+    def add_team_to_org_sync(self, team_id: str, org_id: str) -> bool: ...
+    def remove_team_from_org(self, team_id: str, org_id: str) -> Awaitable[bool]: ...
+    def remove_team_from_org_sync(self, team_id: str, org_id: str) -> bool: ...
     def purge(self) -> Awaitable[DeletionReport]: ...
     def purge_sync(self) -> DeletionReport: ...
     def shutdown(self) -> Awaitable[None]: ...
@@ -477,6 +843,21 @@ __all__ = [
     "Answer",
     "ObserveResult",
     "DeletionReport",
+    "FinalizeReport",
+    "CycleStats",
+    "UnitResult",
+    "SummarizeReport",
+    "PipelineHealth",
+    "WorkerHealth",
+    "ConsolidationReport",
+    "PromotionReport",
+    "TopicReport",
+    "FactUpsert",
+    "ActionResult",
+    "RuleView",
+    "MatchedProcedure",
+    "ExtractRequest",
+    "Viewer",
     "MessageView",
     "ArtifactView",
     "GoalView",
@@ -487,7 +868,7 @@ __all__ = [
     "UnikoError",
     "ConfigError",
     "LlmError",
-    "TimeoutError",
+    "UnikoTimeoutError",
     "ConflictError",
     "IdConflictError",
     "UnsupportedError",

@@ -248,6 +248,7 @@ pub async fn ingest_message_atomic(
                 category: msg.category.as_deref(),
                 source_id: msg.source_id.as_deref(),
                 revision_id: msg.revision_id.as_deref(),
+                visibility: msg.visibility.as_deref(),
             };
             let obs_outcome = prepare_observations(inputs).await?;
             let (extracted_observations, sentence_ctx_updated) = match obs_outcome {

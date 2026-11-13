@@ -49,6 +49,11 @@ pub struct FactUpsertInput {
     pub observed_at: DateTime<Utc>,
     /// Pre-computed embedding from Layer 2, or `None` to store without.
     pub embedding: Option<Vec<f32>>,
+    /// The Fact's visibility (`private:{id}`, `team:{id}`, `org:{id}`), or
+    /// `None` / `"public"` for a public Fact. A scoped Fact is a separate
+    /// node from the public Fact of the same triple; see
+    /// [`fact_id_for_scoped`].
+    pub visibility: Option<String>,
 }
 
 /// Build the deterministic external `fact_id` for a triple.
@@ -65,6 +70,35 @@ pub fn fact_id_for(subject: &str, predicate: &str, object: Option<&str>) -> Stri
         predicate.to_ascii_lowercase(),
         object.unwrap_or("").to_ascii_lowercase(),
     )
+}
+
+/// The external `fact_id` for a triple held under `visibility`.
+///
+/// A public triple (no visibility, `""` or `"public"`) keeps
+/// [`fact_id_for`]'s id. A scoped one appends its visibility, so the same
+/// triple asserted privately and publicly are two Facts: reinforcing or
+/// contradicting one never touches the other, and the scoped one's
+/// existence never surfaces through the public one.
+pub fn fact_id_for_scoped(
+    subject: &str,
+    predicate: &str,
+    object: Option<&str>,
+    visibility: Option<&str>,
+) -> String {
+    let base = fact_id_for(subject, predicate, object);
+    match scoped_visibility(visibility) {
+        Some(v) => format!("{base}|{v}"),
+        None => base,
+    }
+}
+
+/// `visibility` when it scopes a Fact, `None` when it is public.
+#[must_use]
+pub fn scoped_visibility(visibility: Option<&str>) -> Option<&str> {
+    match visibility.map(str::trim) {
+        None | Some("" | "public") => None,
+        Some(v) => Some(v),
+    }
 }
 
 /// Laplace-smoothed confidence: `(n + 1) / (n + 2)`.
@@ -116,7 +150,38 @@ impl KnowledgeBase {
         observed_at: DateTime<Utc>,
         embedding: Option<Vec<f32>>,
     ) -> Result<FactUpsert> {
-        let fact_id = fact_id_for(subject, predicate, object);
+        self.upsert_scoped_fact_by_triple(
+            subject,
+            predicate,
+            object,
+            observation_count,
+            observed_at,
+            embedding,
+            None,
+        )
+        .await
+    }
+
+    /// [`upsert_fact_by_triple`](Self::upsert_fact_by_triple) for a Fact
+    /// held under `visibility`. A scoped Fact is keyed apart from the
+    /// public Fact of the same triple ([`fact_id_for_scoped`]) and carries
+    /// the visibility from creation.
+    ///
+    /// # Errors
+    ///
+    /// As for [`upsert_fact_by_triple`](Self::upsert_fact_by_triple).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_scoped_fact_by_triple(
+        &self,
+        subject: &str,
+        predicate: &str,
+        object: Option<&str>,
+        observation_count: i64,
+        observed_at: DateTime<Utc>,
+        embedding: Option<Vec<f32>>,
+        visibility: Option<&str>,
+    ) -> Result<FactUpsert> {
+        let fact_id = fact_id_for_scoped(subject, predicate, object, visibility);
 
         // Serialize concurrent upserts of the same triple.  Without
         // this, two callers can both observe the same prior count and
@@ -197,6 +262,9 @@ impl KnowledgeBase {
         if let Some(vec) = embedding {
             props.insert("embedding".into(), Value::Vector(vec));
         }
+        if let Some(v) = scoped_visibility(visibility) {
+            props.insert("visibility".into(), Value::String(v.to_string()));
+        }
 
         let nid = self.create_node(labels::FACT, &props).await?;
         Ok(FactUpsert {
@@ -274,7 +342,14 @@ impl KnowledgeBase {
         // Pre-compute fact_ids once; reused across phases.
         let fact_ids: Vec<String> = inputs
             .iter()
-            .map(|i| fact_id_for(&i.subject, &i.predicate, i.object.as_deref()))
+            .map(|i| {
+                fact_id_for_scoped(
+                    &i.subject,
+                    &i.predicate,
+                    i.object.as_deref(),
+                    i.visibility.as_deref(),
+                )
+            })
             .collect();
 
         // Within-batch dedup by fact_id. Multiple input rows can map
@@ -441,6 +516,9 @@ impl KnowledgeBase {
                 );
                 if let Some(vec) = canon.embedding.clone() {
                     props.insert("embedding".into(), Value::Vector(vec));
+                }
+                if let Some(v) = scoped_visibility(canon.visibility.as_deref()) {
+                    props.insert("visibility".into(), Value::String(v.to_string()));
                 }
                 new_props.push(props);
                 new_fids_in_order.push(fid.clone());
@@ -735,45 +813,51 @@ impl KnowledgeBase {
     /// `MATCH (f) WHERE id(f) = $vid RETURN f.object` that the
     /// per-group caller would otherwise need).
     ///
-    /// Result map: each `(subject, predicate)` key in the input maps
-    /// to the open-BTIC Facts matching it. Keys with no open Facts
-    /// are absent from the map (caller should treat absence as empty).
+    /// Each key is `(subject, predicate, scope)`, where `scope` is a
+    /// Fact visibility or `""` for public. Only Facts held under that
+    /// scope match, so a scoped observation never reinforces or
+    /// contradicts a Fact in another scope. Keys with no open Facts are
+    /// absent from the map (caller should treat absence as empty).
     ///
     /// # Errors
     ///
     /// Returns [`UnikoError::Storage`] on database failure.
     pub async fn find_stale_open_facts_batched(
         &self,
-        keys: &[(String, String)],
-    ) -> Result<HashMap<(String, String), Vec<(NodeId, Btic, String)>>> {
+        keys: &[(String, String, String)],
+    ) -> Result<HashMap<(String, String, String), Vec<(NodeId, Btic, String)>>> {
         use std::collections::hash_map::Entry;
 
         if keys.is_empty() {
             return Ok(HashMap::new());
         }
 
-        // Build the UNWIND list as `[{subject, predicate}, …]`.
+        // Build the UNWIND list as `[{subject, predicate, scope}, …]`.
         let list: Vec<Value> = keys
             .iter()
-            .map(|(s, p)| {
-                let mut m = HashMap::with_capacity(2);
+            .map(|(s, p, scope)| {
+                let mut m = HashMap::with_capacity(3);
                 m.insert("subject".to_string(), Value::String(s.clone()));
                 m.insert("predicate".to_string(), Value::String(p.clone()));
+                m.insert("scope".to_string(), Value::String(scope.clone()));
                 Value::Map(m)
             })
             .collect();
 
         // Bare `f.valid_at AS valid_at` projection returns the raw
         // `Value::Temporal(Btic{..})` — same readback shape as
-        // `batch_upsert_facts`.
+        // `batch_upsert_facts`. The scope is matched in Rust, where
+        // `""` and `"public"` normalize together.
         let cypher = "UNWIND $keys AS k \
                       MATCH (f:Fact) \
                       WHERE f.subject = k.subject \
                         AND f.predicate = k.predicate \
                         AND btic_is_unbounded(f.valid_at) \
                       RETURN k.subject AS subject, k.predicate AS predicate, \
+                             k.scope AS scope, \
                              id(f) AS nid, f.object AS obj, \
-                             f.valid_at AS valid_at";
+                             f.valid_at AS valid_at, \
+                             coalesce(f.visibility, '') AS vis";
 
         let session = self.db.session();
         let result = session
@@ -783,7 +867,7 @@ impl KnowledgeBase {
             .await?;
 
         type FactRow = (NodeId, Btic, String);
-        let mut out: HashMap<(String, String), Vec<FactRow>> = HashMap::new();
+        let mut out: HashMap<(String, String, String), Vec<FactRow>> = HashMap::new();
         for row in result.rows() {
             let Ok(subject) = row.get::<String>("subject") else {
                 continue;
@@ -791,6 +875,11 @@ impl KnowledgeBase {
             let Ok(predicate) = row.get::<String>("predicate") else {
                 continue;
             };
+            let scope: String = row.get::<String>("scope").unwrap_or_default();
+            let vis: String = row.get::<String>("vis").unwrap_or_default();
+            if scoped_visibility(Some(&vis)).unwrap_or("") != scope {
+                continue;
+            }
             let Ok(nid) = row.get::<i64>("nid") else {
                 continue;
             };
@@ -799,7 +888,7 @@ impl KnowledgeBase {
                 continue;
             };
 
-            match out.entry((subject, predicate)) {
+            match out.entry((subject, predicate, scope)) {
                 Entry::Vacant(e) => {
                     e.insert(vec![(nid, btic, obj)]);
                 }

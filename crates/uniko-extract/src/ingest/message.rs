@@ -89,6 +89,9 @@ pub(crate) async fn apply_message_writes_in_tx(
     if let Some(ref revision_id) = msg.revision_id {
         props.insert("revision_id".into(), Value::String(revision_id.clone()));
     }
+    if let Some(ref visibility) = msg.visibility {
+        props.insert("visibility".into(), Value::String(visibility.clone()));
+    }
     let message_nid = kb.create_node_in_tx(tx, "Message", &props).await?;
     let create_ms = create_start.elapsed().as_millis();
 
@@ -156,6 +159,7 @@ pub(crate) async fn apply_message_writes_in_tx(
                 category: msg.category.as_deref(),
                 source_id: msg.source_id.as_deref(),
                 revision_id: msg.revision_id.as_deref(),
+                visibility: msg.visibility.as_deref(),
             },
         )
         .await?
@@ -341,6 +345,8 @@ pub struct ChunkProvenance<'a> {
     /// The parent's revision id (issue #41), so a superseded revision's
     /// chunks stop grounding current answers along with it.
     pub revision_id: Option<&'a str>,
+    /// The parent's visibility, so a scoped turn's chunks are scoped too.
+    pub visibility: Option<&'a str>,
 }
 
 pub async fn create_chunks_in_tx(
@@ -379,6 +385,9 @@ pub async fn create_chunks_in_tx(
             }
             if let Some(revision_id) = prov.revision_id {
                 props.insert("revision_id".into(), Value::String(revision_id.to_string()));
+            }
+            if let Some(visibility) = prov.visibility {
+                props.insert("visibility".into(), Value::String(visibility.to_string()));
             }
             if let Some(ref sym) = c.symbol_name {
                 props.insert("symbol_name".into(), Value::String(sym.clone()));
@@ -495,6 +504,7 @@ mod tests {
             category: None,
             source_id: None,
             revision_id: None,
+            visibility: None,
         };
         let mut ctx = SessionContext::new(msg.session_id.clone(), 0);
 

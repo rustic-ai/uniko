@@ -465,6 +465,7 @@ pub async fn ingest_artifact_in_tx(
             category: prep.category.as_deref(),
             source_id: prep.source_id.as_deref(),
             revision_id: prep.revision_id.as_deref(),
+            visibility: None,
         },
     )
     .await?;

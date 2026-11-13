@@ -20,6 +20,14 @@ fn facade_entry_points_are_exported() {
     assert_exists::<uniko_api::tools::LlmSpec>();
     assert_exists::<uniko_api::tools::RecallScope>();
     assert_exists::<uniko_api::tools::ContextBundle>();
+    assert_exists::<uniko_api::tools::RecallOverrides>();
+    assert_exists::<uniko_api::tools::RerankerConfig>();
+    assert_exists::<uniko_api::tools::PipelineHealth>();
+    assert_exists::<uniko_api::tools::WorkerHealth>();
+    assert_exists::<uniko_api::tools::WorkerStatus>();
+    assert_exists::<uniko_api::tools::CircuitState>();
+    assert_exists::<uniko_api::tools::TurnUnit>();
+    assert_exists::<uniko_api::tools::UnitResult>();
     assert_exists::<uniko_api::tools::Answer>();
     // Recall item provenance: typed kind + source lineage.
     assert_exists::<uniko_api::tools::RecallItem>();

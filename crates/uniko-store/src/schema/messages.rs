@@ -32,6 +32,10 @@ pub(crate) fn register_labels<'a>(
         // turn was forgotten and the recall post-filter drops it. NULL
         // default means no backfill migration is needed.
         .property_nullable("redacted", DataType::Bool)
+        // Who may see the turn (`public`, `private:{id}`, `team:{id}`,
+        // `org:{id}`); null = public. The recall post-filter applies it as
+        // it does to Facts and Observations. NULL default → no backfill.
+        .property_nullable("visibility", DataType::String)
         .property_nullable(
             "embedding",
             DataType::Vector {

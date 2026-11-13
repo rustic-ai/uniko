@@ -14,13 +14,17 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use tokio::sync::Mutex;
-use uniko_api::tools::{NodeId, Session, Turn};
+use uniko_api::tools::{Session, Turn};
 
+use crate::agent::action_args;
 use crate::convert;
 use crate::errors::to_pyerr;
 use crate::ingest::PyIngestSource;
-use crate::macros::{bridge, bridge_sync};
-use crate::outputs::{PyDeletionReport, PyFinalizeReport, PyIngestOutcome, PyObserveResult};
+use crate::macros::{bridge, bridge_sync, pymethods_with_sync};
+use crate::outputs::{
+    PyActionResult, PyDeletionReport, PyFinalizeReport, PyIngestOutcome, PyObserveResult,
+    PySummarizeReport, PyUnitResult,
+};
 
 /// One conversation turn to feed into a [`PySession`].
 ///
@@ -77,6 +81,16 @@ impl PyTurn {
     fn category<'py>(slf: PyRef<'py, Self>, category: String) -> PyRef<'py, Self> {
         slf.map(|t| t.category(category));
         slf
+    }
+
+    /// Scope who may see this turn: `"public"`, `"private:<id>"`,
+    /// `"team:<id>"` or `"org:<id>"`. Covers its message, chunks,
+    /// observations and the facts consolidated from them, not attachments.
+    fn visibility<'py>(slf: PyRef<'py, Self>, visibility: &str) -> PyResult<PyRef<'py, Self>> {
+        let visibility =
+            uniko_api::tools::Visibility::parse(visibility).map_err(crate::errors::to_pyerr)?;
+        slf.map(|t| t.visibility(visibility));
+        Ok(slf)
     }
 
     /// Attribute this turn to a stable logical source id (issue #39).
@@ -170,367 +184,274 @@ impl PySession {
     }
 }
 
-#[pymethods]
-impl PySession {
-    /// The session's external identifier.
-    #[getter]
-    fn session_id(&self) -> &str {
-        &self.session_id
-    }
+pymethods_with_sync! {
+    PySession;
+    plain {
+        /// The session's external identifier.
+        #[getter]
+        fn session_id(&self) -> &str {
+            &self.session_id
+        }
+        // ── Context-manager support ────────────────────────────────────────
+        //
+        // `async with agent.session("s") as s:` finalizes on exit, so the
+        // session-level retrieval surfaces get built without the caller having
+        // to remember. Exit is best-effort: a chunking failure must not mask
+        // whatever exception is already propagating out of the block.
 
-    /// Ingest one turn durably, committing before returning.
-    ///
-    /// The write is immediately visible to recall (read-after-write).
-    fn observe<'py>(&self, py: Python<'py>, turn: &PyTurn) -> PyResult<Bound<'py, PyAny>> {
-        let turn = turn.snapshot()?;
-        bridge!(py, session = self.inner.clone(), {
-            let mut guard = session.lock().await;
-            let result = guard.observe(turn).await.map_err(to_pyerr)?;
-            Python::attach(|py| PyObserveResult::from_rust(py, &result))
-        })
-    }
+        fn __aenter__<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+            let this: Py<Self> = slf.into();
+            pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(this) })
+        }
 
-    /// Record several related turns as ONE durable, idempotent unit.
-    ///
-    /// Every turn, and every attachment on them, lands in a single
-    /// transaction: either the whole unit is visible to later recall or none
-    /// of it is. Two separate `observe` calls cannot give that — an
-    /// interruption between them leaves a question with no answer.
-    ///
-    /// Resolves to `(observe_results, was_replay)`. `was_replay` is true when
-    /// every id was already present with identical content, so nothing was
-    /// written.
-    ///
-    /// Reusing an id with different content, repeating an id inside one unit,
-    /// or submitting a unit that is only partly recorded raises
-    /// `IdConflictError`.
-    fn commit_unit<'py>(
-        &self,
-        py: Python<'py>,
-        turns: Vec<PyRef<'_, PyTurn>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        // Snapshot before entering the async block: PyO3 refs are not Send.
-        let turns: Vec<_> = turns
-            .iter()
-            .map(|t| t.snapshot())
-            .collect::<PyResult<_>>()?;
-        bridge!(py, session = self.inner.clone(), {
-            let mut guard = session.lock().await;
-            let result = guard.commit_unit(turns).await.map_err(to_pyerr)?;
-            Python::attach(|py| {
-                let turns: Vec<_> = result
-                    .turns
-                    .iter()
-                    .map(|r| PyObserveResult::from_rust(py, r))
-                    .collect::<PyResult<_>>()?;
-                Ok((turns, result.was_replay))
+        #[pyo3(signature = (exc_type=None, exc=None, tb=None))]
+        fn __aexit__<'py>(
+            &self,
+            py: Python<'py>,
+            exc_type: Option<Py<PyAny>>,
+            exc: Option<Py<PyAny>>,
+            tb: Option<Py<PyAny>>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let (_, _, _) = (exc_type, exc, tb);
+            bridge!(py, session = self.inner.clone(), {
+                let guard = session.lock().await;
+                if let Err(e) = guard.finalize().await {
+                    eprintln!("uniko: session __aexit__ finalize failed: {e}");
+                }
+                // Never suppress an in-flight exception.
+                Ok(false)
             })
-        })
-    }
+        }
 
-    /// Ingest a standalone document/blob into this session (not a turn).
-    fn ingest<'py>(&self, py: Python<'py>, source: &PyIngestSource) -> PyResult<Bound<'py, PyAny>> {
-        let src = source.snapshot()?;
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let outcome = guard.ingest(src).await.map_err(to_pyerr)?;
-            Python::attach(|py| PyIngestOutcome::from_rust(py, &outcome))
-        })
-    }
+        fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+            slf
+        }
 
-    /// Submit a turn to the streaming pipeline (fire-and-forget).
-    ///
-    /// Requires the instance to be built with `streaming(True)`.
-    fn submit<'py>(&self, py: Python<'py>, turn: &PyTurn) -> PyResult<Bound<'py, PyAny>> {
-        let turn = turn.snapshot()?;
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            guard.submit(turn).await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    /// Submit a standalone document/blob to the streaming pipeline.
-    fn submit_source<'py>(
-        &self,
-        py: Python<'py>,
-        source: &PyIngestSource,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let src = source.snapshot()?;
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            guard.submit_source(src).await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    /// Wait for all submitted work in this session to finish.
-    fn flush<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            guard.flush().await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    /// Build (or refresh) this session's session-level retrieval surfaces.
-    ///
-    /// Chunks the whole transcript and aggregates the session's observations
-    /// into dense chunks wired to the entities and participants they mention.
-    /// These are what session-scoped recall and the Phase 1 session boost
-    /// retrieve. Cheap and idempotent when the session has not grown.
-    /// Waits for streamed turns first when streaming is enabled.
-    fn finalize<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard.finalize().await.map_err(to_pyerr)?;
-            Python::attach(|py| PyFinalizeReport::from_rust(py, &report))
-        })
-    }
-
-    /// Generate and persist a summary of the session so far.
-    ///
-    /// Resolves to `(summary_node_id, finalize_error)`: the new summary node
-    /// id or `None` when there was nothing new to summarize, paired with the
-    /// chunk-refresh failure message or `None` when it succeeded.
-    ///
-    /// The refresh is best-effort and never fails the call, but its outcome
-    /// is reported rather than only logged, so a caller can tell that the
-    /// summary was built from stale chunks.
-    fn summarize<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard.summarize().await.map_err(to_pyerr)?;
-            Ok((report.summary, report.finalize_error))
-        })
-    }
-
-    /// Soft-forget a single turn (redact content, keep the chain intact).
-    fn forget_turn<'py>(&self, py: Python<'py>, message_id: String) -> PyResult<Bound<'py, PyAny>> {
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard.forget_turn(&message_id).await.map_err(to_pyerr)?;
-            Python::attach(|py| PyDeletionReport::from_rust(py, &report))
-        })
-    }
-
-    /// Hard-delete a single turn and its cascade.
-    fn delete_turn<'py>(&self, py: Python<'py>, message_id: String) -> PyResult<Bound<'py, PyAny>> {
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard.delete_turn(&message_id).await.map_err(to_pyerr)?;
-            Python::attach(|py| PyDeletionReport::from_rust(py, &report))
-        })
-    }
-
-    /// Hard-delete a document/artifact and its cascade.
-    fn delete_document<'py>(
-        &self,
-        py: Python<'py>,
-        artifact_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard
-                .delete_document(&artifact_id)
-                .await
-                .map_err(to_pyerr)?;
-            Python::attach(|py| PyDeletionReport::from_rust(py, &report))
-        })
-    }
-
-    // ── Blocking (`*_sync`) skins ────────────────────────────────────
-
-    /// Blocking variant of [`observe`](Self::observe).
-    fn observe_sync(&self, py: Python<'_>, turn: &PyTurn) -> PyResult<Py<PyObserveResult>> {
-        let turn = turn.snapshot()?;
-        bridge_sync!(py, session = self.inner.clone(), {
-            let mut guard = session.lock().await;
-            let result = guard.observe(turn).await.map_err(to_pyerr)?;
-            Python::attach(|py| PyObserveResult::from_rust(py, &result))
-        })
-    }
-
-    /// Blocking variant of [`commit_unit`](Self::commit_unit).
-    fn commit_unit_sync(
-        &self,
-        py: Python<'_>,
-        turns: Vec<PyRef<'_, PyTurn>>,
-    ) -> PyResult<(Vec<Py<PyObserveResult>>, bool)> {
-        let turns: Vec<_> = turns
-            .iter()
-            .map(|t| t.snapshot())
-            .collect::<PyResult<_>>()?;
-        bridge_sync!(py, session = self.inner.clone(), {
-            let mut guard = session.lock().await;
-            let result = guard.commit_unit(turns).await.map_err(to_pyerr)?;
-            Python::attach(|py| {
-                let turns: Vec<_> = result
-                    .turns
-                    .iter()
-                    .map(|r| PyObserveResult::from_rust(py, r))
-                    .collect::<PyResult<_>>()?;
-                Ok((turns, result.was_replay))
+        #[pyo3(signature = (exc_type=None, exc=None, tb=None))]
+        fn __exit__(
+            &self,
+            py: Python<'_>,
+            exc_type: Option<Py<PyAny>>,
+            exc: Option<Py<PyAny>>,
+            tb: Option<Py<PyAny>>,
+        ) -> PyResult<bool> {
+            let (_, _, _) = (exc_type, exc, tb);
+            bridge_sync!(py, session = self.inner.clone(), {
+                let guard = session.lock().await;
+                if let Err(e) = guard.finalize().await {
+                    eprintln!("uniko: session __exit__ finalize failed: {e}");
+                }
+                Ok(false)
             })
-        })
+        }
+
+        fn __repr__(&self) -> String {
+            format!("Session(session_id='{}')", self.session_id)
+        }
+
     }
+    bridged {
 
-    /// Blocking variant of [`ingest`](Self::ingest).
-    fn ingest_sync(
-        &self,
-        py: Python<'_>,
-        source: &PyIngestSource,
-    ) -> PyResult<Py<PyIngestOutcome>> {
-        let src = source.snapshot()?;
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let outcome = guard.ingest(src).await.map_err(to_pyerr)?;
-            Python::attach(|py| PyIngestOutcome::from_rust(py, &outcome))
-        })
-    }
-
-    /// Blocking variant of [`submit`](Self::submit).
-    fn submit_sync(&self, py: Python<'_>, turn: &PyTurn) -> PyResult<()> {
-        let turn = turn.snapshot()?;
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            guard.submit(turn).await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    /// Blocking variant of [`submit_source`](Self::submit_source).
-    fn submit_source_sync(&self, py: Python<'_>, source: &PyIngestSource) -> PyResult<()> {
-        let src = source.snapshot()?;
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            guard.submit_source(src).await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    /// Blocking variant of [`flush`](Self::flush).
-    fn flush_sync(&self, py: Python<'_>) -> PyResult<()> {
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            guard.flush().await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn finalize_sync(&self, py: Python<'_>) -> PyResult<Py<PyFinalizeReport>> {
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard.finalize().await.map_err(to_pyerr)?;
-            Python::attach(|py| PyFinalizeReport::from_rust(py, &report))
-        })
-    }
-
-    // ── Context-manager support ────────────────────────────────────────
-    //
-    // `async with agent.session("s") as s:` finalizes on exit, so the
-    // session-level retrieval surfaces get built without the caller having
-    // to remember. Exit is best-effort: a chunking failure must not mask
-    // whatever exception is already propagating out of the block.
-
-    fn __aenter__<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let this: Py<Self> = slf.into();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(this) })
-    }
-
-    #[pyo3(signature = (exc_type=None, exc=None, tb=None))]
-    fn __aexit__<'py>(
-        &self,
-        py: Python<'py>,
-        exc_type: Option<Py<PyAny>>,
-        exc: Option<Py<PyAny>>,
-        tb: Option<Py<PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let (_, _, _) = (exc_type, exc, tb);
-        bridge!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            if let Err(e) = guard.finalize().await {
-                eprintln!("uniko: session __aexit__ finalize failed: {e}");
+        /// Record several related turns as ONE durable, idempotent unit.
+        ///
+        /// Every turn, and every attachment on them, lands in a single
+        /// transaction: either the whole unit is visible to later recall or none
+        /// of it is. Two separate `observe` calls cannot give that — an
+        /// interruption between them leaves a question with no answer.
+        ///
+        /// Resolves to a `UnitResult`: one `ObserveResult` per turn, and
+        /// `was_replay`, true when every id was already present with identical
+        /// content, so nothing was written.
+        ///
+        /// Reusing an id with different content, repeating an id inside one unit,
+        /// or submitting a unit that is only partly recorded raises
+        /// `IdConflictError`.
+        fn commit_unit / commit_unit_sync(&self, py, turns: Vec<PyRef<'_, PyTurn>>) -> Py<PyUnitResult> {
+            prepare {
+                // Snapshot before entering the async block: PyO3 refs are not Send.
+                let turns: Vec<_> = turns
+                    .iter()
+                    .map(|t| t.snapshot())
+                    .collect::<PyResult<_>>()?;
             }
-            // Never suppress an in-flight exception.
-            Ok(false)
-        })
-    }
-
-    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
-
-    #[pyo3(signature = (exc_type=None, exc=None, tb=None))]
-    fn __exit__(
-        &self,
-        py: Python<'_>,
-        exc_type: Option<Py<PyAny>>,
-        exc: Option<Py<PyAny>>,
-        tb: Option<Py<PyAny>>,
-    ) -> PyResult<bool> {
-        let (_, _, _) = (exc_type, exc, tb);
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            if let Err(e) = guard.finalize().await {
-                eprintln!("uniko: session __exit__ finalize failed: {e}");
+            run(session = self.inner.clone()) {
+                let mut guard = session.lock().await;
+                let result = guard.commit_unit(turns).await.map_err(to_pyerr)?;
+                Python::attach(|py| PyUnitResult::from_rust(py, &result))
             }
-            Ok(false)
-        })
-    }
+        }
 
-    /// Blocking variant of [`summarize`](Self::summarize).
-    fn summarize_sync(&self, py: Python<'_>) -> PyResult<(Option<NodeId>, Option<String>)> {
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard.summarize().await.map_err(to_pyerr)?;
-            Ok((report.summary, report.finalize_error))
-        })
-    }
+        /// Ingest one turn durably, committing before returning.
+        ///
+        /// The write is immediately visible to recall (read-after-write).
+        fn observe / observe_sync(&self, py, turn: &PyTurn) -> Py<PyObserveResult> {
+            prepare {
+                let turn = turn.snapshot()?;
 
-    /// Blocking variant of [`forget_turn`](Self::forget_turn).
-    fn forget_turn_sync(
-        &self,
-        py: Python<'_>,
-        message_id: String,
-    ) -> PyResult<Py<PyDeletionReport>> {
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard.forget_turn(&message_id).await.map_err(to_pyerr)?;
-            Python::attach(|py| PyDeletionReport::from_rust(py, &report))
-        })
-    }
+            }
+            run(session = self.inner.clone()) {
+                let mut guard = session.lock().await;
+                let result = guard.observe(turn).await.map_err(to_pyerr)?;
+                Python::attach(|py| PyObserveResult::from_rust(py, &result))
 
-    /// Blocking variant of [`delete_turn`](Self::delete_turn).
-    fn delete_turn_sync(
-        &self,
-        py: Python<'_>,
-        message_id: String,
-    ) -> PyResult<Py<PyDeletionReport>> {
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard.delete_turn(&message_id).await.map_err(to_pyerr)?;
-            Python::attach(|py| PyDeletionReport::from_rust(py, &report))
-        })
-    }
+            }
+        }
 
-    /// Blocking variant of [`delete_document`](Self::delete_document).
-    fn delete_document_sync(
-        &self,
-        py: Python<'_>,
-        artifact_id: String,
-    ) -> PyResult<Py<PyDeletionReport>> {
-        bridge_sync!(py, session = self.inner.clone(), {
-            let guard = session.lock().await;
-            let report = guard
-                .delete_document(&artifact_id)
-                .await
-                .map_err(to_pyerr)?;
-            Python::attach(|py| PyDeletionReport::from_rust(py, &report))
-        })
-    }
+        /// Ingest a standalone document/blob into this session (not a turn).
+        fn ingest / ingest_sync(&self, py, source: &PyIngestSource) -> Py<PyIngestOutcome> {
+            prepare {
+                let src = source.snapshot()?;
 
-    fn __repr__(&self) -> String {
-        format!("Session(session_id='{}')", self.session_id)
+            }
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                let outcome = guard.ingest(src).await.map_err(to_pyerr)?;
+                Python::attach(|py| PyIngestOutcome::from_rust(py, &outcome))
+
+            }
+        }
+
+        /// Submit a turn to the streaming pipeline (fire-and-forget).
+        ///
+        /// Requires the instance to be built with `streaming(True)`.
+        fn submit / submit_sync(&self, py, turn: &PyTurn) -> () {
+            prepare {
+                let turn = turn.snapshot()?;
+
+            }
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                guard.submit(turn).await.map_err(to_pyerr)?;
+                Ok(())
+
+            }
+        }
+
+        /// Submit a standalone document/blob to the streaming pipeline.
+        fn submit_source / submit_source_sync(&self, py, source: &PyIngestSource) -> () {
+            prepare {
+                let src = source.snapshot()?;
+
+            }
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                guard.submit_source(src).await.map_err(to_pyerr)?;
+                Ok(())
+
+            }
+        }
+
+        /// Wait for all submitted work in this session to finish.
+        fn flush / flush_sync(&self, py) -> () {
+            prepare {}
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                guard.flush().await.map_err(to_pyerr)?;
+                Ok(())
+
+            }
+        }
+
+        /// Build (or refresh) this session's session-level retrieval surfaces.
+        ///
+        /// Chunks the whole transcript and aggregates the session's observations
+        /// into dense chunks wired to the entities and participants they mention.
+        /// These are what session-scoped recall and the Phase 1 session boost
+        /// retrieve. Cheap and idempotent when the session has not grown.
+        /// Waits for streamed turns first when streaming is enabled.
+        fn finalize / finalize_sync(&self, py) -> Py<PyFinalizeReport> {
+            prepare {}
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                let report = guard.finalize().await.map_err(to_pyerr)?;
+                Python::attach(|py| PyFinalizeReport::from_rust(py, &report))
+
+            }
+        }
+
+        /// Generate and persist a summary of the session so far.
+        ///
+        /// Resolves to a `SummarizeReport`: the new summary node id or `None`
+        /// when there was nothing new to summarize, what finalizing built, and
+        /// the chunk-refresh failure message or `None` when it succeeded.
+        ///
+        /// The refresh is best-effort and never fails the call, but its outcome
+        /// is reported rather than only logged, so a caller can tell that the
+        /// summary was built from stale chunks.
+        fn summarize / summarize_sync(&self, py) -> Py<PySummarizeReport> {
+            prepare {}
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                let report = guard.summarize().await.map_err(to_pyerr)?;
+                Python::attach(|py| PySummarizeReport::from_rust(py, &report))
+
+            }
+        }
+
+        /// Record an action this session's agent took, linked to this session
+        /// unless `session_id` names another.
+        #[pyo3(signature = (action_type, *, action_id=None, input=None, output=None, status=None, started_at=None, ended_at=None, error=None, triggered_by_message_id=None, session_id=None, previous_action_id=None))]
+        #[allow(clippy::too_many_arguments)]
+        fn record_action / record_action_sync(&self, py, action_type: String, action_id: Option<String>, input: Option<&Bound<'_, PyAny>>, output: Option<&Bound<'_, PyAny>>, status: Option<String>, started_at: Option<&Bound<'_, PyAny>>, ended_at: Option<&Bound<'_, PyAny>>, error: Option<String>, triggered_by_message_id: Option<String>, session_id: Option<String>, previous_action_id: Option<String>) -> Py<PyActionResult> {
+            prepare {
+                let params = action_args(
+                    action_type,
+                    action_id,
+                    input,
+                    output,
+                    status,
+                    started_at,
+                    ended_at,
+                    error,
+                    triggered_by_message_id,
+                    session_id,
+                    previous_action_id,
+                )?;
+
+            }
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                let result = guard.record_action(params).await.map_err(to_pyerr)?;
+                Python::attach(|py| PyActionResult::from_rust(py, &result))
+
+            }
+        }
+
+        /// Soft-forget a single turn (redact content, keep the chain intact).
+        fn forget_turn / forget_turn_sync(&self, py, message_id: String) -> Py<PyDeletionReport> {
+            prepare {}
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                let report = guard.forget_turn(&message_id).await.map_err(to_pyerr)?;
+                Python::attach(|py| PyDeletionReport::from_rust(py, &report))
+
+            }
+        }
+
+        /// Hard-delete a single turn and its cascade.
+        fn delete_turn / delete_turn_sync(&self, py, message_id: String) -> Py<PyDeletionReport> {
+            prepare {}
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                let report = guard.delete_turn(&message_id).await.map_err(to_pyerr)?;
+                Python::attach(|py| PyDeletionReport::from_rust(py, &report))
+
+            }
+        }
+
+        /// Hard-delete a document/artifact and its cascade.
+        fn delete_document / delete_document_sync(&self, py, artifact_id: String) -> Py<PyDeletionReport> {
+            prepare {}
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                let report = guard
+                    .delete_document(&artifact_id)
+                    .await
+                    .map_err(to_pyerr)?;
+                Python::attach(|py| PyDeletionReport::from_rust(py, &report))
+
+            }
+        }
+
     }
 }

@@ -355,6 +355,28 @@ impl Session {
         finalize_session(&self.kb, &self.ctx.session_id).await
     }
 
+    /// Record an action this session's agent took, attached to this
+    /// session unless `params.session_id` names another.
+    ///
+    /// The session must already exist (it does once a turn has been
+    /// observed); otherwise the action is recorded without the session
+    /// link.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when a referenced message or prior action is
+    /// missing, or a write fails.
+    pub async fn record_action(
+        &self,
+        mut params: crate::action::RecordActionParams,
+    ) -> Result<crate::action::RecordActionResult, UnikoError> {
+        params
+            .session_id
+            .get_or_insert_with(|| self.ctx.session_id.clone());
+        crate::agent::ensure_agent_participant(&self.kb, &self.agent_id).await?;
+        crate::action::record_action(&self.kb, &self.agent_id, params).await
+    }
+
     /// Generate (or refresh) a synopsis of this session.
     ///
     /// Extractive (deterministic) when no LLM was configured on the
@@ -537,6 +559,7 @@ pub struct Turn {
     category: Option<String>,
     source_id: Option<String>,
     revision_id: Option<String>,
+    visibility: Option<crate::Visibility>,
 }
 
 impl Turn {
@@ -554,6 +577,7 @@ impl Turn {
             category: None,
             source_id: None,
             revision_id: None,
+            visibility: None,
         }
     }
 
@@ -637,6 +661,19 @@ impl Turn {
         self
     }
 
+    /// Scope who may see this turn: its message, its chunks, the
+    /// observations extracted from it, and the facts consolidated from
+    /// those (held apart from the public fact of the same triple). Scoped
+    /// reads drop it for any viewer the visibility does not admit.
+    ///
+    /// Attachments are not scoped by this; give an attachment's own
+    /// content no wider audience than the turn's when that matters.
+    #[must_use]
+    pub fn visibility(mut self, visibility: crate::Visibility) -> Self {
+        self.visibility = Some(visibility);
+        self
+    }
+
     /// Attach a document/file shared in this turn.
     ///
     /// On [`observe`](Session::observe) each attachment is ingested and
@@ -669,6 +706,10 @@ impl Turn {
             category: self.category,
             source_id: self.source_id,
             revision_id: self.revision_id,
+            visibility: self
+                .visibility
+                .filter(|v| *v != crate::Visibility::Public)
+                .map(|v| v.as_property()),
         }
     }
 }

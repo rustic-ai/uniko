@@ -30,6 +30,7 @@ fn ingest_msg(id: &str, content: &str, content_type: &str, session: &str) -> Ing
         category: None,
         source_id: None,
         revision_id: None,
+        visibility: None,
     }
 }
 

@@ -48,9 +48,7 @@ def test_sync_data_roundtrip() -> None:
     agent = uni.agent("assistant")
     session = agent.session("s1")
 
-    result = session.observe_sync(
-        uniko.Turn("alice", "hello there").id("m-100")
-    )
+    result = session.observe_sync(uniko.Turn("alice", "hello there").id("m-100"))
     assert result.message_node_id > 0
 
     view = agent.data.message_sync("m-100")

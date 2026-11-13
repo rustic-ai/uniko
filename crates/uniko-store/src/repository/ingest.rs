@@ -29,7 +29,14 @@ pub struct SessionChunkRow {
 }
 
 impl KnowledgeBase {
-    /// All messages in `session_id`, oldest first, with the sender's name.
+    /// The public, unforgotten messages in `session_id`, oldest first,
+    /// with the sender's name.
+    ///
+    /// The session-level transcript chunks and summary are built from
+    /// these rows and carry no visibility of their own, so a scoped turn
+    /// (`visibility` set to anything but `public`) and a forgotten one
+    /// (`redacted`) are left out. Both stay reachable through their own
+    /// message and chunks, under their own scope.
     ///
     /// # Errors
     ///
@@ -39,6 +46,8 @@ impl KnowledgeBase {
         let session = self.db.session();
         let cypher = "\
             MATCH (m:Message)-[:IN_SESSION]->(s:Session {session_id: $sid}) \
+            WHERE coalesce(m.redacted, false) = false \
+              AND coalesce(m.visibility, 'public') IN ['', 'public'] \
             OPTIONAL MATCH (m)-[:SENT_BY]->(p:Participant) \
             RETURN m.content AS content, p.name AS speaker, m.timestamp AS ts, \
                    m.message_id AS mid \
@@ -263,6 +272,11 @@ impl KnowledgeBase {
     ///
     /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on
     /// query failure.
+    ///
+    /// Like [`session_transcript_rows`](Self::session_transcript_rows),
+    /// only public observations of unforgotten messages are returned:
+    /// the observation chunks built from them carry no visibility of
+    /// their own.
     /// Ordering note: `m.timestamp` alone is NOT a total order here. Every
     /// observation extracted from one message shares that message's
     /// timestamp, so their relative order was arbitrary and could differ
@@ -275,6 +289,8 @@ impl KnowledgeBase {
         let session = self.db.session();
         let cypher = "\
             MATCH (o:Observation)-[:OBSERVED_IN]->(m:Message)-[:IN_SESSION]->(s:Session {session_id: $sid}) \
+            WHERE coalesce(o.visibility, 'public') IN ['', 'public'] \
+              AND coalesce(m.redacted, false) = false \
             RETURN o.content AS content, o.subject AS subject \
             ORDER BY m.timestamp, m.message_id, o.observation_id";
         let result = session

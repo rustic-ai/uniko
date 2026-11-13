@@ -36,6 +36,9 @@ Repository = "https://github.com/rustic-ai/uniko"
 [dependency-groups]
 dev = [
     "maturin>=1.0,<2.0",
+    # Only for `mypy.stubtest`, which checks _uniko.pyi against the built
+    # module; ty remains the type checker.
+    "mypy>=1.15",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.25.0",
     "pytest-xdist>=3.8.0",

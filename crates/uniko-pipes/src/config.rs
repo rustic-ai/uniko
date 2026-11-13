@@ -68,3 +68,78 @@ impl Default for PipelineConfig {
         }
     }
 }
+
+impl PipelineConfig {
+    /// The pipeline settings a [`UnikoConfig`](uniko_store::config::UnikoConfig)
+    /// carries, with the rest at their defaults.
+    ///
+    /// `UnikoConfig` holds the queue capacities, consolidation schedule and
+    /// circuit-breaker settings a host configures; the remaining knobs here
+    /// (concurrency, batch size, cortex cadence, shutdown) have no
+    /// `UnikoConfig` counterpart and keep their defaults.
+    pub fn from_uniko_config(config: &uniko_store::config::UnikoConfig) -> Self {
+        Self {
+            ingest_queue_capacity: config.ingest_queue_capacity,
+            consolidation_queue_capacity: config.consolidation_queue_capacity,
+            consolidation_threshold: config.consolidation_threshold,
+            consolidation_interval_secs: config.consolidation_interval_secs,
+            circuit_failure_threshold: config.circuit_failure_threshold,
+            circuit_recovery_ms: config.circuit_recovery_ms,
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uniko_store::config::UnikoConfig;
+
+    #[test]
+    fn default_uniko_config_maps_to_default_pipeline_config() {
+        let mapped = PipelineConfig::from_uniko_config(&UnikoConfig::default());
+        let default = PipelineConfig::default();
+        assert_eq!(mapped.ingest_queue_capacity, default.ingest_queue_capacity);
+        assert_eq!(
+            mapped.consolidation_queue_capacity,
+            default.consolidation_queue_capacity
+        );
+        assert_eq!(
+            mapped.consolidation_threshold,
+            default.consolidation_threshold
+        );
+        assert_eq!(
+            mapped.consolidation_interval_secs,
+            default.consolidation_interval_secs
+        );
+        assert_eq!(
+            mapped.circuit_failure_threshold,
+            default.circuit_failure_threshold
+        );
+        assert_eq!(mapped.circuit_recovery_ms, default.circuit_recovery_ms);
+    }
+
+    #[test]
+    fn uniko_config_pipeline_fields_carry_over() {
+        let config = UnikoConfig {
+            ingest_queue_capacity: 7,
+            consolidation_queue_capacity: 3,
+            consolidation_threshold: 11,
+            consolidation_interval_secs: 42,
+            circuit_failure_threshold: 2,
+            circuit_recovery_ms: 1_234,
+            ..UnikoConfig::default()
+        };
+        let mapped = PipelineConfig::from_uniko_config(&config);
+        assert_eq!(mapped.ingest_queue_capacity, 7);
+        assert_eq!(mapped.consolidation_queue_capacity, 3);
+        assert_eq!(mapped.consolidation_threshold, 11);
+        assert_eq!(mapped.consolidation_interval_secs, 42);
+        assert_eq!(mapped.circuit_failure_threshold, 2);
+        assert_eq!(mapped.circuit_recovery_ms, 1_234);
+        assert_eq!(
+            mapped.ingest_concurrency,
+            PipelineConfig::default().ingest_concurrency
+        );
+    }
+}

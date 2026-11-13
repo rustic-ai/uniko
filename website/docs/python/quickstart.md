@@ -110,7 +110,7 @@ plain constructor, `Turn(sender_id, content)`, reusable and chainable.
 
 The returned `ObserveResult` tells you exactly what landed: `message_node_id`, `chunk_node_ids`,
 `session_node_id`, `extracted_entities` (a list of `(node_id, entity_name)` tuples),
-`extracted_observations`, and `attachment_count`.
+`extracted_observations`, and `attachments` (one `IngestOutcome` per attachment).
 
 !!! note "Sessions are serialized"
     `observe` mutates the session in order — feed turns sequentially, not concurrently, within one
@@ -380,7 +380,7 @@ Any use of a `Uniko` handle after `shutdown` raises `ConfigError`.
 
 `uniko` raises a small, predictable exception hierarchy. The base is `UnikoError`, and **every**
 instance carries a `.kind` string. Subclasses include `ConfigError` (`"config"`), `LlmError`
-(`"llm"`), `TimeoutError` (`"timeout"`), `UnsupportedError` (`"unsupported"`, no extractor for the
+(`"llm"`), `UnikoTimeoutError` (`"timeout"`), `UnsupportedError` (`"unsupported"`, no extractor for the
 modality), and `ConflictError` (`"conflict"`). Storage-domain failures fold into the base
 `UnikoError` but still carry distinct `.kind` values (`"storage"`, `"search"`, `"schema"`,
 `"pipeline"`, `"locy"`, `"embedding"`, `"internal"`) — branch on `e.kind` for those.

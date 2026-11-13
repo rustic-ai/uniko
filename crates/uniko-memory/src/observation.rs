@@ -43,6 +43,9 @@ pub struct AddObservationParams {
     pub observed_at: Option<DateTime<Utc>>,
     /// Confidence in `[0.0, 1.0]`.  Defaults to 1.0 (agent-asserted).
     pub confidence: Option<f64>,
+    /// Who may see the observation; `None` is public. Facts consolidated
+    /// from it are held under the same scope.
+    pub visibility: Option<crate::Visibility>,
 }
 
 /// Record an explicit Observation anchored to a Message.
@@ -116,6 +119,10 @@ pub async fn add_observation(
         category: None,
         source_id: None,
         revision_id: None,
+        visibility: params
+            .visibility
+            .filter(|v| *v != crate::Visibility::Public)
+            .map(|v| v.as_property()),
     };
 
     let tx = kb.begin_tx().await?;

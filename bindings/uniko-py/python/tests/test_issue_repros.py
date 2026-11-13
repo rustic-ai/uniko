@@ -32,10 +32,8 @@ def test_same_turn_id_and_content_is_idempotent() -> None:
     first = session.observe_sync(uniko.Turn("user-a", "original fact").id("turn-1"))
     second = session.observe_sync(uniko.Turn("user-a", "original fact").id("turn-1"))
     assert second.message_node_id == first.message_node_id
-    assert (
-        engine.agent("analyst").data.message_sync("turn-1").content
-        == "original fact"
-    )
+    stored = engine.agent("analyst").data.message_sync("turn-1")
+    assert stored is not None and stored.content == "original fact"
 
 
 def test_conflicting_turn_id_is_rejected() -> None:
@@ -55,7 +53,8 @@ def test_same_artifact_id_and_content_is_idempotent() -> None:
         uniko.IngestSource.from_text("original notes").with_id("doc-1")
     )
     assert second.artifact_node_id == first.artifact_node_id
-    assert engine.agent("analyst").data.artifact_sync("doc-1").text == "original notes"
+    artifact = engine.agent("analyst").data.artifact_sync("doc-1")
+    assert artifact is not None and artifact.text == "original notes"
 
 
 def test_conflicting_artifact_id_is_rejected() -> None:
@@ -158,18 +157,19 @@ def test_unit_commits_every_turn_as_one_write() -> None:
     """A related pair is recorded as one unit, visible together."""
     engine = uniko.Uniko.in_memory_sync()
     session = engine.agent("analyst").session("unit-a")
-    results, was_replay = session.commit_unit_sync(
+    unit = session.commit_unit_sync(
         [
             uniko.Turn("user-a", "what is the plan for friday").id("u-1"),
             uniko.Turn("agent", "we ship the release on friday").id("u-2"),
         ]
     )
-    assert len(results) == 2, "one result per turn, in unit order"
-    assert not was_replay, "a fresh unit is not a replay"
-    assert all(r.message_node_id for r in results)
-    assert engine.agent("analyst").data.message_sync("u-2").content == (
-        "we ship the release on friday"
-    )
+    assert isinstance(unit, uniko.UnitResult)
+    assert len(unit) == 2 and len(unit.turns) == 2, "one result per turn, in unit order"
+    assert not unit.was_replay, "a fresh unit is not a replay"
+    assert all(r.message_node_id for r in unit.turns)
+    assert unit.message_node_ids() == [r.message_node_id for r in unit.turns]
+    stored = engine.agent("analyst").data.message_sync("u-2")
+    assert stored is not None and stored.content == "we ship the release on friday"
 
 
 def test_unit_replay_is_a_whole_unit_noop() -> None:
@@ -183,12 +183,12 @@ def test_unit_replay_is_a_whole_unit_noop() -> None:
             uniko.Turn("agent", "stable content two").id("r-2"),
         ]
 
-    first, first_replay = session.commit_unit_sync(turns())
-    assert not first_replay
+    first = session.commit_unit_sync(turns())
+    assert not first.was_replay
 
-    second, second_replay = session.commit_unit_sync(turns())
-    assert second_replay, "an identical unit must report a replay"
-    assert [r.message_node_id for r in first] == [r.message_node_id for r in second]
+    second = session.commit_unit_sync(turns())
+    assert second.was_replay, "an identical unit must report a replay"
+    assert first.message_node_ids() == second.message_node_ids()
 
 
 def test_unit_id_conflict_leaves_nothing_behind() -> None:
@@ -210,9 +210,8 @@ def test_unit_id_conflict_leaves_nothing_behind() -> None:
     # missing id rather than raising.
     assert engine.agent("analyst").data.message_sync("c-fresh") is None
     # ...while the turn that was committed before the failed unit survives.
-    assert (
-        engine.agent("analyst").data.message_sync("c-1").content == "original content"
-    )
+    survivor = engine.agent("analyst").data.message_sync("c-1")
+    assert survivor is not None and survivor.content == "original content"
 
 
 # ── Issue #39: typed provenance and pre-ranking filters ────────────────

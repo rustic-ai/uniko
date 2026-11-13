@@ -780,6 +780,7 @@ async fn test_batch_upsert_facts_concurrent_no_lost_count() {
                     observation_count: 1,
                     observed_at: now,
                     embedding: None,
+                    visibility: None,
                 })
                 .collect();
             // Each batch internally dedups to a single Fact with

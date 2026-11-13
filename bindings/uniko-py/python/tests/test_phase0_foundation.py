@@ -15,7 +15,13 @@ def test_exception_hierarchy() -> None:
     # Base plus the five branchable subclasses are all present and rooted
     # under the base UnikoError.
     assert issubclass(uniko.UnikoError, Exception)
-    for name in ("ConfigError", "LlmError", "TimeoutError", "ConflictError", "UnsupportedError"):
+    for name in (
+        "ConfigError",
+        "LlmError",
+        "UnikoTimeoutError",
+        "ConflictError",
+        "UnsupportedError",
+    ):
         exc = getattr(uniko, name)
         assert issubclass(exc, uniko.UnikoError), name
 
@@ -58,7 +64,7 @@ def test_error_mapping_subclasses_and_kind() -> None:
     cases = {
         "config": uniko.ConfigError,
         "llm": uniko.LlmError,
-        "timeout": uniko.TimeoutError,
+        "timeout": uniko.UnikoTimeoutError,
         "conflict": uniko.ConflictError,
         "unsupported": uniko.UnsupportedError,
     }
@@ -72,7 +78,15 @@ def test_error_mapping_subclasses_and_kind() -> None:
 def test_error_mapping_storage_variants_fold_into_base() -> None:
     import pytest
 
-    for kind in ("storage", "search", "schema", "pipeline", "locy", "embedding", "internal"):
+    for kind in (
+        "storage",
+        "search",
+        "schema",
+        "pipeline",
+        "locy",
+        "embedding",
+        "internal",
+    ):
         with pytest.raises(uniko.UnikoError) as info:
             uniko._uniko._raise_error(kind)
         assert info.value.kind == kind

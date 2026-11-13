@@ -150,8 +150,8 @@ async def test_live_abduction_result_model() -> None:
 async def test_live_config_model() -> None:
     uni = await uniko.Uniko.in_memory()
     cfg = UnikoConfigModel.from_native(uni)
-    assert isinstance(cfg.embedding_dimensions, int)
-    assert isinstance(cfg.embedding_model_id, str)
+    assert isinstance(cfg.embedding.dimensions, int)
+    assert isinstance(cfg.embedding.model_id, str)
     assert isinstance(cfg.recall_min_score, float)
 
 

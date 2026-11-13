@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use uniko_extract::ingest::{ModalityExtractor, ModalityRegistry};
 use uniko_pipes::config::PipelineConfig;
-use uniko_store::config::{EmbeddingConfig, UnikoConfig};
+use uniko_pipes::health::PipelineHealth;
+use uniko_store::config::{EmbeddingConfig, RerankerConfig, UnikoConfig};
+use uniko_store::repository::policy::Membership;
 use uniko_store::xervo::{ModelAliasSpec, ModelTask, WarmupPolicy};
 use uniko_store::{DeletionReport, KnowledgeBase, UnikoError};
 
@@ -118,6 +120,120 @@ impl Uniko {
         self.kb.config()
     }
 
+    /// Record that `participant_id` is a member of team `team_id`, so it
+    /// can see items with [`Visibility::Team`](crate::Visibility::Team)
+    /// for that team. Creates the participant and team when absent.
+    /// Returns `false` when the membership was already recorded.
+    ///
+    /// An `Agent` handle resolves its own memberships once, on its first
+    /// scoped read, so take a fresh handle from [`agent`](Uniko::agent) to
+    /// see a change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] for an empty id, or [`UnikoError`] on
+    /// a write failure.
+    pub async fn add_team_member(
+        &self,
+        participant_id: &str,
+        team_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .add_membership(Membership::ParticipantInTeam, participant_id, team_id)
+            .await
+    }
+
+    /// Undo [`add_team_member`](Uniko::add_team_member). Returns `false`
+    /// when the membership was not recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a write failure.
+    pub async fn remove_team_member(
+        &self,
+        participant_id: &str,
+        team_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .remove_membership(Membership::ParticipantInTeam, participant_id, team_id)
+            .await
+    }
+
+    /// Record that `participant_id` is a member of org `org_id`, so it can
+    /// see items with [`Visibility::Org`](crate::Visibility::Org) for that
+    /// org. Returns `false` when already recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] for an empty id, or [`UnikoError`] on
+    /// a write failure.
+    pub async fn add_org_member(
+        &self,
+        participant_id: &str,
+        org_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .add_membership(Membership::ParticipantInOrg, participant_id, org_id)
+            .await
+    }
+
+    /// Undo [`add_org_member`](Uniko::add_org_member). Returns `false`
+    /// when the membership was not recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a write failure.
+    pub async fn remove_org_member(
+        &self,
+        participant_id: &str,
+        org_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .remove_membership(Membership::ParticipantInOrg, participant_id, org_id)
+            .await
+    }
+
+    /// Record that team `team_id` belongs to org `org_id`: every member of
+    /// the team then sees that org's items too. Returns `false` when
+    /// already recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] for an empty id, or [`UnikoError`] on
+    /// a write failure.
+    pub async fn add_team_to_org(&self, team_id: &str, org_id: &str) -> Result<bool, UnikoError> {
+        self.kb
+            .add_membership(Membership::TeamInOrg, team_id, org_id)
+            .await
+    }
+
+    /// Undo [`add_team_to_org`](Uniko::add_team_to_org). Returns `false`
+    /// when it was not recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a write failure.
+    pub async fn remove_team_from_org(
+        &self,
+        team_id: &str,
+        org_id: &str,
+    ) -> Result<bool, UnikoError> {
+        self.kb
+            .remove_membership(Membership::TeamInOrg, team_id, org_id)
+            .await
+    }
+
+    /// A health snapshot of the streaming pipeline: queue depth and
+    /// capacity, throughput and latency for the ingest and consolidation
+    /// workers, and the LLM circuit-breaker state.
+    ///
+    /// `None` when the instance was built without
+    /// [`streaming`](UnikoBuilder::streaming), since there is no
+    /// pipeline to report on.
+    pub fn health(&self) -> Option<PipelineHealth> {
+        self.streaming.as_ref().map(|pipeline| pipeline.health())
+    }
+
     /// Erase the entire graph. Intended for dev/test reset.
     ///
     /// # Errors
@@ -216,6 +332,7 @@ pub struct UnikoBuilder {
     location: Location,
     config: Option<UnikoConfig>,
     embedding: Option<EmbeddingConfig>,
+    reranker: Option<RerankerConfig>,
     llm: Option<LlmSpec>,
     streaming: bool,
     scope: RecallScope,
@@ -244,6 +361,18 @@ impl UnikoBuilder {
         self
     }
 
+    /// Override the cross-encoder reranker (defaults to MiniLM, enabled).
+    ///
+    /// Pass a config with `enabled: false` to turn reranking off. Like
+    /// [`embedding`](UnikoBuilder::embedding), this wins over the
+    /// `reranker` section of [`raw_config`](UnikoBuilder::raw_config)
+    /// whichever is called first.
+    #[must_use]
+    pub fn reranker(mut self, reranker: RerankerConfig) -> Self {
+        self.reranker = Some(reranker);
+        self
+    }
+
     /// Register an LLM, enabling [`Agent::answer`](crate::Agent::answer).
     #[must_use]
     pub fn llm(mut self, spec: LlmSpec) -> Self {
@@ -253,8 +382,10 @@ impl UnikoBuilder {
 
     /// Replace the entire configuration (escape hatch).
     ///
-    /// This is the base config; [`embedding`](UnikoBuilder::embedding)
-    /// still overrides `config.embedding` when both are set.
+    /// This is the base config; [`embedding`](UnikoBuilder::embedding) and
+    /// [`reranker`](UnikoBuilder::reranker) still override its sections
+    /// when set, whatever the call order. Its queue, consolidation and
+    /// circuit-breaker fields configure the streaming pipeline.
     #[must_use]
     pub fn raw_config(mut self, config: UnikoConfig) -> Self {
         self.config = Some(config);
@@ -311,6 +442,10 @@ impl UnikoBuilder {
         if let Some(embedding) = self.embedding {
             config.embedding = embedding;
         }
+        if let Some(reranker) = self.reranker {
+            config.reranker = reranker;
+        }
+        let pipeline_config = PipelineConfig::from_uniko_config(&config);
 
         let llm_alias = self.llm.as_ref().map(|l| l.alias.clone());
         let extra_catalog: Vec<ModelAliasSpec> = self
@@ -331,8 +466,7 @@ impl UnikoBuilder {
         let streaming = if self.streaming {
             let steps: Vec<Box<dyn uniko_pipes::Step>> =
                 vec![Box::new(uniko_extract::ingest::IngestStep)];
-            let pipeline =
-                PipelineSystem::new(PipelineConfig::default(), Arc::new(kb.clone()), steps);
+            let pipeline = PipelineSystem::new(pipeline_config, Arc::new(kb.clone()), steps);
             Some(Arc::new(pipeline))
         } else {
             None

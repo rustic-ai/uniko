@@ -7,6 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Python results that were tuples or counts are now classes.**
+  `Session.commit_unit` returns a `UnitResult` (`turns`, `was_replay`)
+  instead of a `(results, was_replay)` tuple, and `Session.summarize`
+  returns a `SummarizeReport` (`summary`, `finalize`, `finalize_error`)
+  instead of a `(summary, finalize_error)` tuple. `ObserveResult.attachments`
+  is a list of `IngestOutcome`, one per attachment, replacing
+  `attachment_count`; use `len(result.attachments)`.
+- **`uniko.TimeoutError` is now `uniko.UnikoTimeoutError`,** so that
+  `from uniko import *` no longer shadows the built-in `TimeoutError`. The
+  old name still resolves, with a `DeprecationWarning`, until the next minor
+  release.
+- **`Uniko.config()` returns the whole configuration,** nested as the engine
+  holds it, instead of five flat keys: `embedding_model_id` is now
+  `config()["embedding"]["model_id"]`. `UnikoConfigModel` follows suit and
+  rejects unknown keys.
+- **The `retry_max_attempts`, `retry_initial_delay_ms` and
+  `retry_max_delay_ms` fields are gone from `UnikoConfig`.** Nothing ever
+  read them. Configs that still set them load as before from JSON, but the
+  Python `config()` setter rejects them as unknown keys.
+- **Reopening a store with a different embedding model fails** with
+  `UnikoError::Config` (`ConfigError` in Python), where it used to succeed
+  and mix vectors from two models. Each store now records the model id and
+  dimensions it was built with; a store from an earlier release records them
+  on its next open.
+- **`Agent::consolidate` returns a `ConsolidationReport`** (`cycle`,
+  `procedures`, `topics`) instead of `CycleStats`, because it now also runs
+  procedure promotion and topic detection. The cycle's stats are
+  `report.cycle`, in Rust and Python.
+- **`DerivationTree` and `DerivationNode` are no longer re-exported** from
+  `uniko_memory` or `uniko_api::tools`. Nothing produced them.
+- **A scoped fact is a separate fact.** Consolidation now groups
+  observations by visibility as well as subject and predicate, and a scoped
+  fact's `fact_id` ends in its visibility (`fact_id_for_scoped`), so a
+  private observation never reinforces, contradicts or reveals the public
+  fact of the same triple. `AssertFactParams` and `AddObservationParams`
+  gain a `visibility` field, and `FactUpsertInput` and
+  `find_stale_open_facts_batched` take one.
+- **Session-level transcript and observation chunks, and session
+  summaries, leave out scoped and forgotten turns.** Forgotten turns used to
+  stay in them.
+
+### Added
+
+- **Configure an instance from Python** (#45). `UnikoBuilder.config()` takes
+  a dict or a `UnikoConfigModel` with any subset of the fields, nested
+  sections included, and rejects unknown keys with a suggestion for near
+  misses. `UnikoBuilder.embedding()` takes a preset name or a section, and
+  `UnikoBuilder.reranker()` takes a preset name, a section, or `None` for
+  off; both win over `config()` whatever the call order. `Uniko.config()`
+  reads it all back, with `embedding.provider_options` redacted.
+- **Per-call recall overrides** (#45): `Agent::recall_with(query, scope,
+  &RecallOverrides)` in Rust and `Agent.recall_with(query, scope=None, *,
+  limit, token_budget, min_score, reranker, reference_ts)` in Python change
+  those settings for one call.
+- **`Uniko::health()`** (and `Uniko.health()` in Python) reports the
+  streaming pipeline's queue depths, throughput, latency and LLM circuit
+  state, or `None` when streaming is off.
+- **`UnikoBuilder::reranker`** in Rust, beside `embedding`.
+- `IngestOutcome` in Python gains `page_node_ids`, `block_node_ids` and
+  `extraction_error`; `RecallItem` models gain `category`, `source_id` and
+  `revision_id`; the typed wrappers gain `commit_unit`, `retire_source`,
+  `restore_source`, `recall_with` and `health`.
+- **Visibility you can write.** Recall has always filtered Facts and
+  Observations by `private:` / `team:` / `org:` visibility, but nothing
+  wrote those values or the memberships they resolve through, so scoped
+  reads filtered nothing. `Agent::set_visibility` (with the `Visibility`
+  type) scopes an item, and `Uniko::add_team_member`, `add_org_member`,
+  `add_team_to_org` and their `remove_` counterparts record memberships.
+  Python gains these, a `Viewer` class, `Scope.as_viewer` and
+  `UnikoBuilder.scope`.
+- **Facts, actions, episodes and observations on `Agent`:** `assert_fact`,
+  `invalidate_fact`, `record_action` (also on `Session`, linked to it),
+  `record_episode` and `add_observation`, in Rust and Python. They were only
+  free functions taking a `KnowledgeBase`, which `uniko_api::tools` callers
+  and Python could not reach. The agent's participant is created when it has
+  not spoken yet.
+- **Rule management:** `Agent::list_rules`, `explain_rule` (source and
+  state) and `delete_rule`, which refuses stdlib rules.
+- **`Turn::visibility`** scopes a whole turn: its message and chunks (which
+  gain a `visibility` property), its observations, and the facts
+  consolidated from them. Recall filters messages and chunks by it as it
+  does facts and observations.
+- **`Agent::match_procedures` and `record_procedure_use`** expose the
+  procedures `consolidate` learns: which have tended to work next for a
+  given state, and feedback on how one worked out.
+- **`TextExtractor`**, a `ModalityExtractor` built from a function that
+  turns an image, audio or video payload into text, and Python's
+  `UnikoBuilder.extractor(modality, extract)` on top of it.
+- In the Python binding each `_sync` twin is generated from its async
+  method's body by `pymethods_with_sync!`, so the two can no longer drift.
+- `uniko.types` holds `Literal` aliases for the closed sets the API passes as
+  strings (goal and task phases, recall kinds, worker status).
+- CI now builds the Python extension and runs its tests, `mypy.stubtest`
+  against the stub, ruff and ty on every PR. The release workflow installs
+  and imports every wheel, the CUDA and Metal variants included, before it
+  publishes any of them.
+
+### Fixed
+
+- **The streaming pipeline honours `UnikoConfig`.** It was always built from
+  `PipelineConfig::default()`, so `ingest_queue_capacity`,
+  `consolidation_queue_capacity`, `consolidation_threshold`,
+  `consolidation_interval_secs` and the circuit-breaker fields had no effect.
+  `validate()` now also rejects a queue capacity of `0`, which used to panic.
+- **Python `_sync` calls no longer run on the caller's stack.** They ran the
+  engine on the calling thread, so a thread with a small stack could
+  overflow it and abort the process; they now run on the runtime's workers.
+- The Python typed wrappers had drifted from the native module: `summarize`
+  was annotated as returning an `int`, and `commit_unit`, `retire_source` and
+  `restore_source` were missing. A parity test now fails on such drift.
+- `uniko.__all__` no longer lists the private test helpers, and the stub's
+  `__all__` now includes `FinalizeReport` and `CycleStats`.
+- A store whose blob backend or embedding model does not match the config is
+  rejected before the models are prefetched, not after.
+- **Procedures can appear in recall.** Recall finds them by embedding, but
+  none was ever written; new procedures are now embedded when created.
+- **`Agent::consolidate` now produces procedures and topics.** It ran only
+  the fact cycle, so an instance without the streaming pipeline (the Python
+  default) never got procedure or topic recall items.
+
 ## [0.4.0] - 2026-11-12
 
 ### Breaking

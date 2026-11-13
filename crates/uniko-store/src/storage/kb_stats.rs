@@ -5,6 +5,11 @@
 //! - `blob_storage` — the persisted blob-backend config, written on
 //!   first open. Reopening a KB with a different backend variant is a
 //!   hard error (no implicit migration).
+//! - `embedding` — the embedding model id and dimensions the stored
+//!   vectors were made with. Reopening with a different model is a hard
+//!   error: same-dimension models would otherwise mix incompatible
+//!   vectors silently. Stores created before this was recorded get it
+//!   written on their next open.
 //! - `modality_presence` — a flag map (`{"image": true, ...}`) updated
 //!   incrementally by ingest paths; consumed by the recall cascade to
 //!   skip cross-modal channels in text-only corpora. Phase 3 reads it;
@@ -48,53 +53,88 @@ pub struct ModalityPresence {
 
 impl KnowledgeBase {
     /// Ensure the `:KnowledgeBaseStats` singleton exists and matches
-    /// `self.config.blob_storage`. Called from KB open/init.
+    /// `self.config.blob_storage` and `self.config.embedding`. Called
+    /// from KB open/init.
     ///
     /// On first open: writes a fresh singleton with the configured
     /// backend serialized into the `blob_storage` map.
     ///
-    /// On reopen: reads the persisted `blob_storage.kind`. If it
-    /// disagrees with the current config, returns
-    /// [`UnikoError::Config`] — there is no implicit migration.
+    /// On reopen: reads the persisted `blob_storage.kind` and embedding
+    /// identity. If either disagrees with the current config, returns
+    /// [`UnikoError::Config`] — there is no implicit migration. A row
+    /// with no embedding identity (a store from before it was recorded)
+    /// gets the current one written.
     ///
     /// # Errors
     ///
-    /// Returns [`UnikoError::Config`] on backend mismatch or
+    /// Returns [`UnikoError::Config`] on backend or embedding mismatch or
     /// [`UnikoError::Storage`] on database failure.
     pub async fn init_kb_stats(&self) -> Result<()> {
         let session = self.db.session();
         let result = session
             .query_with(
                 "MATCH (s:KnowledgeBaseStats {stats_id: $sid}) \
-                 RETURN s.blob_storage AS blob_storage",
+                 RETURN s.blob_storage AS blob_storage, s.embedding AS embedding",
             )
             .param("sid", Value::String(STATS_ID.to_string()))
             .fetch_all()
             .await?;
 
-        let persisted_kind: Option<String> =
-            result
-                .rows()
-                .first()
-                .and_then(|r| match r.value("blob_storage") {
-                    Some(Value::Map(m)) => match m.get("kind") {
-                        Some(Value::String(s)) => Some(s.clone()),
-                        _ => None,
-                    },
-                    _ => None,
-                });
+        let row = result.rows().first();
+        let persisted_kind: Option<String> = row.and_then(|r| match r.value("blob_storage") {
+            Some(Value::Map(m)) => match m.get("kind") {
+                Some(Value::String(s)) => Some(s.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+
+        let persisted_embedding = row.and_then(|r| decode_embedding_identity(r.value("embedding")));
 
         let want_kind = self.config.blob_storage.kind();
 
         match persisted_kind {
-            None => self.write_kb_stats_first_open().await,
-            Some(have) if have == want_kind => Ok(()),
+            None => return self.write_kb_stats_first_open().await,
+            Some(have) if have == want_kind => {}
+            Some(have) => {
+                return Err(UnikoError::Config(format!(
+                    "blob_storage mismatch on KB reopen: persisted kind={have}, \
+                     config kind={want_kind}. Implicit migration is not supported \
+                     — open with the original backend, or migrate out-of-band."
+                )));
+            }
+        }
+
+        let want = EmbeddingIdentity::of(self);
+        match persisted_embedding {
+            None => self.write_embedding_identity().await,
+            Some(have) if have == want => Ok(()),
             Some(have) => Err(UnikoError::Config(format!(
-                "blob_storage mismatch on KB reopen: persisted kind={have}, \
-                 config kind={want_kind}. Implicit migration is not supported \
-                 — open with the original backend, or migrate out-of-band."
+                "embedding mismatch on KB reopen: the store was built with \
+                 model_id={} ({} dimensions), config has model_id={} ({} \
+                 dimensions). Stored vectors are not comparable across models \
+                 — open with the original embedding config, or re-ingest into \
+                 a new store.",
+                have.model_id, have.dimensions, want.model_id, want.dimensions,
             ))),
         }
+    }
+
+    /// Record the embedding identity on a row that predates it.
+    async fn write_embedding_identity(&self) -> Result<()> {
+        let session = self.db.session();
+        let tx = session.tx().await?;
+        tx.query_with(
+            "MATCH (s:KnowledgeBaseStats {stats_id: $sid}) \
+             SET s.embedding = $emb, s.updated_at = $now",
+        )
+        .param("sid", Value::String(STATS_ID.to_string()))
+        .param("emb", EmbeddingIdentity::of(self).encode())
+        .param("now", datetime_value(Utc::now()))
+        .fetch_all()
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Write the singleton row on first open. Called by `init_kb_stats`
@@ -106,6 +146,7 @@ impl KnowledgeBase {
             CREATE (s:KnowledgeBaseStats {
                 stats_id: $sid,
                 blob_storage: $bs,
+                embedding: $emb,
                 modality_presence: $mp,
                 updated_at: $now
             })
@@ -113,6 +154,7 @@ impl KnowledgeBase {
         tx.query_with(cypher)
             .param("sid", Value::String(STATS_ID.to_string()))
             .param("bs", encode_blob_storage(&self.config.blob_storage))
+            .param("emb", EmbeddingIdentity::of(self).encode())
             .param("mp", empty_modality_presence())
             .param("now", datetime_value(Utc::now()))
             .fetch_all()
@@ -243,6 +285,47 @@ impl KnowledgeBase {
 /// Serialize a [`BlobStorage`] into the `:KnowledgeBaseStats.blob_storage`
 /// map shape. Only `kind` is required for the mismatch check; the
 /// remaining fields are persisted as informational metadata.
+/// The embedding model a store's vectors were made with.
+#[derive(Debug, PartialEq, Eq)]
+struct EmbeddingIdentity {
+    model_id: String,
+    dimensions: i64,
+}
+
+impl EmbeddingIdentity {
+    fn of(kb: &KnowledgeBase) -> Self {
+        Self {
+            model_id: kb.config.embedding.model_id.clone(),
+            dimensions: i64::try_from(kb.config.embedding.dimensions).unwrap_or(i64::MAX),
+        }
+    }
+
+    fn encode(&self) -> Value {
+        let mut m: HashMap<String, Value> = HashMap::new();
+        m.insert("model_id".into(), Value::String(self.model_id.clone()));
+        m.insert("dimensions".into(), Value::Int(self.dimensions));
+        Value::Map(m)
+    }
+}
+
+fn decode_embedding_identity(value: Option<&Value>) -> Option<EmbeddingIdentity> {
+    let Some(Value::Map(m)) = value else {
+        return None;
+    };
+    let model_id = match m.get("model_id") {
+        Some(Value::String(s)) => s.clone(),
+        _ => return None,
+    };
+    let dimensions = match m.get("dimensions") {
+        Some(Value::Int(n)) => *n,
+        _ => return None,
+    };
+    Some(EmbeddingIdentity {
+        model_id,
+        dimensions,
+    })
+}
+
 fn encode_blob_storage(bs: &BlobStorage) -> Value {
     let mut m: HashMap<String, Value> = HashMap::new();
     m.insert("kind".into(), Value::String(bs.kind().to_string()));
