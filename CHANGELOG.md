@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and mix vectors from two models. Each store now records the model id and
   dimensions it was built with; a store from an earlier release records them
   on its next open.
+- **`Agent::consolidate` returns a `ConsolidationReport`** (`cycle`,
+  `procedures`, `topics`) instead of `CycleStats`, because it now also runs
+  procedure promotion and topic detection. The cycle's stats are
+  `report.cycle`, in Rust and Python.
+- **`DerivationTree` and `DerivationNode` are no longer re-exported** from
+  `uniko_memory` or `uniko_api::tools`. Nothing produced them.
 
 ### Added
 
@@ -55,6 +61,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `extraction_error`; `RecallItem` models gain `category`, `source_id` and
   `revision_id`; the typed wrappers gain `commit_unit`, `retire_source`,
   `restore_source`, `recall_with` and `health`.
+- **Visibility you can write.** Recall has always filtered Facts and
+  Observations by `private:` / `team:` / `org:` visibility, but nothing
+  wrote those values or the memberships they resolve through, so scoped
+  reads filtered nothing. `Agent::set_visibility` (with the `Visibility`
+  type) scopes an item, and `Uniko::add_team_member`, `add_org_member`,
+  `add_team_to_org` and their `remove_` counterparts record memberships.
+  Python gains these, a `Viewer` class, `Scope.as_viewer` and
+  `UnikoBuilder.scope`.
+- **Facts, actions, episodes and observations on `Agent`:** `assert_fact`,
+  `invalidate_fact`, `record_action` (also on `Session`, linked to it),
+  `record_episode` and `add_observation`, in Rust and Python. They were only
+  free functions taking a `KnowledgeBase`, which `uniko_api::tools` callers
+  and Python could not reach. The agent's participant is created when it has
+  not spoken yet.
+- **Rule management:** `Agent::list_rules`, `explain_rule` (source and
+  state) and `delete_rule`, which refuses stdlib rules.
 - `uniko.types` holds `Literal` aliases for the closed sets the API passes as
   strings (goal and task phases, recall kinds, worker status).
 - CI now builds the Python extension and runs its tests, `mypy.stubtest`
@@ -79,6 +101,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `__all__` now includes `FinalizeReport` and `CycleStats`.
 - A store whose blob backend or embedding model does not match the config is
   rejected before the models are prefetched, not after.
+- **`Agent::consolidate` now produces procedures and topics.** It ran only
+  the fact cycle, so an instance without the streaming pipeline (the Python
+  default) never got procedure or topic recall items.
 
 ## [0.4.0] - 2026-11-12
 

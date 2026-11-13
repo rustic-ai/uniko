@@ -90,8 +90,9 @@ transaction**. `observe()` returns only after that transaction commits, which is
 the write read-after-write consistent.
 
 !!! tip "Two ways consolidation runs"
-    **Explicitly** — `agent.consolidate()` runs one cycle on the calling task and returns
-    `CycleStats`. Always available, no streaming required. This is the path to use when you
+    **Explicitly** — `agent.consolidate()` runs one cycle on the calling task, then the
+    procedure-promotion and topic-detection sweeps, and returns a `ConsolidationReport`
+    (`cycle`, `procedures`, `topics`). Always available, no streaming required. This is the path to use when you
     want to decide the moment (end of a conversation, before a report, in a batch job).
 
     **Automatically** — an instance built with `.streaming(true)` owns a consolidation

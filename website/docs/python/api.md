@@ -97,6 +97,12 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 | `agent` | `agent(agent_id: str) -> Agent` | — (sync) | Mint an agent identity (cheap). |
 | `config` | `config() -> dict[str, Any]` | — (sync) | The full configuration this instance runs with, as nested dicts. |
 | `health` | `health() -> PipelineHealth \| None` | — (sync) | Streaming-pipeline health; `None` without `streaming(True)`. |
+| `add_team_member` | `add_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `add_team_member_sync` | Record a team membership; `False` when already recorded. |
+| `remove_team_member` | `remove_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `remove_team_member_sync` | Remove it; `False` when not recorded. |
+| `add_org_member` | `add_org_member(participant_id: str, org_id: str) -> Awaitable[bool]` | `add_org_member_sync` | Record a direct org membership. |
+| `remove_org_member` | `remove_org_member(participant_id: str, org_id: str) -> Awaitable[bool]` | `remove_org_member_sync` | Remove it. |
+| `add_team_to_org` | `add_team_to_org(team_id: str, org_id: str) -> Awaitable[bool]` | `add_team_to_org_sync` | Put a team in an org; its members get the org. |
+| `remove_team_from_org` | `remove_team_from_org(team_id: str, org_id: str) -> Awaitable[bool]` | `remove_team_from_org_sync` | Take it out again. |
 | `purge` | `purge() -> Awaitable[DeletionReport]` | `purge_sync` | Erase the whole graph (dev/test reset). |
 | `shutdown` | `shutdown() -> Awaitable[None]` | `shutdown_sync` | Drain workers and close. **Consumes the handle.** |
 
@@ -135,6 +141,7 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `llm` | `llm(spec: LlmSpec) -> UnikoBuilder` | — (sync) | Generation model — **required for `answer()`**. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
+| `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |
 | `build` | `build() -> Awaitable[Uniko]` | `build_sync` | Terminal: produce the `Uniko` instance. |
 
 ### Configuration
@@ -231,6 +238,9 @@ answer = await agent.answer("when is the deadline?")   # needs .llm(...)
 | `run_rule` | `run_rule(name: str, return_cols: list[str], params: dict \| None = None) -> Awaitable[list[dict]]` | `run_rule_sync` | Evaluate a named rule. |
 | `abduce` | `abduce(program: str, params: dict \| None = None) -> Awaitable[AbductionResult]` | `abduce_sync` | Run an abductive program. |
 | `assume` | `assume(assume_block: str) -> AssumeBuilder` | — (sync) | Open a hypothetical-mutation builder. |
+| `list_rules` | `list_rules() -> Awaitable[list[RuleView]]` | `list_rules_sync` | Every rule, stdlib ones included. |
+| `explain_rule` | `explain_rule(name: str) -> Awaitable[RuleView \| None]` | `explain_rule_sync` | A rule's source and state. |
+| `delete_rule` | `delete_rule(name: str) -> Awaitable[bool]` | `delete_rule_sync` | Stop a rule and mark it pruned. Stdlib rules raise `ConfigError`. |
 
 `assume` is synchronous and returns an [`AssumeBuilder`](#assumebuilder); the awaitable lives on the
 builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoning-with-locy.md).
@@ -244,9 +254,49 @@ builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoni
 | `finalize_session` | `finalize_session(session_id: str) -> Awaitable[FinalizeReport]` | `finalize_session_sync` | Build/refresh a session's retrieval surfaces without its `Session` handle. |
 | `retire_source` | `retire_source(source_id: str) -> Awaitable[bool]` | `retire_source_sync` | Hide everything recorded under a source id from recall, reversibly. |
 | `restore_source` | `restore_source(source_id: str) -> Awaitable[bool]` | `restore_source_sync` | Undo `retire_source`. |
-| `consolidate` | `consolidate() -> Awaitable[CycleStats]` | `consolidate_sync` | Run one consolidation cycle now: Observations → Facts. |
+| `consolidate` | `consolidate() -> Awaitable[ConsolidationReport]` | `consolidate_sync` | Consolidate now: Observations → Facts, then procedure promotion and topic detection. |
 | `unfinalized_session_ids` | `unfinalized_session_ids() -> Awaitable[list[str]]` | `unfinalized_session_ids_sync` | Sessions with no session-level chunks yet — drives a backfill loop. |
 | `forget_participant` | `forget_participant(participant_id: str) -> Awaitable[DeletionReport]` | `forget_participant_sync` | Forget a participant. |
+
+### Facts, actions, episodes, observations
+
+| Method | Signature | Sync | Description |
+| --- | --- | --- | --- |
+| `assert_fact` | `assert_fact(subject, predicate, object=None, *, observed_at=None, supporting_observation_ids=None, visibility=None) -> Awaitable[FactUpsert]` | `assert_fact_sync` | Write a fact directly; asserting an existing triple reinforces it. |
+| `invalidate_fact` | `invalidate_fact(fact_id, *, replacement_fact_id=None, reason=None) -> Awaitable[None]` | `invalidate_fact_sync` | Close a fact's validity interval. |
+| `record_action` | `record_action(action_type, *, action_id, input, output, status, started_at, ended_at, error, triggered_by_message_id, session_id, previous_action_id) -> Awaitable[ActionResult]` | `record_action_sync` | Record a tool call or other action. `input` / `output` are any JSON-shaped value. |
+| `record_episode` | `record_episode(action_type, *, episode_id, outcome, state, delta, importance, timestamp, triggered_by_message_id, involved_action_ids) -> Awaitable[int]` | `record_episode_sync` | Record an outcome; procedure promotion learns from these. |
+| `add_observation` | `add_observation(message_id, content, subject, *, predicate, object, temporal_phrase, temporal_anchor, observed_at, confidence, visibility) -> Awaitable[int]` | `add_observation_sync` | Add an observation anchored to a stored message. |
+| `set_visibility` | `set_visibility(node_id: int, visibility: str) -> Awaitable[bool]` | `set_visibility_sync` | Scope a Fact or Observation. |
+
+All keyword arguments default to `None`. The agent's participant is created if it has not
+spoken yet.
+
+### Visibility
+
+A Fact or Observation can be scoped to `"public"`, `"private:<participant_id>"`,
+`"team:<team_id>"` or `"org:<org_id>"`, with `set_visibility` or the `visibility` argument of
+`assert_fact` and `add_observation`. Scoped reads then leave out what the reader may not see:
+
+```python
+memory = uniko.Uniko.builder().scope_to_agent().build_sync()
+memory.add_team_member_sync("alice", "eng")
+
+writer = memory.agent("writer")
+writer.add_observation_sync("msg-1", "launch moves to march", "launch", visibility="team:eng")
+
+memory.agent("alice").recall_sync("launch")   # includes it
+memory.agent("bob").recall_sync("launch")     # does not
+```
+
+- **Unscoped reads see everything.** Scope them with `scope_to_agent()`, `scope(Viewer(...))`,
+  or per call with `Scope.as_viewer` / `Scope.as_participant`.
+- **Only Facts and Observations carry visibility.** The text of a turn stays recallable through
+  its message and chunks.
+- **A fact is shared by every assertion of its triple,** so scoping it scopes all of them.
+- **Forgotten items stay hidden:** `set_visibility` refuses to change them.
+- **An `Agent` resolves its own memberships once,** on its first scoped read. Take a fresh one
+  from `memory.agent(...)` to see a membership change.
 
 ---
 
@@ -280,6 +330,7 @@ assert result.message_node_id > 0
 | `finalize` | `finalize() -> Awaitable[FinalizeReport]` | `finalize_sync` | Build/refresh the session-level retrieval surfaces. |
 | `commit_unit` | `commit_unit(turns: Sequence[Turn]) -> Awaitable[UnitResult]` | `commit_unit_sync` | Several turns as one atomic, idempotent write. |
 | `summarize` | `summarize() -> Awaitable[SummarizeReport]` | `summarize_sync` | Finalize, then write a summary of anything new. |
+| `record_action` | `record_action(action_type, *, ...) -> Awaitable[ActionResult]` | `record_action_sync` | `Agent.record_action`, linked to this session. |
 
 !!! note "Streaming lane requires `streaming(True)`"
     `submit` / `submit_source` are fire-and-forget — they return immediately and process in the
@@ -496,6 +547,11 @@ Confines reads to a subset of the graph. Chainable.
 | `.participants` | `.participants(participants: list[str])` | Restrict to these participants. |
 | `.since` | `.since(since: datetime)` | Inclusive lower bound. |
 | `.until` | `.until(until: datetime)` | Exclusive upper bound. |
+| `.as_participant` | `.as_participant(participant_id: str)` | Read as this participant, memberships looked up at recall time. |
+| `.as_viewer` | `.as_viewer(viewer: Viewer)` | Read as this explicit viewer. |
+
+`Viewer(participant_id, teams=None, orgs=None)` is a viewer identity with the memberships given
+rather than looked up; it has `participant_id`, `teams` and `orgs` properties.
 
 ```python
 scope = uniko.Scope().sessions(["s1"]).since(cutoff)
@@ -620,9 +676,25 @@ Returned by `Session.finalize` and `Agent.finalize_session`.
 | `rebuilt` | `bool` | `True` when this call wrote to the graph; `False` when the surfaces were already current. |
 | `ended_at` | `datetime \| None` | The Session's latest message time, stamped by `finalize`. A Session is *open* while this is null, so finalizing removes it from the inactivity auto-close sweep. |
 
+### `ConsolidationReport`
+
+Returned by `Agent.consolidate`: `cycle` (`CycleStats`), `procedures` (`PromotionReport`:
+`created`, `reinforced`, `promoted`) and `topics` (`TopicReport`: `created`, `updated`,
+`entities_assigned`). Topic detection covers the whole store, not only the agent.
+
+### `FactUpsert`, `ActionResult`, `RuleView`
+
+- `FactUpsert` — from `assert_fact`: `node_id` (for `set_visibility`), `fact_id` (for
+  `invalidate_fact`), `was_created`, `observation_count`.
+- `ActionResult` — from `record_action`: `action_node`, and `overflow_artifact` when the output
+  was too large to keep inline.
+- `RuleView` — from `list_rules` / `explain_rule`: `name`, `source_type` (`stdlib`, `authored`,
+  `derived`), `status`, `confidence`, and from `explain_rule` the `source` and
+  `natural_language`.
+
 ### `CycleStats`
 
-Returned by `Agent.consolidate`.
+The `cycle` part of a `ConsolidationReport`.
 
 | Field | Type |
 | --- | --- |
