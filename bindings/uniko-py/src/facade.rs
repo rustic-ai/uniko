@@ -13,12 +13,14 @@
 use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
-use uniko_api::tools::{LlmSpec, RecallScope, Uniko, UnikoBuilder, UnikoError};
+use uniko_api::tools::{
+    ExtractRequest, LlmSpec, Modality, RecallScope, TextExtractor, Uniko, UnikoBuilder, UnikoError,
+};
 
 use crate::agent::PyAgent;
 use crate::config::{config_from_py, config_to_py, embedding_from_py, reranker_from_py};
 use crate::errors::to_pyerr;
-use crate::macros::{bridge, bridge_sync};
+use crate::macros::{bridge, bridge_sync, pymethods_with_sync};
 use crate::outputs::{PyDeletionReport, PyPipelineHealth};
 use crate::scope::PyViewer;
 
@@ -54,325 +56,217 @@ impl PyUniko {
     }
 }
 
-#[pymethods]
-impl PyUniko {
-    /// Open or create a persistent instance at `path` with best defaults.
-    #[staticmethod]
-    fn open(py: Python<'_>, path: String) -> PyResult<Bound<'_, PyAny>> {
-        bridge!(py, _g = (), {
-            let uniko = Uniko::open(path).await.map_err(to_pyerr)?;
-            Ok(PyUniko::wrap(uniko))
-        })
-    }
-
-    /// Blocking variant of [`open`](Self::open).
-    #[staticmethod]
-    fn open_sync(py: Python<'_>, path: String) -> PyResult<PyUniko> {
-        bridge_sync!(py, _g = (), {
-            let uniko = Uniko::open(path).await.map_err(to_pyerr)?;
-            Ok(PyUniko::wrap(uniko))
-        })
-    }
-
-    /// Open an ephemeral in-memory instance with best defaults.
-    #[staticmethod]
-    fn in_memory(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-        bridge!(py, _g = (), {
-            let uniko = Uniko::in_memory().await.map_err(to_pyerr)?;
-            Ok(PyUniko::wrap(uniko))
-        })
-    }
-
-    /// Blocking variant of [`in_memory`](Self::in_memory).
-    #[staticmethod]
-    fn in_memory_sync(py: Python<'_>) -> PyResult<PyUniko> {
-        bridge_sync!(py, _g = (), {
-            let uniko = Uniko::in_memory().await.map_err(to_pyerr)?;
-            Ok(PyUniko::wrap(uniko))
-        })
-    }
-
-    /// Start a builder for non-default construction.
-    #[staticmethod]
-    fn builder() -> PyUnikoBuilder {
-        PyUnikoBuilder::new()
-    }
-
-    /// A view scoped to `agent_id` exposing the agent-facing tools.
-    fn agent(&self, agent_id: String) -> PyResult<PyAgent> {
-        let guard = self.inner.lock().expect("Uniko mutex poisoned");
-        let uniko = guard.as_ref().ok_or_else(closed)?;
-        Ok(PyAgent::wrap(uniko.agent(agent_id)))
-    }
-
-    /// The full configuration this instance runs with, as nested dicts.
-    ///
-    /// The shape matches what `UnikoBuilder.config()` accepts, so the result
-    /// can be edited and passed back. `embedding.provider_options` is shown
-    /// as `"<redacted>"` when set, since it can hold API keys.
-    fn config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let guard = self.inner.lock().expect("Uniko mutex poisoned");
-        let uniko = guard.as_ref().ok_or_else(closed)?;
-        config_to_py(py, uniko.config())
-    }
-
-    /// A health snapshot of the streaming pipeline, or `None` when the
-    /// instance was built without `streaming(True)`.
-    fn health(&self, py: Python<'_>) -> PyResult<Option<Py<PyPipelineHealth>>> {
-        let guard = self.inner.lock().expect("Uniko mutex poisoned");
-        let uniko = guard.as_ref().ok_or_else(closed)?;
-        uniko
-            .health()
-            .map(|h| PyPipelineHealth::from_rust(py, &h))
-            .transpose()
-    }
-
-    /// Record that `participant_id` is a member of team `team_id`, so it
-    /// sees items with `team:{team_id}` visibility. Creates the participant
-    /// and team when absent. Returns False when already recorded.
-    ///
-    /// An `Agent` resolves its own memberships on its first scoped read, so
-    /// take a fresh one from `agent()` to see a change.
-    fn add_team_member<'py>(
-        &self,
-        py: Python<'py>,
-        participant_id: String,
-        team_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let uniko = self.cloned()?;
-        bridge!(py, instance = uniko, {
-            instance
-                .add_team_member(&participant_id, &team_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Blocking variant of [`add_team_member`](Self::add_team_member).
-    fn add_team_member_sync(
-        &self,
-        py: Python<'_>,
-        participant_id: String,
-        team_id: String,
-    ) -> PyResult<bool> {
-        let uniko = self.cloned()?;
-        bridge_sync!(py, instance = uniko, {
-            instance
-                .add_team_member(&participant_id, &team_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Undo `add_team_member`. Returns False when it was not recorded.
-    fn remove_team_member<'py>(
-        &self,
-        py: Python<'py>,
-        participant_id: String,
-        team_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let uniko = self.cloned()?;
-        bridge!(py, instance = uniko, {
-            instance
-                .remove_team_member(&participant_id, &team_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Blocking variant of [`remove_team_member`](Self::remove_team_member).
-    fn remove_team_member_sync(
-        &self,
-        py: Python<'_>,
-        participant_id: String,
-        team_id: String,
-    ) -> PyResult<bool> {
-        let uniko = self.cloned()?;
-        bridge_sync!(py, instance = uniko, {
-            instance
-                .remove_team_member(&participant_id, &team_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Record that `participant_id` is a member of org `org_id`. Returns False when already recorded.
-    fn add_org_member<'py>(
-        &self,
-        py: Python<'py>,
-        participant_id: String,
-        org_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let uniko = self.cloned()?;
-        bridge!(py, instance = uniko, {
-            instance
-                .add_org_member(&participant_id, &org_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Blocking variant of [`add_org_member`](Self::add_org_member).
-    fn add_org_member_sync(
-        &self,
-        py: Python<'_>,
-        participant_id: String,
-        org_id: String,
-    ) -> PyResult<bool> {
-        let uniko = self.cloned()?;
-        bridge_sync!(py, instance = uniko, {
-            instance
-                .add_org_member(&participant_id, &org_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Undo `add_org_member`. Returns False when it was not recorded.
-    fn remove_org_member<'py>(
-        &self,
-        py: Python<'py>,
-        participant_id: String,
-        org_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let uniko = self.cloned()?;
-        bridge!(py, instance = uniko, {
-            instance
-                .remove_org_member(&participant_id, &org_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Blocking variant of [`remove_org_member`](Self::remove_org_member).
-    fn remove_org_member_sync(
-        &self,
-        py: Python<'_>,
-        participant_id: String,
-        org_id: String,
-    ) -> PyResult<bool> {
-        let uniko = self.cloned()?;
-        bridge_sync!(py, instance = uniko, {
-            instance
-                .remove_org_member(&participant_id, &org_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Record that team `team_id` belongs to org `org_id`, giving its members that org. Returns False when already recorded.
-    fn add_team_to_org<'py>(
-        &self,
-        py: Python<'py>,
-        team_id: String,
-        org_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let uniko = self.cloned()?;
-        bridge!(py, instance = uniko, {
-            instance
-                .add_team_to_org(&team_id, &org_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Blocking variant of [`add_team_to_org`](Self::add_team_to_org).
-    fn add_team_to_org_sync(
-        &self,
-        py: Python<'_>,
-        team_id: String,
-        org_id: String,
-    ) -> PyResult<bool> {
-        let uniko = self.cloned()?;
-        bridge_sync!(py, instance = uniko, {
-            instance
-                .add_team_to_org(&team_id, &org_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Undo `add_team_to_org`. Returns False when it was not recorded.
-    fn remove_team_from_org<'py>(
-        &self,
-        py: Python<'py>,
-        team_id: String,
-        org_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let uniko = self.cloned()?;
-        bridge!(py, instance = uniko, {
-            instance
-                .remove_team_from_org(&team_id, &org_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Blocking variant of [`remove_team_from_org`](Self::remove_team_from_org).
-    fn remove_team_from_org_sync(
-        &self,
-        py: Python<'_>,
-        team_id: String,
-        org_id: String,
-    ) -> PyResult<bool> {
-        let uniko = self.cloned()?;
-        bridge_sync!(py, instance = uniko, {
-            instance
-                .remove_team_from_org(&team_id, &org_id)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
-    /// Erase the entire graph. Intended for dev/test reset.
-    fn purge<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let uniko = self.cloned()?;
-        bridge!(py, instance = uniko, {
-            let report = instance.purge().await.map_err(to_pyerr)?;
-            Python::attach(|py| PyDeletionReport::from_rust(py, &report))
-        })
-    }
-
-    /// Blocking variant of [`purge`](Self::purge).
-    fn purge_sync(&self, py: Python<'_>) -> PyResult<Py<PyDeletionReport>> {
-        let uniko = self.cloned()?;
-        bridge_sync!(py, instance = uniko, {
-            let report = instance.purge().await.map_err(to_pyerr)?;
-            Python::attach(|py| PyDeletionReport::from_rust(py, &report))
-        })
-    }
-
-    /// Shut down the instance and drain the pipeline.
-    ///
-    /// Consumes the handle: all `Agent` / `Session` objects derived from it
-    /// must be dropped first, or the store's reference-count guard fails.
-    /// Using the handle afterwards raises.
-    fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let taken = self.inner.lock().expect("Uniko mutex poisoned").take();
-        bridge!(py, _g = (), {
-            let uniko = taken.ok_or_else(closed)?;
-            uniko.shutdown().await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    /// Blocking variant of [`shutdown`](Self::shutdown).
-    fn shutdown_sync(&self, py: Python<'_>) -> PyResult<()> {
-        let taken = self.inner.lock().expect("Uniko mutex poisoned").take();
-        bridge_sync!(py, _g = (), {
-            let uniko = taken.ok_or_else(closed)?;
-            uniko.shutdown().await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn __repr__(&self) -> String {
-        let live = self.inner.lock().map(|g| g.is_some()).unwrap_or(false);
-        if live {
-            "Uniko(open)".to_string()
-        } else {
-            "Uniko(shut down)".to_string()
+pymethods_with_sync! {
+    PyUniko;
+    plain {
+        /// Open or create a persistent instance at `path` with best defaults.
+        #[staticmethod]
+        fn open(py: Python<'_>, path: String) -> PyResult<Bound<'_, PyAny>> {
+            bridge!(py, _g = (), {
+                let uniko = Uniko::open(path).await.map_err(to_pyerr)?;
+                Ok(PyUniko::wrap(uniko))
+            })
         }
+
+        /// Blocking variant of [`open`](Self::open).
+        #[staticmethod]
+        fn open_sync(py: Python<'_>, path: String) -> PyResult<PyUniko> {
+            bridge_sync!(py, _g = (), {
+                let uniko = Uniko::open(path).await.map_err(to_pyerr)?;
+                Ok(PyUniko::wrap(uniko))
+            })
+        }
+
+        /// Open an ephemeral in-memory instance with best defaults.
+        #[staticmethod]
+        fn in_memory(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+            bridge!(py, _g = (), {
+                let uniko = Uniko::in_memory().await.map_err(to_pyerr)?;
+                Ok(PyUniko::wrap(uniko))
+            })
+        }
+
+        /// Blocking variant of [`in_memory`](Self::in_memory).
+        #[staticmethod]
+        fn in_memory_sync(py: Python<'_>) -> PyResult<PyUniko> {
+            bridge_sync!(py, _g = (), {
+                let uniko = Uniko::in_memory().await.map_err(to_pyerr)?;
+                Ok(PyUniko::wrap(uniko))
+            })
+        }
+
+        /// Start a builder for non-default construction.
+        #[staticmethod]
+        fn builder() -> PyUnikoBuilder {
+            PyUnikoBuilder::new()
+        }
+
+        /// A view scoped to `agent_id` exposing the agent-facing tools.
+        fn agent(&self, agent_id: String) -> PyResult<PyAgent> {
+            let guard = self.inner.lock().expect("Uniko mutex poisoned");
+            let uniko = guard.as_ref().ok_or_else(closed)?;
+            Ok(PyAgent::wrap(uniko.agent(agent_id)))
+        }
+
+        /// The full configuration this instance runs with, as nested dicts.
+        ///
+        /// The shape matches what `UnikoBuilder.config()` accepts, so the result
+        /// can be edited and passed back. `embedding.provider_options` is shown
+        /// as `"<redacted>"` when set, since it can hold API keys.
+        fn config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+            let guard = self.inner.lock().expect("Uniko mutex poisoned");
+            let uniko = guard.as_ref().ok_or_else(closed)?;
+            config_to_py(py, uniko.config())
+        }
+
+        /// A health snapshot of the streaming pipeline, or `None` when the
+        /// instance was built without `streaming(True)`.
+        fn health(&self, py: Python<'_>) -> PyResult<Option<Py<PyPipelineHealth>>> {
+            let guard = self.inner.lock().expect("Uniko mutex poisoned");
+            let uniko = guard.as_ref().ok_or_else(closed)?;
+            uniko
+                .health()
+                .map(|h| PyPipelineHealth::from_rust(py, &h))
+                .transpose()
+        }
+
+        fn __repr__(&self) -> String {
+            let live = self.inner.lock().map(|g| g.is_some()).unwrap_or(false);
+            if live {
+                "Uniko(open)".to_string()
+            } else {
+                "Uniko(shut down)".to_string()
+            }
+        }
+
+    }
+    bridged {
+        /// Record that `participant_id` is a member of team `team_id`, so it
+        /// sees items with `team:{team_id}` visibility. Creates the participant
+        /// and team when absent. Returns False when already recorded.
+        ///
+        /// An `Agent` resolves its own memberships on its first scoped read, so
+        /// take a fresh one from `agent()` to see a change.
+        fn add_team_member / add_team_member_sync(&self, py, participant_id: String, team_id: String) -> bool {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                instance
+                    .add_team_member(&participant_id, &team_id)
+                    .await
+                    .map_err(to_pyerr)
+
+            }
+        }
+
+        /// Undo `add_team_member`. Returns False when it was not recorded.
+        fn remove_team_member / remove_team_member_sync(&self, py, participant_id: String, team_id: String) -> bool {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                instance
+                    .remove_team_member(&participant_id, &team_id)
+                    .await
+                    .map_err(to_pyerr)
+
+            }
+        }
+
+        /// Record that `participant_id` is a member of org `org_id`. Returns False when already recorded.
+        fn add_org_member / add_org_member_sync(&self, py, participant_id: String, org_id: String) -> bool {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                instance
+                    .add_org_member(&participant_id, &org_id)
+                    .await
+                    .map_err(to_pyerr)
+
+            }
+        }
+
+        /// Undo `add_org_member`. Returns False when it was not recorded.
+        fn remove_org_member / remove_org_member_sync(&self, py, participant_id: String, org_id: String) -> bool {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                instance
+                    .remove_org_member(&participant_id, &org_id)
+                    .await
+                    .map_err(to_pyerr)
+
+            }
+        }
+
+        /// Record that team `team_id` belongs to org `org_id`, giving its members that org. Returns False when already recorded.
+        fn add_team_to_org / add_team_to_org_sync(&self, py, team_id: String, org_id: String) -> bool {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                instance
+                    .add_team_to_org(&team_id, &org_id)
+                    .await
+                    .map_err(to_pyerr)
+
+            }
+        }
+
+        /// Undo `add_team_to_org`. Returns False when it was not recorded.
+        fn remove_team_from_org / remove_team_from_org_sync(&self, py, team_id: String, org_id: String) -> bool {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                instance
+                    .remove_team_from_org(&team_id, &org_id)
+                    .await
+                    .map_err(to_pyerr)
+
+            }
+        }
+
+        /// Erase the entire graph. Intended for dev/test reset.
+        fn purge / purge_sync(&self, py) -> Py<PyDeletionReport> {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                let report = instance.purge().await.map_err(to_pyerr)?;
+                Python::attach(|py| PyDeletionReport::from_rust(py, &report))
+
+            }
+        }
+
+        /// Shut down the instance and drain the pipeline.
+        ///
+        /// Consumes the handle: all `Agent` / `Session` objects derived from it
+        /// must be dropped first, or the store's reference-count guard fails.
+        /// Using the handle afterwards raises.
+        fn shutdown / shutdown_sync(&self, py) -> () {
+            prepare {
+                let taken = self.inner.lock().expect("Uniko mutex poisoned").take();
+
+            }
+            run(_g = ()) {
+                let uniko = taken.ok_or_else(closed)?;
+                uniko.shutdown().await.map_err(to_pyerr)?;
+                Ok(())
+
+            }
+        }
+
     }
 }
 
@@ -406,123 +300,148 @@ impl PyUnikoBuilder {
     }
 }
 
-#[pymethods]
-impl PyUnikoBuilder {
-    /// Use a persistent store rooted at `path`.
-    fn path<'py>(slf: PyRef<'py, Self>, path: String) -> PyResult<PyRef<'py, Self>> {
-        slf.map(|b| b.path(path))?;
-        Ok(slf)
-    }
+pymethods_with_sync! {
+    PyUnikoBuilder;
+    plain {
+        /// Use a persistent store rooted at `path`.
+        fn path<'py>(slf: PyRef<'py, Self>, path: String) -> PyResult<PyRef<'py, Self>> {
+            slf.map(|b| b.path(path))?;
+            Ok(slf)
+        }
 
-    /// Use an ephemeral in-memory store (the default).
-    fn in_memory<'py>(slf: PyRef<'py, Self>) -> PyResult<PyRef<'py, Self>> {
-        slf.map(UnikoBuilder::in_memory)?;
-        Ok(slf)
-    }
+        /// Use an ephemeral in-memory store (the default).
+        fn in_memory<'py>(slf: PyRef<'py, Self>) -> PyResult<PyRef<'py, Self>> {
+            slf.map(UnikoBuilder::in_memory)?;
+            Ok(slf)
+        }
 
-    /// Set the base configuration from a dict or a `UnikoConfigModel`.
-    ///
-    /// Partial input is merged onto the defaults, nested sections included.
-    /// An unknown key raises `ConfigError` naming it. `embedding()` and
-    /// `reranker()` override the matching sections whatever the call order.
-    fn config<'py>(slf: PyRef<'py, Self>, config: &Bound<'_, PyAny>) -> PyResult<PyRef<'py, Self>> {
-        let config = config_from_py(config)?;
-        slf.map(|b| b.raw_config(config))?;
-        Ok(slf)
-    }
+        /// Set the base configuration from a dict or a `UnikoConfigModel`.
+        ///
+        /// Partial input is merged onto the defaults, nested sections included.
+        /// An unknown key raises `ConfigError` naming it. `embedding()` and
+        /// `reranker()` override the matching sections whatever the call order.
+        fn config<'py>(slf: PyRef<'py, Self>, config: &Bound<'_, PyAny>) -> PyResult<PyRef<'py, Self>> {
+            let config = config_from_py(config)?;
+            slf.map(|b| b.raw_config(config))?;
+            Ok(slf)
+        }
 
-    /// Choose the embedding model: a preset name (`"nomic"`, `"minilm"`,
-    /// `"bge-small"`, `"bge-large"`, `"bge-m3"`, `"gemma"`, ...) or a dict
-    /// merged onto the default embedding section.
-    fn embedding<'py>(
-        slf: PyRef<'py, Self>,
-        embedding: &Bound<'_, PyAny>,
-    ) -> PyResult<PyRef<'py, Self>> {
-        let embedding = embedding_from_py(embedding)?;
-        slf.map(|b| b.embedding(embedding))?;
-        Ok(slf)
-    }
+        /// Choose the embedding model: a preset name (`"nomic"`, `"minilm"`,
+        /// `"bge-small"`, `"bge-large"`, `"bge-m3"`, `"gemma"`, ...) or a dict
+        /// merged onto the default embedding section.
+        fn embedding<'py>(
+            slf: PyRef<'py, Self>,
+            embedding: &Bound<'_, PyAny>,
+        ) -> PyResult<PyRef<'py, Self>> {
+            let embedding = embedding_from_py(embedding)?;
+            slf.map(|b| b.embedding(embedding))?;
+            Ok(slf)
+        }
 
-    /// Choose the reranker: `"bge-base"`, `"minilm"`, a dict merged onto the
-    /// default reranker section, or `None` to turn reranking off.
-    fn reranker<'py>(
-        slf: PyRef<'py, Self>,
-        reranker: &Bound<'_, PyAny>,
-    ) -> PyResult<PyRef<'py, Self>> {
-        let reranker = reranker_from_py(reranker)?;
-        slf.map(|b| b.reranker(reranker))?;
-        Ok(slf)
-    }
+        /// Choose the reranker: `"bge-base"`, `"minilm"`, a dict merged onto the
+        /// default reranker section, or `None` to turn reranking off.
+        fn reranker<'py>(
+            slf: PyRef<'py, Self>,
+            reranker: &Bound<'_, PyAny>,
+        ) -> PyResult<PyRef<'py, Self>> {
+            let reranker = reranker_from_py(reranker)?;
+            slf.map(|b| b.reranker(reranker))?;
+            Ok(slf)
+        }
 
-    /// Register an LLM, enabling `Agent.answer`.
-    fn llm<'py>(slf: PyRef<'py, Self>, spec: &PyLlmSpec) -> PyResult<PyRef<'py, Self>> {
-        let spec = spec.spec();
-        slf.map(|b| b.llm(spec))?;
-        Ok(slf)
-    }
+        /// Index image, audio or video sources as the text `extract` returns.
+        ///
+        /// `modality` is `"image"`, `"audio"` or `"video"`. `extract` is called
+        /// with an `ExtractRequest` (the payload `data`, its `mime`, `path` and
+        /// `metadata`) and returns the text to index — a caption, a transcript,
+        /// OCR output. It runs on a worker thread, holding the GIL only while
+        /// it runs; an exception fails that ingest. Registering a modality
+        /// again replaces the earlier extractor.
+        fn extractor<'py>(
+            slf: PyRef<'py, Self>,
+            modality: &str,
+            extract: Py<PyAny>,
+        ) -> PyResult<PyRef<'py, Self>> {
+            let modality = match modality {
+                "image" => Modality::Image,
+                "audio" => Modality::Audio,
+                "video" => Modality::Video,
+                other => {
+                    return Err(to_pyerr(UnikoError::Config(format!(
+                        "extractor modality '{other}': expected image, audio or video"
+                    ))));
+                }
+            };
+            if !extract.bind(slf.py()).is_callable() {
+                return Err(to_pyerr(UnikoError::Config(
+                    "extractor: `extract` must be callable".to_string(),
+                )));
+            }
+            let extractor =
+                TextExtractor::new(modality, move |request| call_extract(&extract, request));
+            slf.map(|b| b.extractor(std::sync::Arc::new(extractor)))?;
+            Ok(slf)
+        }
 
-    /// Enable the asynchronous streaming ingest pipeline.
-    fn streaming<'py>(slf: PyRef<'py, Self>, on: bool) -> PyResult<PyRef<'py, Self>> {
-        slf.map(|b| b.streaming(on))?;
-        Ok(slf)
-    }
+        /// Register an LLM, enabling `Agent.answer`.
+        fn llm<'py>(slf: PyRef<'py, Self>, spec: &PyLlmSpec) -> PyResult<PyRef<'py, Self>> {
+            let spec = spec.spec();
+            slf.map(|b| b.llm(spec))?;
+            Ok(slf)
+        }
 
-    /// Scope every agent's reads to its own visibility.
-    fn scope_to_agent<'py>(slf: PyRef<'py, Self>) -> PyResult<PyRef<'py, Self>> {
-        slf.map(UnikoBuilder::scope_to_agent)?;
-        Ok(slf)
-    }
+        /// Enable the asynchronous streaming ingest pipeline.
+        fn streaming<'py>(slf: PyRef<'py, Self>, on: bool) -> PyResult<PyRef<'py, Self>> {
+            slf.map(|b| b.streaming(on))?;
+            Ok(slf)
+        }
 
-    /// Set every agent's read scope: a `Viewer` reads as that viewer, and
-    /// `None` reads everything (the default). `scope_to_agent()` reads as
-    /// each agent itself.
-    fn scope<'py>(slf: PyRef<'py, Self>, viewer: Option<&PyViewer>) -> PyResult<PyRef<'py, Self>> {
-        let scope = match viewer {
-            Some(v) => RecallScope::As(v.viewer()),
-            None => RecallScope::Unrestricted,
-        };
-        slf.map(|b| b.scope(scope))?;
-        Ok(slf)
-    }
+        /// Scope every agent's reads to its own visibility.
+        fn scope_to_agent<'py>(slf: PyRef<'py, Self>) -> PyResult<PyRef<'py, Self>> {
+            slf.map(UnikoBuilder::scope_to_agent)?;
+            Ok(slf)
+        }
 
-    /// Build the configured instance.
-    fn build<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let builder = self
-            .inner
-            .lock()
-            .expect("UnikoBuilder mutex poisoned")
-            .take()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "UnikoBuilder already consumed by build()",
-                )
-            })?;
-        bridge!(py, _g = (), {
-            let uniko = builder.build().await.map_err(to_pyerr)?;
-            Ok(PyUniko::wrap(uniko))
-        })
-    }
+        /// Set every agent's read scope: a `Viewer` reads as that viewer, and
+        /// `None` reads everything (the default). `scope_to_agent()` reads as
+        /// each agent itself.
+        fn scope<'py>(slf: PyRef<'py, Self>, viewer: Option<&PyViewer>) -> PyResult<PyRef<'py, Self>> {
+            let scope = match viewer {
+                Some(v) => RecallScope::As(v.viewer()),
+                None => RecallScope::Unrestricted,
+            };
+            slf.map(|b| b.scope(scope))?;
+            Ok(slf)
+        }
 
-    /// Blocking variant of [`build`](Self::build).
-    fn build_sync(&self, py: Python<'_>) -> PyResult<PyUniko> {
-        let builder = self
-            .inner
-            .lock()
-            .expect("UnikoBuilder mutex poisoned")
-            .take()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(
-                    "UnikoBuilder already consumed by build()",
-                )
-            })?;
-        bridge_sync!(py, _g = (), {
-            let uniko = builder.build().await.map_err(to_pyerr)?;
-            Ok(PyUniko::wrap(uniko))
-        })
-    }
+        fn __repr__(&self) -> String {
+            "UnikoBuilder(...)".to_string()
+        }
 
-    fn __repr__(&self) -> String {
-        "UnikoBuilder(...)".to_string()
+    }
+    bridged {
+        /// Build the configured instance.
+        fn build / build_sync(&self, py) -> PyUniko {
+            prepare {
+                let builder = self
+                    .inner
+                    .lock()
+                    .expect("UnikoBuilder mutex poisoned")
+                    .take()
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "UnikoBuilder already consumed by build()",
+                        )
+                    })?;
+
+            }
+            run(_g = ()) {
+                let uniko = builder.build().await.map_err(to_pyerr)?;
+                Ok(PyUniko::wrap(uniko))
+
+            }
+        }
+
     }
 }
 
@@ -590,5 +509,73 @@ impl PyLlmSpec {
 
     fn __repr__(&self) -> String {
         "LlmSpec(...)".to_string()
+    }
+}
+
+/// Call a Python extractor with `request`, returning its text.
+fn call_extract(extract: &Py<PyAny>, request: ExtractRequest) -> Result<String, UnikoError> {
+    Python::attach(|py| {
+        let request = Py::new(
+            py,
+            PyExtractRequest::from_rust(py, request).map_err(py_err)?,
+        )
+        .map_err(py_err)?;
+        let text = extract.call1(py, (request,)).map_err(py_err)?;
+        text.extract::<String>(py)
+            .map_err(|_| UnikoError::Config("extractor must return a str".to_string()))
+    })
+}
+
+fn py_err(err: PyErr) -> UnikoError {
+    UnikoError::Internal(format!("extractor raised: {err}"))
+}
+
+/// What a `UnikoBuilder.extractor` function receives.
+#[pyclass(name = "ExtractRequest", module = "uniko", frozen)]
+pub struct PyExtractRequest {
+    /// `"image"`, `"audio"` or `"video"`.
+    #[pyo3(get)]
+    modality: &'static str,
+    /// The payload.
+    #[pyo3(get)]
+    data: Py<pyo3::types::PyBytes>,
+    /// The resolved MIME type.
+    #[pyo3(get)]
+    mime: String,
+    /// The source path, when known.
+    #[pyo3(get)]
+    path: Option<String>,
+    /// The source's metadata.
+    #[pyo3(get)]
+    metadata: Py<PyAny>,
+}
+
+impl PyExtractRequest {
+    fn from_rust(py: Python<'_>, request: ExtractRequest) -> PyResult<Self> {
+        let metadata = serde_json::Value::Object(request.metadata.into_iter().collect());
+        Ok(Self {
+            modality: match request.modality {
+                Modality::Image => "image",
+                Modality::Audio => "audio",
+                Modality::Video => "video",
+                _ => "other",
+            },
+            data: pyo3::types::PyBytes::new(py, &request.bytes).unbind(),
+            mime: request.mime.to_string(),
+            path: request.path,
+            metadata: crate::convert::json_to_py(py, &metadata)?,
+        })
+    }
+}
+
+#[pymethods]
+impl PyExtractRequest {
+    fn __repr__(&self, py: Python<'_>) -> String {
+        format!(
+            "ExtractRequest(modality='{}', mime='{}', bytes={})",
+            self.modality,
+            self.mime,
+            self.data.bind(py).as_bytes().len()
+        )
     }
 }

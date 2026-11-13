@@ -62,3 +62,88 @@ macro_rules! bridge_sync {
 
 pub(crate) use bridge;
 pub(crate) use bridge_sync;
+
+/// Emit a class's `#[pymethods]` block, generating each `*_sync` twin from
+/// the same body as its async method.
+///
+/// ```ignore
+/// pymethods_with_sync! {
+///     PyAgent;
+///     plain {
+///         #[getter]
+///         fn agent_id(&self) -> String { self.inner.agent_id().to_string() }
+///     }
+///     bridged {
+///         /// Recall context for `query`.
+///         fn recall / recall_sync(&self, py, query: String) -> Py<PyContextBundle> {
+///             prepare {}
+///             run(agent = self.inner.clone()) {
+///                 let bundle = agent.recall(&query).await.map_err(to_pyerr)?;
+///                 Python::attach(|py| PyContextBundle::from_rust(py, &bundle))
+///             }
+///         }
+///     }
+/// }
+/// ```
+///
+/// For each bridged method this emits `recall(&self, py, ...) ->
+/// PyResult<Bound<'py, PyAny>>`, returning an awaitable through
+/// [`bridge!`], and `recall_sync(&self, py, ...) -> PyResult<T>`, blocking
+/// through [`bridge_sync!`], where `T` is the declared return type. Both
+/// share the attributes (docs, `#[pyo3(signature = ...)]`), the `prepare`
+/// statements, which run on the calling thread with the GIL held (argument
+/// conversion, cheap clones), and the `run` body. Writing each pair once is
+/// what keeps the twins from drifting apart.
+///
+/// The whole `#[pymethods]` block is emitted because pyo3 does not expand
+/// macros inside one, and without its `multiple-pymethods` feature a class
+/// gets a single block. Methods that do not fit the async/sync pattern go
+/// in `plain` unchanged. The receiver and the `py` name are taken from the
+/// call site so the bodies resolve them.
+macro_rules! pymethods_with_sync {
+    (
+        $ty:ty;
+        plain { $($plain:tt)* }
+        bridged {
+            $(
+                $(#[$meta:meta])*
+                fn $name:ident / $sync:ident (
+                    & $slf:tt, $py:ident $(, $arg:ident : $argty:ty)* $(,)?
+                ) -> $ret:ty {
+                    prepare { $($pre:tt)* }
+                    run($bind:ident = $init:expr) $body:block
+                }
+            )*
+        }
+    ) => {
+        #[pymethods]
+        impl $ty {
+            $($plain)*
+            $(
+                $(#[$meta])*
+                fn $name<'py>(
+                    & $slf,
+                    $py: Python<'py>
+                    $(, $arg: $argty)*
+                ) -> PyResult<Bound<'py, PyAny>> {
+                    $($pre)*
+                    crate::macros::bridge!($py, $bind = $init, $body)
+                }
+
+                $(#[$meta])*
+                #[doc = ""]
+                #[doc = "Blocking variant: runs to completion on the shared runtime and returns the result."]
+                fn $sync(
+                    & $slf,
+                    $py: Python<'_>
+                    $(, $arg: $argty)*
+                ) -> PyResult<$ret> {
+                    $($pre)*
+                    crate::macros::bridge_sync!($py, $bind = $init, $body)
+                }
+            )*
+        }
+    };
+}
+
+pub(crate) use pymethods_with_sync;

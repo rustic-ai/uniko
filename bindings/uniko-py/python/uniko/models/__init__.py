@@ -70,6 +70,7 @@ from .outputs import (
     ActionResult,
     ConsolidationReport,
     FactUpsert,
+    MatchedProcedure,
     PromotionReport,
     RuleView,
     TopicReport,
@@ -120,6 +121,7 @@ __all__ = [
     "FactUpsert",
     "ActionResult",
     "RuleView",
+    "MatchedProcedure",
     "AbducedModification",
     "AbductionResult",
     # Config

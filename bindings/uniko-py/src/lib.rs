@@ -143,6 +143,7 @@ fn _uniko(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<facade::PyUniko>()?;
     m.add_class::<facade::PyUnikoBuilder>()?;
     m.add_class::<facade::PyLlmSpec>()?;
+    m.add_class::<facade::PyExtractRequest>()?;
     m.add_class::<agent::PyAgent>()?;
     m.add_class::<session::PySession>()?;
     m.add_class::<session::PyTurn>()?;

@@ -116,7 +116,9 @@ def test_assert_and_invalidate_a_fact() -> None:
     )
     assert isinstance(upsert, uniko.FactUpsert)
     assert upsert.was_created and upsert.fact_id
-    again = agent.assert_fact_sync("release", "ships_on", "friday")
+    again = agent.assert_fact_sync(
+        "release", "ships_on", "friday", visibility="team:eng"
+    )
     assert again.node_id == upsert.node_id and not again.was_created
     agent.invalidate_fact_sync(upsert.fact_id, reason="moved to monday")
     with pytest.raises(uniko.UnikoError):
@@ -183,3 +185,96 @@ def test_typed_wrappers_return_models() -> None:
     assert all(isinstance(r, RuleView) for r in agent.list_rules_sync())
     assert isinstance(agent.consolidate_sync(), ConsolidationReport)
     assert uni.add_team_member_sync("p", "t") is True
+
+
+# ── Turn visibility, extractors, procedures ──────────────────────────────
+
+
+def test_turn_visibility_scopes_the_message() -> None:
+    memory = uniko.Uniko.builder().in_memory().scope_to_agent().build_sync()
+    memory.add_team_member_sync("alice", "eng")
+    session = memory.agent("writer").session("s")
+    result = session.observe_sync(
+        uniko.Turn("writer", "The zeppelin hangar opens in Lisbon next quarter")
+        .id("scoped")
+        .visibility("team:eng")
+    )
+    hidden = {
+        result.message_node_id,
+        *result.chunk_node_ids,
+        *result.extracted_observations,
+    }
+    query = "zeppelin hangar Lisbon"
+    alice = {i.node_id for i in memory.agent("alice").recall_sync(query).items}
+    bob = {i.node_id for i in memory.agent("bob").recall_sync(query).items}
+    assert alice & hidden, "alice is in eng"
+    assert not bob & hidden, "bob is not"
+    with pytest.raises(uniko.ConfigError):
+        uniko.Turn("a", "b").visibility("crowd:x")
+
+
+def test_scoped_fact_is_apart_from_the_public_one() -> None:
+    agent = uniko.Uniko.in_memory_sync().agent("a")
+    public = agent.assert_fact_sync("budget", "capped_at", "ten thousand")
+    scoped = agent.assert_fact_sync(
+        "budget", "capped_at", "ten thousand", visibility="private:cfo"
+    )
+    assert public.node_id != scoped.node_id
+    assert scoped.fact_id.endswith("|private:cfo")
+    agent.invalidate_fact_sync(scoped.fact_id)
+
+
+def test_python_extractor_indexes_an_image() -> None:
+    seen: list[uniko.ExtractRequest] = []
+
+    def caption(request: uniko.ExtractRequest) -> str:
+        seen.append(request)
+        return f"a photo of a red zeppelin ({len(request.data)} bytes)"
+
+    memory = uniko.Uniko.builder().in_memory().extractor("image", caption).build_sync()
+    agent = memory.agent("viewer")
+    png = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0])
+    outcome = agent.session("photos").ingest_sync(uniko.IngestSource.from_bytes(png))
+    assert outcome.kind == "artifact" and outcome.chunk_node_ids
+    assert seen and seen[0].modality == "image" and seen[0].mime == "image/png"
+    view = agent.data.artifact_sync(outcome.artifact_id)
+    assert view is not None and "red zeppelin" in view.text
+
+
+def test_extractor_errors() -> None:
+    with pytest.raises(uniko.ConfigError, match="image, audio or video"):
+        uniko.Uniko.builder().extractor("smell", lambda r: "")
+    with pytest.raises(uniko.ConfigError, match="callable"):
+        uniko.Uniko.builder().extractor("image", "not a function")  # ty: ignore[invalid-argument-type]
+
+    def broken(request: uniko.ExtractRequest) -> str:
+        raise RuntimeError("model offline")
+
+    memory = uniko.Uniko.builder().in_memory().extractor("image", broken).build_sync()
+    png = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+    with pytest.raises(uniko.UnikoError, match="model offline"):
+        memory.agent("a").session("s").ingest_sync(uniko.IngestSource.from_bytes(png))
+
+
+def test_learned_procedures_are_matched_and_scored() -> None:
+    import datetime
+
+    agent = uniko.Uniko.in_memory_sync().agent("planner")
+    base = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+    for i in range(3):
+        for offset, action in ((0, "scan"), (30, "report")):
+            agent.record_episode_sync(
+                action,
+                outcome="success",
+                timestamp=base + datetime.timedelta(minutes=5 * i, seconds=offset),
+                state={"topic": action},
+            )
+    assert agent.consolidate_sync().procedures.created >= 1
+    matched = agent.match_procedures_sync({"last_action_type": "scan"})
+    procedure = next(m for m in matched if m.name == "scan → report")
+    assert isinstance(procedure, uniko.MatchedProcedure)
+    agent.record_procedure_use_sync(procedure.procedure_id, True)
+    assert agent.match_procedures_sync({"last_action_type": "other"}) == [] or all(
+        m.name != "scan → report"
+        for m in agent.match_procedures_sync({"last_action_type": "other"})
+    )

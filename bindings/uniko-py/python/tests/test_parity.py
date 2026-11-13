@@ -35,7 +35,7 @@ TYPED_EXCEPTIONS: dict[str, set[str]] = {}
 
 # Native classes built by the caller rather than returned, so they need no
 # output model even though their public members are all fields.
-INPUT_CLASSES = {"Viewer"}
+INPUT_CLASSES = {"Viewer", "ExtractRequest"}
 
 # Methods a result class may carry besides its fields.
 RESULT_METHODS = {"citations", "message_node_ids"}

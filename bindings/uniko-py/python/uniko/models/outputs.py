@@ -459,6 +459,20 @@ class RuleView(BaseModel):
         return cls.model_validate(native)
 
 
+class MatchedProcedure(BaseModel):
+    """A procedure ``match_procedures()`` found applicable (native ``MatchedProcedure``)."""
+
+    model_config = _OUT
+
+    procedure_id: str
+    name: str
+    effectiveness: float
+
+    @classmethod
+    def from_native(cls, native: Any) -> "MatchedProcedure":
+        return cls.model_validate(native)
+
+
 class AbducedModification(BaseModel):
     """One proposed graph modification from an abductive query.
 
@@ -512,6 +526,7 @@ __all__ = [
     "FactUpsert",
     "ActionResult",
     "RuleView",
+    "MatchedProcedure",
     "MessageView",
     "ArtifactView",
     "GoalView",

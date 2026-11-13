@@ -14,7 +14,7 @@ use pyo3::types::PyBytes;
 use uniko_api::tools::Agent;
 
 use crate::errors::to_pyerr;
-use crate::macros::{bridge, bridge_sync};
+use crate::macros::pymethods_with_sync;
 use crate::outputs::{PyArtifactView, PyMessageView};
 
 /// Addressed (by-id) retrieval over an agent's store.
@@ -33,100 +33,64 @@ impl PyData {
     }
 }
 
-#[pymethods]
-impl PyData {
-    /// Fetch a message by its external id, or `None`.
-    fn message<'py>(&self, py: Python<'py>, message_id: String) -> PyResult<Bound<'py, PyAny>> {
-        bridge!(py, agent = self.inner.clone(), {
-            let view = agent.data().message(&message_id).await.map_err(to_pyerr)?;
-            Python::attach(|py| match view {
-                Some(v) => PyMessageView::from_rust(py, &v).map(|p| p.into_any()),
-                None => Ok(py.None()),
-            })
-        })
+pymethods_with_sync! {
+    PyData;
+    plain {
+        fn __repr__(&self) -> String {
+            format!("Data(agent_id='{}')", self.inner.agent_id())
+        }
+
     }
+    bridged {
+        /// Fetch a message by its external id, or `None`.
+        fn message / message_sync(&self, py, message_id: String) -> Py<PyAny> {
+            prepare {}
+            run(agent = self.inner.clone()) {
+                let view = agent.data().message(&message_id).await.map_err(to_pyerr)?;
+                Python::attach(|py| match view {
+                    Some(v) => PyMessageView::from_rust(py, &v).map(|p| p.into_any()),
+                    None => Ok(py.None()),
+                })
 
-    /// Fetch an artifact by its external id, or `None`.
-    fn artifact<'py>(&self, py: Python<'py>, artifact_id: String) -> PyResult<Bound<'py, PyAny>> {
-        bridge!(py, agent = self.inner.clone(), {
-            let view = agent
-                .data()
-                .artifact(&artifact_id)
-                .await
-                .map_err(to_pyerr)?;
-            Python::attach(|py| match view {
-                Some(v) => PyArtifactView::from_rust(py, &v).map(|p| p.into_any()),
-                None => Ok(py.None()),
-            })
-        })
-    }
+            }
+        }
 
-    /// Fetch an artifact's raw bytes from the blob store, or `None`.
-    ///
-    /// This is the supported path for binary payloads — `Value::Bytes` cannot
-    /// be read back through a Cypher `RETURN` (a uni-db limitation).
-    fn artifact_bytes<'py>(
-        &self,
-        py: Python<'py>,
-        artifact_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        bridge!(py, agent = self.inner.clone(), {
-            let bytes = agent
-                .data()
-                .artifact_bytes(&artifact_id)
-                .await
-                .map_err(to_pyerr)?;
-            Python::attach(|py| match bytes {
-                Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
-                None => Ok(py.None()),
-            })
-        })
-    }
+        /// Fetch an artifact by its external id, or `None`.
+        fn artifact / artifact_sync(&self, py, artifact_id: String) -> Py<PyAny> {
+            prepare {}
+            run(agent = self.inner.clone()) {
+                let view = agent
+                    .data()
+                    .artifact(&artifact_id)
+                    .await
+                    .map_err(to_pyerr)?;
+                Python::attach(|py| match view {
+                    Some(v) => PyArtifactView::from_rust(py, &v).map(|p| p.into_any()),
+                    None => Ok(py.None()),
+                })
 
-    // ── Blocking (`*_sync`) skins ────────────────────────────────────
+            }
+        }
 
-    /// Blocking variant of [`message`](Self::message).
-    fn message_sync(&self, py: Python<'_>, message_id: String) -> PyResult<Py<PyAny>> {
-        bridge_sync!(py, agent = self.inner.clone(), {
-            let view = agent.data().message(&message_id).await.map_err(to_pyerr)?;
-            Python::attach(|py| match view {
-                Some(v) => PyMessageView::from_rust(py, &v).map(|p| p.into_any()),
-                None => Ok(py.None()),
-            })
-        })
-    }
+        /// Fetch an artifact's raw bytes from the blob store, or `None`.
+        ///
+        /// This is the supported path for binary payloads — `Value::Bytes` cannot
+        /// be read back through a Cypher `RETURN` (a uni-db limitation).
+        fn artifact_bytes / artifact_bytes_sync(&self, py, artifact_id: String) -> Py<PyAny> {
+            prepare {}
+            run(agent = self.inner.clone()) {
+                let bytes = agent
+                    .data()
+                    .artifact_bytes(&artifact_id)
+                    .await
+                    .map_err(to_pyerr)?;
+                Python::attach(|py| match bytes {
+                    Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
+                    None => Ok(py.None()),
+                })
 
-    /// Blocking variant of [`artifact`](Self::artifact).
-    fn artifact_sync(&self, py: Python<'_>, artifact_id: String) -> PyResult<Py<PyAny>> {
-        bridge_sync!(py, agent = self.inner.clone(), {
-            let view = agent
-                .data()
-                .artifact(&artifact_id)
-                .await
-                .map_err(to_pyerr)?;
-            Python::attach(|py| match view {
-                Some(v) => PyArtifactView::from_rust(py, &v).map(|p| p.into_any()),
-                None => Ok(py.None()),
-            })
-        })
-    }
+            }
+        }
 
-    /// Blocking variant of [`artifact_bytes`](Self::artifact_bytes).
-    fn artifact_bytes_sync(&self, py: Python<'_>, artifact_id: String) -> PyResult<Py<PyAny>> {
-        bridge_sync!(py, agent = self.inner.clone(), {
-            let bytes = agent
-                .data()
-                .artifact_bytes(&artifact_id)
-                .await
-                .map_err(to_pyerr)?;
-            Python::attach(|py| match bytes {
-                Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
-                None => Ok(py.None()),
-            })
-        })
-    }
-
-    fn __repr__(&self) -> String {
-        format!("Data(agent_id='{}')", self.inner.agent_id())
     }
 }

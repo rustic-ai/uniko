@@ -42,6 +42,7 @@ from .outputs import (
     ActionResult,
     ConsolidationReport,
     FactUpsert,
+    MatchedProcedure,
     PipelineHealth,
     RuleView,
     SummarizeReport,
@@ -522,6 +523,25 @@ class TypedAgent:
         rule = self._inner.explain_rule_sync(name)
         return None if rule is None else RuleView.from_native(rule)
 
+    # Procedures learned by consolidate().
+    async def match_procedures(self, state: dict[str, str]) -> list[MatchedProcedure]:
+        return [
+            MatchedProcedure.from_native(m)
+            for m in await self._inner.match_procedures(state)
+        ]
+
+    def match_procedures_sync(self, state: dict[str, str]) -> list[MatchedProcedure]:
+        return [
+            MatchedProcedure.from_native(m)
+            for m in self._inner.match_procedures_sync(state)
+        ]
+
+    async def record_procedure_use(self, procedure_id: str, succeeded: bool) -> None:
+        await self._inner.record_procedure_use(procedure_id, succeeded)
+
+    def record_procedure_use_sync(self, procedure_id: str, succeeded: bool) -> None:
+        self._inner.record_procedure_use_sync(procedure_id, succeeded)
+
     async def delete_rule(self, name: str) -> bool:
         return await self._inner.delete_rule(name)
 
@@ -644,6 +664,11 @@ class TypedUnikoBuilder:
 
     def scope_to_agent(self) -> "TypedUnikoBuilder":
         self._inner = self._inner.scope_to_agent()
+        return self
+
+    def extractor(self, modality: str, extract: Any) -> "TypedUnikoBuilder":
+        """Index ``modality`` sources as the text ``extract(request)`` returns."""
+        self._inner = self._inner.extractor(modality, extract)
         return self
 
     def scope(self, viewer: Any) -> "TypedUnikoBuilder":

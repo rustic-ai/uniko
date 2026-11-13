@@ -13,9 +13,9 @@ use pyo3::types::{PyDict, PyList};
 use uniko_api::tools::{
     AbductionResult, Answer, ArtifactView, AtomicIngestResult, CircuitState, ConsolidationReport,
     ContextBundle, CycleStats, DeletionReport, FactUpsert, FinalizeReport, GoalContext, GoalPhase,
-    GoalView, IngestOutcome, MessageView, ObserveResult, PipelineHealth, PromotionReport,
-    RecallItem, RecallKind, RecallSource, RecordActionResult, RuleView, SummarizeReport, TaskPhase,
-    TaskView, TopicReport, UnitResult, WorkerHealth, WorkerStatus,
+    GoalView, IngestOutcome, MatchedProcedure, MessageView, ObserveResult, PipelineHealth,
+    PromotionReport, RecallItem, RecallKind, RecallSource, RecordActionResult, RuleView,
+    SummarizeReport, TaskPhase, TaskView, TopicReport, UnitResult, WorkerHealth, WorkerStatus,
 };
 
 use crate::convert::{json_to_py, utc_datetime_to_py};
@@ -1414,6 +1414,44 @@ impl PyRuleView {
     }
 }
 
+/// A procedure `Agent.match_procedures()` found applicable.
+#[pyclass(name = "MatchedProcedure", module = "uniko", frozen)]
+pub struct PyMatchedProcedure {
+    /// Pass to `Agent.record_procedure_use`.
+    #[pyo3(get)]
+    procedure_id: String,
+    /// e.g. `"search → summarize"`.
+    #[pyo3(get)]
+    name: String,
+    /// How often following it has worked, in `[0, 1]`.
+    #[pyo3(get)]
+    effectiveness: f64,
+}
+
+impl PyMatchedProcedure {
+    /// Build the Python wrapper from a Rust [`MatchedProcedure`].
+    pub fn from_rust(py: Python<'_>, m: &MatchedProcedure) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                procedure_id: m.procedure_id.clone(),
+                name: m.name.clone(),
+                effectiveness: m.effectiveness,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyMatchedProcedure {
+    fn __repr__(&self) -> String {
+        format!(
+            "MatchedProcedure(name={:?}, effectiveness={:.2})",
+            self.name, self.effectiveness
+        )
+    }
+}
+
 /// Register the output pyclasses on the module.
 ///
 /// # Errors
@@ -1445,5 +1483,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFactUpsert>()?;
     m.add_class::<PyActionResult>()?;
     m.add_class::<PyRuleView>()?;
+    m.add_class::<PyMatchedProcedure>()?;
     Ok(())
 }

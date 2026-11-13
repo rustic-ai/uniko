@@ -14,7 +14,7 @@ use uniko_api::tools::{Agent, Value};
 
 use crate::convert::{py_to_value, records_to_py};
 use crate::errors::to_pyerr;
-use crate::macros::{bridge, bridge_sync};
+use crate::macros::pymethods_with_sync;
 
 /// The mutable, accumulated state of an in-progress assume query.
 struct AssumeState {
@@ -48,73 +48,61 @@ impl PyAssumeBuilder {
     }
 }
 
-#[pymethods]
-impl PyAssumeBuilder {
-    /// Set the query to run against the hypothetical state.
-    fn then_query<'py>(slf: PyRef<'py, Self>, query: String) -> PyRef<'py, Self> {
-        slf.state.lock().expect("Assume mutex poisoned").query = Some(query);
-        slf
-    }
+pymethods_with_sync! {
+    PyAssumeBuilder;
+    plain {
+        /// Set the query to run against the hypothetical state.
+        fn then_query<'py>(slf: PyRef<'py, Self>, query: String) -> PyRef<'py, Self> {
+            slf.state.lock().expect("Assume mutex poisoned").query = Some(query);
+            slf
+        }
 
-    /// Inject a parameter into the Locy program.
-    fn param<'py>(
-        slf: PyRef<'py, Self>,
-        key: String,
-        value: &Bound<'_, PyAny>,
-    ) -> PyResult<PyRef<'py, Self>> {
-        let value = py_to_value(value)?;
-        slf.state
-            .lock()
-            .expect("Assume mutex poisoned")
-            .params
-            .insert(key, value);
-        Ok(slf)
-    }
+        /// Inject a parameter into the Locy program.
+        fn param<'py>(
+            slf: PyRef<'py, Self>,
+            key: String,
+            value: &Bound<'_, PyAny>,
+        ) -> PyResult<PyRef<'py, Self>> {
+            let value = py_to_value(value)?;
+            slf.state
+                .lock()
+                .expect("Assume mutex poisoned")
+                .params
+                .insert(key, value);
+            Ok(slf)
+        }
 
-    /// Execute: fork state, apply mutations, query, roll back. Returns the
-    /// query rows as `list[dict]`.
-    fn run<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let agent = self.agent.clone();
-        let block = self.assume_block.clone();
-        let (query, params) = {
-            let state = self.state.lock().expect("Assume mutex poisoned");
-            (state.query.clone(), state.params.clone())
-        };
-        bridge!(py, agent = agent, {
-            let mut builder = agent.assume(&block);
-            if let Some(q) = &query {
-                builder = builder.then_query(q);
-            }
-            for (k, v) in params {
-                builder = builder.param(k, v);
-            }
-            let rows = builder.run().await.map_err(to_pyerr)?;
-            Python::attach(|py| records_to_py(py, &rows))
-        })
-    }
+        fn __repr__(&self) -> String {
+            "AssumeBuilder(...)".to_string()
+        }
 
-    /// Blocking variant of [`run`](Self::run).
-    fn run_sync(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let agent = self.agent.clone();
-        let block = self.assume_block.clone();
-        let (query, params) = {
-            let state = self.state.lock().expect("Assume mutex poisoned");
-            (state.query.clone(), state.params.clone())
-        };
-        bridge_sync!(py, agent = agent, {
-            let mut builder = agent.assume(&block);
-            if let Some(q) = &query {
-                builder = builder.then_query(q);
-            }
-            for (k, v) in params {
-                builder = builder.param(k, v);
-            }
-            let rows = builder.run().await.map_err(to_pyerr)?;
-            Python::attach(|py| records_to_py(py, &rows))
-        })
     }
+    bridged {
+        /// Execute: fork state, apply mutations, query, roll back. Returns the
+        /// query rows as `list[dict]`.
+        fn run / run_sync(&self, py) -> Py<PyAny> {
+            prepare {
+                let agent = self.agent.clone();
+                let block = self.assume_block.clone();
+                let (query, params) = {
+                    let state = self.state.lock().expect("Assume mutex poisoned");
+                    (state.query.clone(), state.params.clone())
+                };
 
-    fn __repr__(&self) -> String {
-        "AssumeBuilder(...)".to_string()
+            }
+            run(agent = agent) {
+                let mut builder = agent.assume(&block);
+                if let Some(q) = &query {
+                    builder = builder.then_query(q);
+                }
+                for (k, v) in params {
+                    builder = builder.param(k, v);
+                }
+                let rows = builder.run().await.map_err(to_pyerr)?;
+                Python::attach(|py| records_to_py(py, &rows))
+
+            }
+        }
+
     }
 }
