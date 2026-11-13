@@ -24,7 +24,7 @@ use crate::nl_to_cypher::is_safe_read_only;
 use crate::pipeline::PipelineSystem;
 use crate::policy::Viewer;
 use crate::query::{Answer, GeneratedAnswer, QueryRecordOptions, answer_query};
-use crate::recall::{ContextBundle, RecallConfig, Scope, ViewerScope, recall};
+use crate::recall::{ContextBundle, RecallConfig, RecallOverrides, Scope, ViewerScope, recall};
 use crate::rules::{AddRuleParams, add_rule};
 
 /// System prompt used by [`Agent::answer`] when generating a reply.
@@ -475,6 +475,29 @@ impl Agent {
     /// when falling back to the agent's scope.
     pub async fn recall_in(&self, query: &str, scope: Scope) -> Result<ContextBundle, UnikoError> {
         let config = self.config_for_scope(scope).await?;
+        recall(&self.kb, query, &config).await
+    }
+
+    /// Run the recall cascade scoped to `scope`, with `overrides` applied
+    /// to the instance's recall settings for this call only.
+    ///
+    /// Use it to change the item limit, token budget, minimum score or
+    /// time anchor for one query, or to skip the reranker, without
+    /// rebuilding the instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] when the overrides are invalid (see
+    /// [`RecallOverrides`]), and otherwise the errors of
+    /// [`recall_in`](Agent::recall_in).
+    pub async fn recall_with(
+        &self,
+        query: &str,
+        scope: Scope,
+        overrides: &RecallOverrides,
+    ) -> Result<ContextBundle, UnikoError> {
+        let mut config = self.config_for_scope(scope).await?;
+        overrides.apply(&mut config, self.kb.config().reranker.enabled)?;
         recall(&self.kb, query, &config).await
     }
 

@@ -11,7 +11,7 @@ use uniko_store::config::UnikoConfig;
 use uniko_store::schema::constants::{edges, labels};
 use uniko_store::{KnowledgeBase, UnikoError, Value};
 
-use crate::{IngestOutcome, IngestSource, Scope, Turn, Uniko};
+use crate::{IngestOutcome, IngestSource, RecallOverrides, Scope, Turn, Uniko};
 
 /// True for the "model not present in this environment" error so recall
 /// tests can skip instead of failing where embeddings are unavailable.
@@ -281,6 +281,132 @@ async fn defaults_match_validated_best_config() {
     assert!(config.reranker.enabled, "reranker should default on");
     assert_eq!(config.phase1_strategy, expected.phase1_strategy);
     assert_eq!(config.embedding.model_id, expected.embedding.model_id);
+}
+
+/// `recall_with` applies its overrides to one call only.
+#[tokio::test]
+async fn recall_with_overrides_apply_to_one_call() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("chat-overrides");
+    for text in [
+        "I hike in the Alps every summer",
+        "My favourite trail is the Haute Route",
+        "I bought new hiking boots last week",
+        "Hiking with friends is the best part of my weekend",
+    ] {
+        match session.observe(Turn::new("alice", text)).await {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: embeddings unavailable");
+                return;
+            }
+            Err(e) => panic!("observe failed: {e}"),
+        }
+    }
+
+    let one = RecallOverrides::default().limit(1);
+    let bundle = match agent.recall_with("hiking", Scope::default(), &one).await {
+        Ok(bundle) => bundle,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("recall_with failed: {e}"),
+    };
+    assert!(
+        bundle.items.len() <= 1,
+        "limit override: {}",
+        bundle.items.len()
+    );
+
+    // An unreachable minimum score filters everything out.
+    let strict = RecallOverrides::default().min_score(f64::MAX);
+    let bundle = agent
+        .recall_with("hiking", Scope::default(), &strict)
+        .await
+        .expect("recall_with min_score");
+    assert!(
+        bundle.items.is_empty(),
+        "min_score override: {}",
+        bundle.items.len()
+    );
+
+    // The overrides did not stick: plain recall still finds items.
+    let bundle = agent.recall("hiking").await.expect("recall");
+    assert!(!bundle.items.is_empty(), "plain recall after overrides");
+
+    // A limit above the reranker's top_n is rejected up front.
+    let top_n = memory.config().reranker.top_n;
+    let too_many = RecallOverrides::default().limit(top_n + 1);
+    let err = agent
+        .recall_with("hiking", Scope::default(), &too_many)
+        .await
+        .expect_err("limit above reranker.top_n");
+    assert!(matches!(err, UnikoError::Config(_)), "got: {err}");
+}
+
+/// `health()` reports on the streaming pipeline, which takes its queue
+/// capacities from the instance's `UnikoConfig`.
+#[tokio::test]
+async fn health_reports_the_configured_pipeline() {
+    let Ok(plain) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    assert!(plain.health().is_none(), "no pipeline without streaming");
+
+    let config = UnikoConfig {
+        ingest_queue_capacity: 17,
+        consolidation_queue_capacity: 5,
+        ..UnikoConfig::default()
+    };
+    let memory = match Uniko::builder()
+        .in_memory()
+        .raw_config(config)
+        .streaming(true)
+        .build()
+        .await
+    {
+        Ok(memory) => memory,
+        Err(e) => {
+            eprintln!("skipping: streaming instance unavailable: {e}");
+            return;
+        }
+    };
+    let health = memory.health().expect("streaming instance has a pipeline");
+    assert_eq!(health.ingest.queue_capacity, 17);
+    assert_eq!(health.consolidation.queue_capacity, 5);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// `reranker()` on the builder wins over `raw_config`, in either order.
+#[tokio::test]
+async fn builder_reranker_overrides_raw_config() {
+    let mut base = UnikoConfig::default();
+    base.reranker.enabled = true;
+    let mut off = uniko_store::config::RerankerConfig::minilm_l6();
+    off.enabled = false;
+
+    for reranker_first in [true, false] {
+        let builder = Uniko::builder().in_memory();
+        let builder = if reranker_first {
+            builder.reranker(off.clone()).raw_config(base.clone())
+        } else {
+            builder.raw_config(base.clone()).reranker(off.clone())
+        };
+        let Ok(memory) = builder.build().await else {
+            eprintln!("skipping: in-memory instance unavailable (no model?)");
+            return;
+        };
+        assert!(
+            !memory.config().reranker.enabled,
+            "reranker() must win (reranker first: {reranker_first})"
+        );
+    }
 }
 
 /// `Turn::id` makes observe idempotent.

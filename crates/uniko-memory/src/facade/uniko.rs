@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use uniko_extract::ingest::{ModalityExtractor, ModalityRegistry};
 use uniko_pipes::config::PipelineConfig;
-use uniko_store::config::{EmbeddingConfig, UnikoConfig};
+use uniko_pipes::health::PipelineHealth;
+use uniko_store::config::{EmbeddingConfig, RerankerConfig, UnikoConfig};
 use uniko_store::xervo::{ModelAliasSpec, ModelTask, WarmupPolicy};
 use uniko_store::{DeletionReport, KnowledgeBase, UnikoError};
 
@@ -118,6 +119,17 @@ impl Uniko {
         self.kb.config()
     }
 
+    /// A health snapshot of the streaming pipeline: queue depth and
+    /// capacity, throughput and latency for the ingest and consolidation
+    /// workers, and the LLM circuit-breaker state.
+    ///
+    /// `None` when the instance was built without
+    /// [`streaming`](UnikoBuilder::streaming), since there is no
+    /// pipeline to report on.
+    pub fn health(&self) -> Option<PipelineHealth> {
+        self.streaming.as_ref().map(|pipeline| pipeline.health())
+    }
+
     /// Erase the entire graph. Intended for dev/test reset.
     ///
     /// # Errors
@@ -216,6 +228,7 @@ pub struct UnikoBuilder {
     location: Location,
     config: Option<UnikoConfig>,
     embedding: Option<EmbeddingConfig>,
+    reranker: Option<RerankerConfig>,
     llm: Option<LlmSpec>,
     streaming: bool,
     scope: RecallScope,
@@ -244,6 +257,18 @@ impl UnikoBuilder {
         self
     }
 
+    /// Override the cross-encoder reranker (defaults to MiniLM, enabled).
+    ///
+    /// Pass a config with `enabled: false` to turn reranking off. Like
+    /// [`embedding`](UnikoBuilder::embedding), this wins over the
+    /// `reranker` section of [`raw_config`](UnikoBuilder::raw_config)
+    /// whichever is called first.
+    #[must_use]
+    pub fn reranker(mut self, reranker: RerankerConfig) -> Self {
+        self.reranker = Some(reranker);
+        self
+    }
+
     /// Register an LLM, enabling [`Agent::answer`](crate::Agent::answer).
     #[must_use]
     pub fn llm(mut self, spec: LlmSpec) -> Self {
@@ -253,8 +278,10 @@ impl UnikoBuilder {
 
     /// Replace the entire configuration (escape hatch).
     ///
-    /// This is the base config; [`embedding`](UnikoBuilder::embedding)
-    /// still overrides `config.embedding` when both are set.
+    /// This is the base config; [`embedding`](UnikoBuilder::embedding) and
+    /// [`reranker`](UnikoBuilder::reranker) still override its sections
+    /// when set, whatever the call order. Its queue, consolidation and
+    /// circuit-breaker fields configure the streaming pipeline.
     #[must_use]
     pub fn raw_config(mut self, config: UnikoConfig) -> Self {
         self.config = Some(config);
@@ -311,6 +338,10 @@ impl UnikoBuilder {
         if let Some(embedding) = self.embedding {
             config.embedding = embedding;
         }
+        if let Some(reranker) = self.reranker {
+            config.reranker = reranker;
+        }
+        let pipeline_config = PipelineConfig::from_uniko_config(&config);
 
         let llm_alias = self.llm.as_ref().map(|l| l.alias.clone());
         let extra_catalog: Vec<ModelAliasSpec> = self
@@ -331,8 +362,7 @@ impl UnikoBuilder {
         let streaming = if self.streaming {
             let steps: Vec<Box<dyn uniko_pipes::Step>> =
                 vec![Box::new(uniko_extract::ingest::IngestStep)];
-            let pipeline =
-                PipelineSystem::new(PipelineConfig::default(), Arc::new(kb.clone()), steps);
+            let pipeline = PipelineSystem::new(pipeline_config, Arc::new(kb.clone()), steps);
             Some(Arc::new(pipeline))
         } else {
             None

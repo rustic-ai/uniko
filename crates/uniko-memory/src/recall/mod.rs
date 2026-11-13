@@ -9,8 +9,10 @@
 pub mod intent;
 pub mod mmr;
 pub mod modality;
+mod overrides;
 
 pub use intent::{IntentProfile, build_intent, build_intent_at};
+pub use overrides::RecallOverrides;
 
 use std::collections::HashMap;
 

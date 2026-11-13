@@ -66,8 +66,8 @@ pub use goal::{CreateGoalParams, create_goal};
 pub use policy::Viewer;
 #[doc(inline)]
 pub use recall::{
-    ContextBundle, Dimensions, RecallConfig, RecallItem, RecallKind, RecallSource, RecallTier,
-    Scope, ViewerScope,
+    ContextBundle, Dimensions, RecallConfig, RecallItem, RecallKind, RecallOverrides, RecallSource,
+    RecallTier, Scope, ViewerScope,
 };
 // Method return / field types surfaced so the facade exposes no
 // un-nameable types: `Agent::assert_fact` -> FactUpsert, the `Session`
@@ -79,8 +79,12 @@ pub use uniko_extract::ingest::{
     ingest_source, resolve_mime,
 };
 // Content-type taxonomy shared by ingest routing and recall channels.
+/// LLM circuit-breaker state, part of [`PipelineHealth`].
+pub use uniko_pipes::CircuitState;
 #[doc(no_inline)]
 pub use uniko_pipes::content::{ContentType, Mime, Modality};
+/// Streaming-pipeline health, returned by [`Uniko::health`].
+pub use uniko_pipes::health::{PipelineHealth, WorkerHealth, WorkerStatus};
 #[doc(no_inline)]
 pub use uniko_store::operations::facts::FactUpsert;
 // The canonical error type and node-id alias that pervade every facade
@@ -117,7 +121,7 @@ pub use summary::generate_session_summary;
 #[doc(inline)]
 pub use task::{CreateTaskParams, create_task};
 #[doc(no_inline)]
-pub use uniko_store::config::{EmbeddingConfig, UnikoConfig};
+pub use uniko_store::config::{EmbeddingConfig, RerankerConfig, UnikoConfig};
 
 /// Sort `items` in descending order by the `f64` key returned by `score`.
 ///

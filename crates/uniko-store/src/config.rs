@@ -684,14 +684,6 @@ pub struct UnikoConfig {
     /// Seconds between periodic consolidation runs.
     pub consolidation_interval_secs: u64,
 
-    // Retry policy
-    /// Maximum retry attempts for retryable operations.
-    pub retry_max_attempts: u32,
-    /// Initial delay in milliseconds before first retry (exponential backoff base).
-    pub retry_initial_delay_ms: u64,
-    /// Maximum delay in milliseconds between retries (backoff cap).
-    pub retry_max_delay_ms: u64,
-
     // Circuit breaker
     /// Number of consecutive failures before the circuit breaker opens.
     pub circuit_failure_threshold: u32,
@@ -862,9 +854,6 @@ impl Default for UnikoConfig {
             consolidation_queue_capacity: 32,
             consolidation_threshold: 20,
             consolidation_interval_secs: 900,
-            retry_max_attempts: 3,
-            retry_initial_delay_ms: 500,
-            retry_max_delay_ms: 30_000,
             circuit_failure_threshold: 5,
             circuit_recovery_ms: 60_000,
             message_chunk_threshold: 1024,
@@ -984,11 +973,18 @@ impl UnikoConfig {
             ));
         }
 
-        if self.retry_initial_delay_ms > self.retry_max_delay_ms {
-            return Err(UnikoError::Config(format!(
-                "retry_initial_delay_ms ({}) must not exceed retry_max_delay_ms ({})",
-                self.retry_initial_delay_ms, self.retry_max_delay_ms,
-            )));
+        // The streaming pipeline sizes bounded channels from these, and a
+        // zero-capacity channel panics on construction.
+        if self.ingest_queue_capacity == 0 {
+            return Err(UnikoError::Config(
+                "ingest_queue_capacity must be positive".into(),
+            ));
+        }
+
+        if self.consolidation_queue_capacity == 0 {
+            return Err(UnikoError::Config(
+                "consolidation_queue_capacity must be positive".into(),
+            ));
         }
 
         Ok(())
@@ -1079,9 +1075,6 @@ mod tests {
         assert_eq!(c.consolidation_queue_capacity, 32);
         assert_eq!(c.consolidation_threshold, 20);
         assert_eq!(c.consolidation_interval_secs, 900);
-        assert_eq!(c.retry_max_attempts, 3);
-        assert_eq!(c.retry_initial_delay_ms, 500);
-        assert_eq!(c.retry_max_delay_ms, 30_000);
         assert_eq!(c.circuit_failure_threshold, 5);
         assert_eq!(c.circuit_recovery_ms, 60_000);
         assert_eq!(c.message_chunk_threshold, 1024);
@@ -1149,12 +1142,26 @@ mod tests {
         };
         assert!(c.validate().is_err());
 
-        // retry initial > max
+        // zero queue capacities
         let c = UnikoConfig {
-            retry_initial_delay_ms: 50_000,
+            ingest_queue_capacity: 0,
             ..UnikoConfig::default()
         };
         assert!(c.validate().is_err());
+        let c = UnikoConfig {
+            consolidation_queue_capacity: 0,
+            ..UnikoConfig::default()
+        };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn removed_retry_keys_still_deserialize() {
+        // The retry_* fields were never read and are gone; configs written
+        // before their removal must still load.
+        let json = r#"{"retry_max_attempts": 5, "retry_initial_delay_ms": 10}"#;
+        let c: UnikoConfig = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(c, UnikoConfig::default());
     }
 
     #[test]
