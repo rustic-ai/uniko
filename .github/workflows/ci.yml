@@ -125,6 +125,81 @@ jobs:
             -E 'package(uniko-cortex)' --test-threads 1
           cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal
 
+  python:
+    name: Python binding (build, test, stubs, lint)
+    # Same runner as `check`: the extension links the whole engine, and a debug
+    # build plus its target dir does not fit ubuntu-latest's disk either.
+    runs-on: ubuntu-xlarge
+    env:
+      # One model cache for the warm-up and every pytest worker (uni-xervo
+      # otherwise resolves `.uni_cache` under each process's cwd).
+      UNI_CACHE_DIR: ${{ github.workspace }}/.uni_cache
+    defaults:
+      run:
+        working-directory: bindings/uniko-py
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        working-directory: .
+        run: |
+          sudo apt-get update
+          # mold: `.cargo/config.toml` forces `-fuse-ld=mold` on Linux.
+          sudo apt-get install -y protobuf-compiler mold
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Its own key: maturin builds the cdylib with different features
+          # and flags than `check`, so sharing would thrash both caches.
+          key: ${{ runner.os }}-cargo-py-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache models
+        uses: actions/cache@v5
+        with:
+          path: .uni_cache
+          # The model ids live in the config defaults; a change there means
+          # new downloads.
+          key: uni-models-${{ hashFiles('crates/uniko-store/src/config.rs') }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: uv sync --locked
+
+      - name: Build the extension
+        run: uv run maturin develop
+
+      - name: Warm the model cache
+        # Serially, before the parallel run, so pytest workers do not race to
+        # download the same models (see the nextest warm pass in `check`).
+        run: uv run python -I ../../scripts/ci/smoke_wheel.py
+
+      - name: pytest
+        run: uv run pytest -n 4
+
+      - name: Stubs match the module (stubtest)
+        run: uv run python -m mypy.stubtest uniko._uniko
+
+      - name: ruff
+        run: |
+          uv run ruff check python
+          uv run ruff format --check python
+
+      - name: ty
+        run: uv run ty check
+
   deny:
     name: cargo-deny (licenses & advisories)
     runs-on: ubuntu-latest
