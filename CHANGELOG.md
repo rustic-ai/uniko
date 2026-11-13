@@ -39,6 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `report.cycle`, in Rust and Python.
 - **`DerivationTree` and `DerivationNode` are no longer re-exported** from
   `uniko_memory` or `uniko_api::tools`. Nothing produced them.
+- **A scoped fact is a separate fact.** Consolidation now groups
+  observations by visibility as well as subject and predicate, and a scoped
+  fact's `fact_id` ends in its visibility (`fact_id_for_scoped`), so a
+  private observation never reinforces, contradicts or reveals the public
+  fact of the same triple. `AssertFactParams` and `AddObservationParams`
+  gain a `visibility` field, and `FactUpsertInput` and
+  `find_stale_open_facts_batched` take one.
+- **Session-level transcript and observation chunks, and session
+  summaries, leave out scoped and forgotten turns.** Forgotten turns used to
+  stay in them.
 
 ### Added
 
@@ -77,6 +87,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not spoken yet.
 - **Rule management:** `Agent::list_rules`, `explain_rule` (source and
   state) and `delete_rule`, which refuses stdlib rules.
+- **`Turn::visibility`** scopes a whole turn: its message and chunks (which
+  gain a `visibility` property), its observations, and the facts
+  consolidated from them. Recall filters messages and chunks by it as it
+  does facts and observations.
+- **`Agent::match_procedures` and `record_procedure_use`** expose the
+  procedures `consolidate` learns: which have tended to work next for a
+  given state, and feedback on how one worked out.
+- **`TextExtractor`**, a `ModalityExtractor` built from a function that
+  turns an image, audio or video payload into text, and Python's
+  `UnikoBuilder.extractor(modality, extract)` on top of it.
+- In the Python binding each `_sync` twin is generated from its async
+  method's body by `pymethods_with_sync!`, so the two can no longer drift.
 - `uniko.types` holds `Literal` aliases for the closed sets the API passes as
   strings (goal and task phases, recall kinds, worker status).
 - CI now builds the Python extension and runs its tests, `mypy.stubtest`
@@ -101,6 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `__all__` now includes `FinalizeReport` and `CycleStats`.
 - A store whose blob backend or embedding model does not match the config is
   rejected before the models are prefetched, not after.
+- **Procedures can appear in recall.** Recall finds them by embedding, but
+  none was ever written; new procedures are now embedded when created.
 - **`Agent::consolidate` now produces procedures and topics.** It ran only
   the fact cycle, so an instance without the streaming pipeline (the Python
   default) never got procedure or topic recall items.

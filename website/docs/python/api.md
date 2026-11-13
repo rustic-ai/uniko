@@ -142,6 +142,7 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
 | `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |
+| `extractor` | `extractor(modality: str, extract: Callable[[ExtractRequest], str]) -> UnikoBuilder` | — (sync) | Index `"image"`, `"audio"` or `"video"` sources as the text `extract` returns. |
 | `build` | `build() -> Awaitable[Uniko]` | `build_sync` | Terminal: produce the `Uniko` instance. |
 
 ### Configuration
@@ -168,6 +169,24 @@ uni = (uniko.Uniko.builder()
   made with the original model and are not comparable with another's.
 - `blob_storage` and `vector_algorithm` are replaced whole rather than merged, since a different
   variant has different keys: `{"blob_storage": {"kind": "fs", "root": "/data/blobs"}}`.
+
+---
+
+### Extractors
+
+`extractor` lets a model you run index images, audio or video. Uniko calls `extract` with an
+`ExtractRequest` (`modality`, `data` as bytes, `mime`, `path`, `metadata`) and stores the
+returned text as the artifact's content, chunked and embedded like a document; the original
+bytes are not kept. The function runs on a worker thread and holds the GIL only while it
+runs. An exception in it fails that ingest.
+
+```python
+def caption(request: uniko.ExtractRequest) -> str:
+    return my_vision_model.describe(request.data)
+
+memory = uniko.Uniko.builder().extractor("image", caption).build_sync()
+memory.agent("a").session("s").ingest_sync(uniko.IngestSource.from_path("photo.png"))
+```
 
 ---
 
@@ -258,6 +277,16 @@ builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoni
 | `unfinalized_session_ids` | `unfinalized_session_ids() -> Awaitable[list[str]]` | `unfinalized_session_ids_sync` | Sessions with no session-level chunks yet — drives a backfill loop. |
 | `forget_participant` | `forget_participant(participant_id: str) -> Awaitable[DeletionReport]` | `forget_participant_sync` | Forget a participant. |
 
+### Procedures
+
+| Method | Signature | Sync | Description |
+| --- | --- | --- | --- |
+| `match_procedures` | `match_procedures(state: dict[str, str]) -> Awaitable[list[MatchedProcedure]]` | `match_procedures_sync` | Active procedures whose precondition holds, e.g. `{"last_action_type": "search"}`. |
+| `record_procedure_use` | `record_procedure_use(procedure_id: str, succeeded: bool) -> Awaitable[None]` | `record_procedure_use_sync` | Score how following one worked out. |
+
+`consolidate` learns procedures from repeated successful sequences of recorded episodes;
+`MatchedProcedure` has `procedure_id`, `name` and `effectiveness`.
+
 ### Facts, actions, episodes, observations
 
 | Method | Signature | Sync | Description |
@@ -274,9 +303,10 @@ spoken yet.
 
 ### Visibility
 
-A Fact or Observation can be scoped to `"public"`, `"private:<participant_id>"`,
-`"team:<team_id>"` or `"org:<org_id>"`, with `set_visibility` or the `visibility` argument of
-`assert_fact` and `add_observation`. Scoped reads then leave out what the reader may not see:
+Memory can be scoped to `"public"`, `"private:<participant_id>"`, `"team:<team_id>"` or
+`"org:<org_id>"`: a whole turn with `Turn.visibility`, a single item with the `visibility`
+argument of `assert_fact` and `add_observation`, or an existing Fact or Observation with
+`set_visibility`. Scoped reads then leave out what the reader may not see:
 
 ```python
 memory = uniko.Uniko.builder().scope_to_agent().build_sync()
@@ -291,9 +321,13 @@ memory.agent("bob").recall_sync("launch")     # does not
 
 - **Unscoped reads see everything.** Scope them with `scope_to_agent()`, `scope(Viewer(...))`,
   or per call with `Scope.as_viewer` / `Scope.as_participant`.
-- **Only Facts and Observations carry visibility.** The text of a turn stays recallable through
-  its message and chunks.
-- **A fact is shared by every assertion of its triple,** so scoping it scopes all of them.
+- **A scoped turn scopes everything drawn from it:** its message, its chunks, its
+  observations, and the facts consolidated from them. Its attachments are not scoped.
+- **Session-level chunks and summaries are built from public turns only,** since one chunk
+  spans many turns. A forgotten turn is left out of them too.
+- **A scoped fact is a separate fact.** The same triple asserted or observed under
+  `team:eng` and publicly gives two facts, so neither reinforces nor contradicts the other.
+  `set_visibility` on an existing fact changes that fact in place.
 - **Forgotten items stay hidden:** `set_visibility` refuses to change them.
 - **An `Agent` resolves its own memberships once,** on its first scoped read. Take a fresh one
   from `memory.agent(...)` to see a membership change.
@@ -508,6 +542,7 @@ A `Turn` is reusable — feeding it to `observe`/`submit` does not consume it.
 | `.metadata` | `.metadata(key: str, value: Any)` | Add one metadata entry. |
 | `.attach` | `.attach(source: IngestSource)` | Attach one source. |
 | `.attachments` | `.attachments(sources: list[IngestSource])` | Attach many. |
+| `.visibility` | `.visibility(visibility: str)` | Scope the turn and what derives from it; see [Visibility](#visibility). |
 
 ```python
 turn = (uniko.Turn("alice", "see the attached report")
@@ -685,7 +720,8 @@ Returned by `Agent.consolidate`: `cycle` (`CycleStats`), `procedures` (`Promotio
 ### `FactUpsert`, `ActionResult`, `RuleView`
 
 - `FactUpsert` — from `assert_fact`: `node_id` (for `set_visibility`), `fact_id` (for
-  `invalidate_fact`), `was_created`, `observation_count`.
+  `invalidate_fact`; a scoped fact's id ends in its visibility), `was_created`,
+  `observation_count`.
 - `ActionResult` — from `record_action`: `action_node`, and `overflow_artifact` when the output
   was too large to keep inline.
 - `RuleView` — from `list_rules` / `explain_rule`: `name`, `source_type` (`stdlib`, `authored`,
