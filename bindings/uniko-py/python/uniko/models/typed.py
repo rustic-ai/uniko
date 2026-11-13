@@ -34,13 +34,16 @@ from .outputs import (
     ContextBundle,
     DeletionReport,
     FinalizeReport,
-    CycleStats,
     GoalContext,
     GoalView,
     IngestOutcome,
     MessageView,
     ObserveResult,
+    ActionResult,
+    ConsolidationReport,
+    FactUpsert,
     PipelineHealth,
+    RuleView,
     SummarizeReport,
     TaskView,
     UnitResult,
@@ -293,6 +296,16 @@ class TypedSession:
         native = [_native_arg(t) for t in turns]
         return UnitResult.from_native(self._inner.commit_unit_sync(native))
 
+    async def record_action(self, action_type: str, **kwargs: Any) -> ActionResult:
+        return ActionResult.from_native(
+            await self._inner.record_action(action_type, **kwargs)
+        )
+
+    def record_action_sync(self, action_type: str, **kwargs: Any) -> ActionResult:
+        return ActionResult.from_native(
+            self._inner.record_action_sync(action_type, **kwargs)
+        )
+
     async def summarize(self) -> SummarizeReport:
         return SummarizeReport.from_native(await self._inner.summarize())
 
@@ -434,11 +447,86 @@ class TypedAgent:
     def delete_session_sync(self, session_id: str) -> DeletionReport:
         return DeletionReport.from_native(self._inner.delete_session_sync(session_id))
 
-    async def consolidate(self) -> CycleStats:
-        return CycleStats.from_native(await self._inner.consolidate())
+    async def consolidate(self) -> ConsolidationReport:
+        return ConsolidationReport.from_native(await self._inner.consolidate())
 
-    def consolidate_sync(self) -> CycleStats:
-        return CycleStats.from_native(self._inner.consolidate_sync())
+    def consolidate_sync(self) -> ConsolidationReport:
+        return ConsolidationReport.from_native(self._inner.consolidate_sync())
+
+    # Facts, actions, episodes, observations. Keyword arguments pass
+    # through unchanged; see the native methods for the full list.
+    async def assert_fact(
+        self, subject: str, predicate: str, object: Optional[str] = None, **kwargs: Any
+    ) -> FactUpsert:
+        return FactUpsert.from_native(
+            await self._inner.assert_fact(subject, predicate, object, **kwargs)
+        )
+
+    def assert_fact_sync(
+        self, subject: str, predicate: str, object: Optional[str] = None, **kwargs: Any
+    ) -> FactUpsert:
+        return FactUpsert.from_native(
+            self._inner.assert_fact_sync(subject, predicate, object, **kwargs)
+        )
+
+    async def invalidate_fact(self, fact_id: str, **kwargs: Any) -> None:
+        await self._inner.invalidate_fact(fact_id, **kwargs)
+
+    def invalidate_fact_sync(self, fact_id: str, **kwargs: Any) -> None:
+        self._inner.invalidate_fact_sync(fact_id, **kwargs)
+
+    async def record_action(self, action_type: str, **kwargs: Any) -> ActionResult:
+        return ActionResult.from_native(
+            await self._inner.record_action(action_type, **kwargs)
+        )
+
+    def record_action_sync(self, action_type: str, **kwargs: Any) -> ActionResult:
+        return ActionResult.from_native(
+            self._inner.record_action_sync(action_type, **kwargs)
+        )
+
+    async def record_episode(self, action_type: str, **kwargs: Any) -> int:
+        return await self._inner.record_episode(action_type, **kwargs)
+
+    def record_episode_sync(self, action_type: str, **kwargs: Any) -> int:
+        return self._inner.record_episode_sync(action_type, **kwargs)
+
+    async def add_observation(
+        self, message_id: str, content: str, subject: str, **kwargs: Any
+    ) -> int:
+        return await self._inner.add_observation(message_id, content, subject, **kwargs)
+
+    def add_observation_sync(
+        self, message_id: str, content: str, subject: str, **kwargs: Any
+    ) -> int:
+        return self._inner.add_observation_sync(message_id, content, subject, **kwargs)
+
+    async def set_visibility(self, node_id: int, visibility: str) -> bool:
+        return await self._inner.set_visibility(node_id, visibility)
+
+    def set_visibility_sync(self, node_id: int, visibility: str) -> bool:
+        return self._inner.set_visibility_sync(node_id, visibility)
+
+    # Rule management.
+    async def list_rules(self) -> list[RuleView]:
+        return [RuleView.from_native(r) for r in await self._inner.list_rules()]
+
+    def list_rules_sync(self) -> list[RuleView]:
+        return [RuleView.from_native(r) for r in self._inner.list_rules_sync()]
+
+    async def explain_rule(self, name: str) -> Optional[RuleView]:
+        rule = await self._inner.explain_rule(name)
+        return None if rule is None else RuleView.from_native(rule)
+
+    def explain_rule_sync(self, name: str) -> Optional[RuleView]:
+        rule = self._inner.explain_rule_sync(name)
+        return None if rule is None else RuleView.from_native(rule)
+
+    async def delete_rule(self, name: str) -> bool:
+        return await self._inner.delete_rule(name)
+
+    def delete_rule_sync(self, name: str) -> bool:
+        return self._inner.delete_rule_sync(name)
 
     async def finalize_session(self, session_id: str) -> FinalizeReport:
         return FinalizeReport.from_native(
@@ -558,6 +646,11 @@ class TypedUnikoBuilder:
         self._inner = self._inner.scope_to_agent()
         return self
 
+    def scope(self, viewer: Any) -> "TypedUnikoBuilder":
+        """A native ``Viewer`` to read as, or ``None`` to read everything."""
+        self._inner = self._inner.scope(viewer)
+        return self
+
     async def build(self) -> "TypedUniko":
         return TypedUniko(await self._inner.build())
 
@@ -611,6 +704,42 @@ class TypedUniko:
     def health(self) -> Optional[PipelineHealth]:
         native = self._inner.health()
         return None if native is None else PipelineHealth.from_native(native)
+
+    async def add_team_member(self, participant_id: str, team_id: str) -> bool:
+        return await self._inner.add_team_member(participant_id, team_id)
+
+    def add_team_member_sync(self, participant_id: str, team_id: str) -> bool:
+        return self._inner.add_team_member_sync(participant_id, team_id)
+
+    async def remove_team_member(self, participant_id: str, team_id: str) -> bool:
+        return await self._inner.remove_team_member(participant_id, team_id)
+
+    def remove_team_member_sync(self, participant_id: str, team_id: str) -> bool:
+        return self._inner.remove_team_member_sync(participant_id, team_id)
+
+    async def add_org_member(self, participant_id: str, org_id: str) -> bool:
+        return await self._inner.add_org_member(participant_id, org_id)
+
+    def add_org_member_sync(self, participant_id: str, org_id: str) -> bool:
+        return self._inner.add_org_member_sync(participant_id, org_id)
+
+    async def remove_org_member(self, participant_id: str, org_id: str) -> bool:
+        return await self._inner.remove_org_member(participant_id, org_id)
+
+    def remove_org_member_sync(self, participant_id: str, org_id: str) -> bool:
+        return self._inner.remove_org_member_sync(participant_id, org_id)
+
+    async def add_team_to_org(self, team_id: str, org_id: str) -> bool:
+        return await self._inner.add_team_to_org(team_id, org_id)
+
+    def add_team_to_org_sync(self, team_id: str, org_id: str) -> bool:
+        return self._inner.add_team_to_org_sync(team_id, org_id)
+
+    async def remove_team_from_org(self, team_id: str, org_id: str) -> bool:
+        return await self._inner.remove_team_from_org(team_id, org_id)
+
+    def remove_team_from_org_sync(self, team_id: str, org_id: str) -> bool:
+        return self._inner.remove_team_from_org_sync(team_id, org_id)
 
     async def purge(self) -> DeletionReport:
         return DeletionReport.from_native(await self._inner.purge())

@@ -16,13 +16,14 @@ use pyo3::prelude::*;
 use tokio::sync::Mutex;
 use uniko_api::tools::{Session, Turn};
 
+use crate::agent::action_args;
 use crate::convert;
 use crate::errors::to_pyerr;
 use crate::ingest::PyIngestSource;
 use crate::macros::{bridge, bridge_sync};
 use crate::outputs::{
-    PyDeletionReport, PyFinalizeReport, PyIngestOutcome, PyObserveResult, PySummarizeReport,
-    PyUnitResult,
+    PyActionResult, PyDeletionReport, PyFinalizeReport, PyIngestOutcome, PyObserveResult,
+    PySummarizeReport, PyUnitResult,
 };
 
 /// One conversation turn to feed into a [`PySession`].
@@ -298,6 +299,83 @@ impl PySession {
             let guard = session.lock().await;
             let report = guard.summarize().await.map_err(to_pyerr)?;
             Python::attach(|py| PySummarizeReport::from_rust(py, &report))
+        })
+    }
+
+    /// Record an action this session's agent took, linked to this session
+    /// unless `session_id` names another.
+    #[pyo3(signature = (action_type, *, action_id=None, input=None, output=None, status=None, started_at=None, ended_at=None, error=None, triggered_by_message_id=None, session_id=None, previous_action_id=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_action<'py>(
+        &self,
+        py: Python<'py>,
+        action_type: String,
+        action_id: Option<String>,
+        input: Option<&Bound<'_, PyAny>>,
+        output: Option<&Bound<'_, PyAny>>,
+        status: Option<String>,
+        started_at: Option<&Bound<'_, PyAny>>,
+        ended_at: Option<&Bound<'_, PyAny>>,
+        error: Option<String>,
+        triggered_by_message_id: Option<String>,
+        session_id: Option<String>,
+        previous_action_id: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let params = action_args(
+            action_type,
+            action_id,
+            input,
+            output,
+            status,
+            started_at,
+            ended_at,
+            error,
+            triggered_by_message_id,
+            session_id,
+            previous_action_id,
+        )?;
+        bridge!(py, session = self.inner.clone(), {
+            let guard = session.lock().await;
+            let result = guard.record_action(params).await.map_err(to_pyerr)?;
+            Python::attach(|py| PyActionResult::from_rust(py, &result))
+        })
+    }
+
+    /// Blocking variant of [`record_action`](Self::record_action).
+    #[pyo3(signature = (action_type, *, action_id=None, input=None, output=None, status=None, started_at=None, ended_at=None, error=None, triggered_by_message_id=None, session_id=None, previous_action_id=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_action_sync(
+        &self,
+        py: Python<'_>,
+        action_type: String,
+        action_id: Option<String>,
+        input: Option<&Bound<'_, PyAny>>,
+        output: Option<&Bound<'_, PyAny>>,
+        status: Option<String>,
+        started_at: Option<&Bound<'_, PyAny>>,
+        ended_at: Option<&Bound<'_, PyAny>>,
+        error: Option<String>,
+        triggered_by_message_id: Option<String>,
+        session_id: Option<String>,
+        previous_action_id: Option<String>,
+    ) -> PyResult<Py<PyActionResult>> {
+        let params = action_args(
+            action_type,
+            action_id,
+            input,
+            output,
+            status,
+            started_at,
+            ended_at,
+            error,
+            triggered_by_message_id,
+            session_id,
+            previous_action_id,
+        )?;
+        bridge_sync!(py, session = self.inner.clone(), {
+            let guard = session.lock().await;
+            let result = guard.record_action(params).await.map_err(to_pyerr)?;
+            Python::attach(|py| PyActionResult::from_rust(py, &result))
         })
     }
 

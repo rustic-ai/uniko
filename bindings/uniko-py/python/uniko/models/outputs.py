@@ -372,6 +372,93 @@ class PipelineHealth(BaseModel):
         return cls.model_validate(native)
 
 
+class PromotionReport(BaseModel):
+    """What procedure promotion did (native ``PromotionReport``)."""
+
+    model_config = _OUT
+
+    created: int
+    reinforced: int
+    promoted: int
+
+    @classmethod
+    def from_native(cls, native: Any) -> "PromotionReport":
+        return cls.model_validate(native)
+
+
+class TopicReport(BaseModel):
+    """What topic detection did (native ``TopicReport``)."""
+
+    model_config = _OUT
+
+    created: int
+    updated: int
+    entities_assigned: int
+
+    @classmethod
+    def from_native(cls, native: Any) -> "TopicReport":
+        return cls.model_validate(native)
+
+
+class ConsolidationReport(BaseModel):
+    """What ``Agent.consolidate()`` did (native ``ConsolidationReport``)."""
+
+    model_config = _OUT
+
+    cycle: CycleStats
+    procedures: PromotionReport
+    topics: TopicReport
+
+    @classmethod
+    def from_native(cls, native: Any) -> "ConsolidationReport":
+        return cls.model_validate(native)
+
+
+class FactUpsert(BaseModel):
+    """What ``Agent.assert_fact()`` wrote (native ``FactUpsert``)."""
+
+    model_config = _OUT
+
+    node_id: int
+    fact_id: str
+    was_created: bool
+    observation_count: int
+
+    @classmethod
+    def from_native(cls, native: Any) -> "FactUpsert":
+        return cls.model_validate(native)
+
+
+class ActionResult(BaseModel):
+    """What ``record_action()`` wrote (native ``ActionResult``)."""
+
+    model_config = _OUT
+
+    action_node: int
+    overflow_artifact: Optional[int] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "ActionResult":
+        return cls.model_validate(native)
+
+
+class RuleView(BaseModel):
+    """A rule's state and, from ``explain_rule``, its source (native ``RuleView``)."""
+
+    model_config = _OUT
+
+    name: str
+    source_type: str
+    status: str
+    confidence: float
+    source: Optional[str] = None
+    natural_language: Optional[str] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "RuleView":
+        return cls.model_validate(native)
+
+
 class AbducedModification(BaseModel):
     """One proposed graph modification from an abductive query.
 
@@ -419,6 +506,12 @@ __all__ = [
     "SummarizeReport",
     "WorkerHealth",
     "PipelineHealth",
+    "PromotionReport",
+    "TopicReport",
+    "ConsolidationReport",
+    "FactUpsert",
+    "ActionResult",
+    "RuleView",
     "MessageView",
     "ArtifactView",
     "GoalView",

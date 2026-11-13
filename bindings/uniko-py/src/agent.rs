@@ -12,7 +12,10 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use uniko_api::tools::{Agent, NodeId, RecallOverrides, Scope};
+use uniko_api::tools::{
+    AddObservationParams, Agent, AssertFactParams, InvalidateFactParams, NodeId, RecallOverrides,
+    RecordActionParams, RecordEpisodeParams, Scope, Visibility, fact_id_for,
+};
 
 use crate::convert::{self, params_to_rust};
 use crate::data::PyData;
@@ -21,7 +24,8 @@ use crate::goals::PyGoals;
 use crate::logic::PyAssumeBuilder;
 use crate::macros::{bridge, bridge_sync};
 use crate::outputs::{
-    PyAbductionResult, PyAnswer, PyContextBundle, PyCycleStats, PyDeletionReport, PyFinalizeReport,
+    PyAbductionResult, PyActionResult, PyAnswer, PyConsolidationReport, PyContextBundle,
+    PyDeletionReport, PyFactUpsert, PyFinalizeReport, PyRuleView,
 };
 use crate::scope::PyScope;
 use crate::session::PySession;
@@ -500,14 +504,438 @@ impl PyAgent {
     fn consolidate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         bridge!(py, agent = self.inner.clone(), {
             let stats = agent.consolidate().await.map_err(to_pyerr)?;
-            Python::attach(|py| PyCycleStats::from_rust(py, &stats))
+            Python::attach(|py| PyConsolidationReport::from_rust(py, &stats))
         })
     }
 
-    fn consolidate_sync(&self, py: Python<'_>) -> PyResult<Py<PyCycleStats>> {
+    fn consolidate_sync(&self, py: Python<'_>) -> PyResult<Py<PyConsolidationReport>> {
         bridge_sync!(py, agent = self.inner.clone(), {
             let stats = agent.consolidate().await.map_err(to_pyerr)?;
-            Python::attach(|py| PyCycleStats::from_rust(py, &stats))
+            Python::attach(|py| PyConsolidationReport::from_rust(py, &stats))
+        })
+    }
+
+    /// Assert a fact directly, without an observation to derive it from.
+    ///
+    /// Facts are keyed by their triple, so asserting one that exists
+    /// reinforces it. `visibility` (`"public"`, `"private:<id>"`,
+    /// `"team:<id>"`, `"org:<id>"`) scopes it, for every assertion of the
+    /// triple.
+    #[pyo3(signature = (subject, predicate, object=None, *, observed_at=None, supporting_observation_ids=None, visibility=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn assert_fact<'py>(
+        &self,
+        py: Python<'py>,
+        subject: String,
+        predicate: String,
+        object: Option<String>,
+        observed_at: Option<&Bound<'_, PyAny>>,
+        supporting_observation_ids: Option<Vec<String>>,
+        visibility: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (params, visibility) = fact_args(
+            subject,
+            predicate,
+            object,
+            observed_at,
+            supporting_observation_ids,
+            visibility,
+        )?;
+        let fact_id = fact_id_for(&params.subject, &params.predicate, params.object.as_deref());
+        bridge!(py, agent = self.inner.clone(), {
+            let upsert = agent.assert_fact(params).await.map_err(to_pyerr)?;
+            if let Some(v) = visibility {
+                agent
+                    .set_visibility(upsert.node_id, v)
+                    .await
+                    .map_err(to_pyerr)?;
+            }
+            Python::attach(|py| PyFactUpsert::from_rust(py, &upsert, fact_id))
+        })
+    }
+
+    /// Invalidate a fact by its `fact_id`, closing its validity interval,
+    /// optionally naming the fact that replaces it.
+    #[pyo3(signature = (fact_id, *, replacement_fact_id=None, reason=None))]
+    fn invalidate_fact<'py>(
+        &self,
+        py: Python<'py>,
+        fact_id: String,
+        replacement_fact_id: Option<String>,
+        reason: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let params = InvalidateFactParams {
+            fact_id,
+            replacement_fact_id,
+            reason,
+            ..InvalidateFactParams::default()
+        };
+        bridge!(py, agent = self.inner.clone(), {
+            agent.invalidate_fact(params).await.map_err(to_pyerr)
+        })
+    }
+
+    /// Record an action this agent took (a tool call, an API request).
+    ///
+    /// `input` and `output` are any JSON-shaped value; an output too large
+    /// to keep inline goes to an artifact.
+    #[pyo3(signature = (action_type, *, action_id=None, input=None, output=None, status=None, started_at=None, ended_at=None, error=None, triggered_by_message_id=None, session_id=None, previous_action_id=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_action<'py>(
+        &self,
+        py: Python<'py>,
+        action_type: String,
+        action_id: Option<String>,
+        input: Option<&Bound<'_, PyAny>>,
+        output: Option<&Bound<'_, PyAny>>,
+        status: Option<String>,
+        started_at: Option<&Bound<'_, PyAny>>,
+        ended_at: Option<&Bound<'_, PyAny>>,
+        error: Option<String>,
+        triggered_by_message_id: Option<String>,
+        session_id: Option<String>,
+        previous_action_id: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let params = action_args(
+            action_type,
+            action_id,
+            input,
+            output,
+            status,
+            started_at,
+            ended_at,
+            error,
+            triggered_by_message_id,
+            session_id,
+            previous_action_id,
+        )?;
+        bridge!(py, agent = self.inner.clone(), {
+            let result = agent.record_action(params).await.map_err(to_pyerr)?;
+            Python::attach(|py| PyActionResult::from_rust(py, &result))
+        })
+    }
+
+    /// Record an episode: an outcome this agent experienced, which
+    /// procedure promotion learns from. Returns its node id.
+    #[pyo3(signature = (action_type, *, episode_id=None, outcome=None, state=None, delta=None, importance=None, timestamp=None, triggered_by_message_id=None, involved_action_ids=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_episode<'py>(
+        &self,
+        py: Python<'py>,
+        action_type: String,
+        episode_id: Option<String>,
+        outcome: Option<String>,
+        state: Option<&Bound<'_, PyAny>>,
+        delta: Option<&Bound<'_, PyAny>>,
+        importance: Option<f64>,
+        timestamp: Option<&Bound<'_, PyAny>>,
+        triggered_by_message_id: Option<String>,
+        involved_action_ids: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let params = RecordEpisodeParams {
+            episode_id,
+            action_type,
+            outcome,
+            state: state.map(convert::py_to_json).transpose()?,
+            delta: delta.map(convert::py_to_json).transpose()?,
+            importance,
+            timestamp: timestamp.map(convert::py_to_datetime).transpose()?,
+            triggered_by_message_id,
+            involved_action_ids: involved_action_ids.unwrap_or_default(),
+        };
+        bridge!(py, agent = self.inner.clone(), {
+            agent.record_episode(params).await.map_err(to_pyerr)
+        })
+    }
+
+    /// Add an observation by hand, anchored to an existing message.
+    /// Returns its node id. `visibility` scopes it, as for `assert_fact`.
+    #[pyo3(signature = (message_id, content, subject, *, predicate=None, object=None, temporal_phrase=None, temporal_anchor=None, observed_at=None, confidence=None, visibility=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_observation<'py>(
+        &self,
+        py: Python<'py>,
+        message_id: String,
+        content: String,
+        subject: String,
+        predicate: Option<String>,
+        object: Option<String>,
+        temporal_phrase: Option<String>,
+        temporal_anchor: Option<&Bound<'_, PyAny>>,
+        observed_at: Option<&Bound<'_, PyAny>>,
+        confidence: Option<f64>,
+        visibility: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let params = AddObservationParams {
+            message_id,
+            content,
+            subject,
+            predicate,
+            object,
+            temporal_phrase,
+            temporal_anchor: temporal_anchor.map(convert::py_to_datetime).transpose()?,
+            observed_at: observed_at.map(convert::py_to_datetime).transpose()?,
+            confidence,
+        };
+        let visibility = parse_visibility(visibility)?;
+        bridge!(py, agent = self.inner.clone(), {
+            let nid = agent.add_observation(params).await.map_err(to_pyerr)?;
+            if let Some(v) = visibility {
+                agent.set_visibility(nid, v).await.map_err(to_pyerr)?;
+            }
+            Ok(nid)
+        })
+    }
+
+    /// Set who may see a Fact or Observation: `"public"`, `"private:<id>"`,
+    /// `"team:<id>"` or `"org:<id>"`. Returns False when no node has
+    /// `node_id`.
+    fn set_visibility<'py>(
+        &self,
+        py: Python<'py>,
+        node_id: NodeId,
+        visibility: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let visibility = Visibility::parse(&visibility).map_err(to_pyerr)?;
+        bridge!(py, agent = self.inner.clone(), {
+            agent
+                .set_visibility(node_id, visibility)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Every rule in the store, stdlib ones included.
+    fn list_rules<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        bridge!(py, agent = self.inner.clone(), {
+            let rules = agent.list_rules().await.map_err(to_pyerr)?;
+            Python::attach(|py| {
+                rules
+                    .iter()
+                    .map(|r| PyRuleView::from_rust(py, r))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+        })
+    }
+
+    /// A rule's definition and state, or None when no rule has `name`.
+    fn explain_rule<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        bridge!(py, agent = self.inner.clone(), {
+            let rule = agent.explain_rule(&name).await.map_err(to_pyerr)?;
+            Python::attach(|py| rule.map(|r| PyRuleView::from_rust(py, &r)).transpose())
+        })
+    }
+
+    /// Stop a rule running and mark it pruned. Returns False when no rule
+    /// has `name`; raises `ConfigError` for a stdlib rule.
+    fn delete_rule<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        bridge!(py, agent = self.inner.clone(), {
+            agent.delete_rule(&name).await.map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`assert_fact`](Self::assert_fact).
+    #[pyo3(signature = (subject, predicate, object=None, *, observed_at=None, supporting_observation_ids=None, visibility=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn assert_fact_sync(
+        &self,
+        py: Python<'_>,
+        subject: String,
+        predicate: String,
+        object: Option<String>,
+        observed_at: Option<&Bound<'_, PyAny>>,
+        supporting_observation_ids: Option<Vec<String>>,
+        visibility: Option<String>,
+    ) -> PyResult<Py<PyFactUpsert>> {
+        let (params, visibility) = fact_args(
+            subject,
+            predicate,
+            object,
+            observed_at,
+            supporting_observation_ids,
+            visibility,
+        )?;
+        let fact_id = fact_id_for(&params.subject, &params.predicate, params.object.as_deref());
+        bridge_sync!(py, agent = self.inner.clone(), {
+            let upsert = agent.assert_fact(params).await.map_err(to_pyerr)?;
+            if let Some(v) = visibility {
+                agent
+                    .set_visibility(upsert.node_id, v)
+                    .await
+                    .map_err(to_pyerr)?;
+            }
+            Python::attach(|py| PyFactUpsert::from_rust(py, &upsert, fact_id))
+        })
+    }
+
+    /// Blocking variant of [`invalidate_fact`](Self::invalidate_fact).
+    #[pyo3(signature = (fact_id, *, replacement_fact_id=None, reason=None))]
+    fn invalidate_fact_sync(
+        &self,
+        py: Python<'_>,
+        fact_id: String,
+        replacement_fact_id: Option<String>,
+        reason: Option<String>,
+    ) -> PyResult<()> {
+        let params = InvalidateFactParams {
+            fact_id,
+            replacement_fact_id,
+            reason,
+            ..InvalidateFactParams::default()
+        };
+        bridge_sync!(py, agent = self.inner.clone(), {
+            agent.invalidate_fact(params).await.map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`record_action`](Self::record_action).
+    #[pyo3(signature = (action_type, *, action_id=None, input=None, output=None, status=None, started_at=None, ended_at=None, error=None, triggered_by_message_id=None, session_id=None, previous_action_id=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_action_sync(
+        &self,
+        py: Python<'_>,
+        action_type: String,
+        action_id: Option<String>,
+        input: Option<&Bound<'_, PyAny>>,
+        output: Option<&Bound<'_, PyAny>>,
+        status: Option<String>,
+        started_at: Option<&Bound<'_, PyAny>>,
+        ended_at: Option<&Bound<'_, PyAny>>,
+        error: Option<String>,
+        triggered_by_message_id: Option<String>,
+        session_id: Option<String>,
+        previous_action_id: Option<String>,
+    ) -> PyResult<Py<PyActionResult>> {
+        let params = action_args(
+            action_type,
+            action_id,
+            input,
+            output,
+            status,
+            started_at,
+            ended_at,
+            error,
+            triggered_by_message_id,
+            session_id,
+            previous_action_id,
+        )?;
+        bridge_sync!(py, agent = self.inner.clone(), {
+            let result = agent.record_action(params).await.map_err(to_pyerr)?;
+            Python::attach(|py| PyActionResult::from_rust(py, &result))
+        })
+    }
+
+    /// Blocking variant of [`record_episode`](Self::record_episode).
+    #[pyo3(signature = (action_type, *, episode_id=None, outcome=None, state=None, delta=None, importance=None, timestamp=None, triggered_by_message_id=None, involved_action_ids=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_episode_sync(
+        &self,
+        py: Python<'_>,
+        action_type: String,
+        episode_id: Option<String>,
+        outcome: Option<String>,
+        state: Option<&Bound<'_, PyAny>>,
+        delta: Option<&Bound<'_, PyAny>>,
+        importance: Option<f64>,
+        timestamp: Option<&Bound<'_, PyAny>>,
+        triggered_by_message_id: Option<String>,
+        involved_action_ids: Option<Vec<String>>,
+    ) -> PyResult<NodeId> {
+        let params = RecordEpisodeParams {
+            episode_id,
+            action_type,
+            outcome,
+            state: state.map(convert::py_to_json).transpose()?,
+            delta: delta.map(convert::py_to_json).transpose()?,
+            importance,
+            timestamp: timestamp.map(convert::py_to_datetime).transpose()?,
+            triggered_by_message_id,
+            involved_action_ids: involved_action_ids.unwrap_or_default(),
+        };
+        bridge_sync!(py, agent = self.inner.clone(), {
+            agent.record_episode(params).await.map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`add_observation`](Self::add_observation).
+    #[pyo3(signature = (message_id, content, subject, *, predicate=None, object=None, temporal_phrase=None, temporal_anchor=None, observed_at=None, confidence=None, visibility=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_observation_sync(
+        &self,
+        py: Python<'_>,
+        message_id: String,
+        content: String,
+        subject: String,
+        predicate: Option<String>,
+        object: Option<String>,
+        temporal_phrase: Option<String>,
+        temporal_anchor: Option<&Bound<'_, PyAny>>,
+        observed_at: Option<&Bound<'_, PyAny>>,
+        confidence: Option<f64>,
+        visibility: Option<String>,
+    ) -> PyResult<NodeId> {
+        let params = AddObservationParams {
+            message_id,
+            content,
+            subject,
+            predicate,
+            object,
+            temporal_phrase,
+            temporal_anchor: temporal_anchor.map(convert::py_to_datetime).transpose()?,
+            observed_at: observed_at.map(convert::py_to_datetime).transpose()?,
+            confidence,
+        };
+        let visibility = parse_visibility(visibility)?;
+        bridge_sync!(py, agent = self.inner.clone(), {
+            let nid = agent.add_observation(params).await.map_err(to_pyerr)?;
+            if let Some(v) = visibility {
+                agent.set_visibility(nid, v).await.map_err(to_pyerr)?;
+            }
+            Ok(nid)
+        })
+    }
+
+    /// Blocking variant of [`set_visibility`](Self::set_visibility).
+    fn set_visibility_sync(
+        &self,
+        py: Python<'_>,
+        node_id: NodeId,
+        visibility: String,
+    ) -> PyResult<bool> {
+        let visibility = Visibility::parse(&visibility).map_err(to_pyerr)?;
+        bridge_sync!(py, agent = self.inner.clone(), {
+            agent
+                .set_visibility(node_id, visibility)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`list_rules`](Self::list_rules).
+    fn list_rules_sync(&self, py: Python<'_>) -> PyResult<Vec<Py<PyRuleView>>> {
+        bridge_sync!(py, agent = self.inner.clone(), {
+            let rules = agent.list_rules().await.map_err(to_pyerr)?;
+            Python::attach(|py| {
+                rules
+                    .iter()
+                    .map(|r| PyRuleView::from_rust(py, r))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+        })
+    }
+
+    /// Blocking variant of [`explain_rule`](Self::explain_rule).
+    fn explain_rule_sync(&self, py: Python<'_>, name: String) -> PyResult<Option<Py<PyRuleView>>> {
+        bridge_sync!(py, agent = self.inner.clone(), {
+            let rule = agent.explain_rule(&name).await.map_err(to_pyerr)?;
+            Python::attach(|py| rule.map(|r| PyRuleView::from_rust(py, &r)).transpose())
+        })
+    }
+
+    /// Blocking variant of [`delete_rule`](Self::delete_rule).
+    fn delete_rule_sync(&self, py: Python<'_>, name: String) -> PyResult<bool> {
+        bridge_sync!(py, agent = self.inner.clone(), {
+            agent.delete_rule(&name).await.map_err(to_pyerr)
         })
     }
 
@@ -565,4 +993,61 @@ fn recall_with_args(
     overrides.reranker = reranker;
     overrides.reference_ts = reference_ts.map(convert::py_to_datetime).transpose()?;
     Ok((scope, overrides))
+}
+
+/// A visibility string as a [`Visibility`], or `None`.
+fn parse_visibility(visibility: Option<String>) -> PyResult<Option<Visibility>> {
+    visibility
+        .map(|v| Visibility::parse(&v).map_err(to_pyerr))
+        .transpose()
+}
+
+/// The params and visibility for `assert_fact` / `assert_fact_sync`.
+fn fact_args(
+    subject: String,
+    predicate: String,
+    object: Option<String>,
+    observed_at: Option<&Bound<'_, PyAny>>,
+    supporting_observation_ids: Option<Vec<String>>,
+    visibility: Option<String>,
+) -> PyResult<(AssertFactParams, Option<Visibility>)> {
+    let params = AssertFactParams {
+        subject,
+        predicate,
+        object,
+        observed_at: observed_at.map(convert::py_to_datetime).transpose()?,
+        supporting_observation_ids: supporting_observation_ids.unwrap_or_default(),
+        ..AssertFactParams::default()
+    };
+    Ok((params, parse_visibility(visibility)?))
+}
+
+/// The params for `record_action` on `Agent` and `Session`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn action_args(
+    action_type: String,
+    action_id: Option<String>,
+    input: Option<&Bound<'_, PyAny>>,
+    output: Option<&Bound<'_, PyAny>>,
+    status: Option<String>,
+    started_at: Option<&Bound<'_, PyAny>>,
+    ended_at: Option<&Bound<'_, PyAny>>,
+    error: Option<String>,
+    triggered_by_message_id: Option<String>,
+    session_id: Option<String>,
+    previous_action_id: Option<String>,
+) -> PyResult<RecordActionParams> {
+    Ok(RecordActionParams {
+        action_id,
+        action_type,
+        input: input.map(convert::py_to_json).transpose()?,
+        output: output.map(convert::py_to_json).transpose()?,
+        status,
+        started_at: started_at.map(convert::py_to_datetime).transpose()?,
+        ended_at: ended_at.map(convert::py_to_datetime).transpose()?,
+        error,
+        triggered_by_message_id,
+        session_id,
+        previous_action_id,
+    })
 }

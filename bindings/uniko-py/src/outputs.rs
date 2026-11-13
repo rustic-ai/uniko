@@ -11,10 +11,11 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use uniko_api::tools::{
-    AbductionResult, Answer, ArtifactView, AtomicIngestResult, CircuitState, ContextBundle,
-    CycleStats, DeletionReport, FinalizeReport, GoalContext, GoalPhase, GoalView, IngestOutcome,
-    MessageView, ObserveResult, PipelineHealth, RecallItem, RecallKind, RecallSource,
-    SummarizeReport, TaskPhase, TaskView, UnitResult, WorkerHealth, WorkerStatus,
+    AbductionResult, Answer, ArtifactView, AtomicIngestResult, CircuitState, ConsolidationReport,
+    ContextBundle, CycleStats, DeletionReport, FactUpsert, FinalizeReport, GoalContext, GoalPhase,
+    GoalView, IngestOutcome, MessageView, ObserveResult, PipelineHealth, PromotionReport,
+    RecallItem, RecallKind, RecallSource, RecordActionResult, RuleView, SummarizeReport, TaskPhase,
+    TaskView, TopicReport, UnitResult, WorkerHealth, WorkerStatus,
 };
 
 use crate::convert::{json_to_py, utc_datetime_to_py};
@@ -1166,6 +1167,253 @@ impl PyPipelineHealth {
     }
 }
 
+/// What `Agent.consolidate()` did: the fact cycle, then the procedure and
+/// topic sweeps.
+#[pyclass(name = "ConsolidationReport", module = "uniko", frozen)]
+pub struct PyConsolidationReport {
+    /// The observation-to-fact cycle.
+    #[pyo3(get)]
+    cycle: Py<PyCycleStats>,
+    /// Procedure promotion for this agent.
+    #[pyo3(get)]
+    procedures: Py<PyPromotionReport>,
+    /// Topic detection, which covers the whole store.
+    #[pyo3(get)]
+    topics: Py<PyTopicReport>,
+}
+
+impl PyConsolidationReport {
+    /// Build the Python wrapper from a Rust [`ConsolidationReport`].
+    pub fn from_rust(py: Python<'_>, report: &ConsolidationReport) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                cycle: PyCycleStats::from_rust(py, &report.cycle)?,
+                procedures: PyPromotionReport::from_rust(py, &report.procedures)?,
+                topics: PyTopicReport::from_rust(py, &report.topics)?,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyConsolidationReport {
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let c = self.cycle.bind(py).get();
+        let p = self.procedures.bind(py).get();
+        let t = self.topics.bind(py).get();
+        format!(
+            "ConsolidationReport(facts_created={}, procedures_created={}, topics_created={})",
+            c.facts_created, p.created, t.created
+        )
+    }
+}
+
+/// What procedure promotion did in one pass.
+#[pyclass(name = "PromotionReport", module = "uniko", frozen)]
+pub struct PyPromotionReport {
+    /// New candidate procedures.
+    #[pyo3(get)]
+    created: usize,
+    /// Existing procedures seen again.
+    #[pyo3(get)]
+    reinforced: usize,
+    /// Procedures that became active.
+    #[pyo3(get)]
+    promoted: usize,
+}
+
+impl PyPromotionReport {
+    fn from_rust(py: Python<'_>, report: &PromotionReport) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                created: report.created,
+                reinforced: report.reinforced,
+                promoted: report.promoted,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyPromotionReport {
+    fn __repr__(&self) -> String {
+        format!(
+            "PromotionReport(created={}, reinforced={}, promoted={})",
+            self.created, self.reinforced, self.promoted
+        )
+    }
+}
+
+/// What topic detection did in one pass.
+#[pyclass(name = "TopicReport", module = "uniko", frozen)]
+pub struct PyTopicReport {
+    /// New topics.
+    #[pyo3(get)]
+    created: usize,
+    /// Existing topics whose membership was refreshed.
+    #[pyo3(get)]
+    updated: usize,
+    /// Entities assigned to a topic.
+    #[pyo3(get)]
+    entities_assigned: usize,
+}
+
+impl PyTopicReport {
+    fn from_rust(py: Python<'_>, report: &TopicReport) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                created: report.created,
+                updated: report.updated,
+                entities_assigned: report.entities_assigned,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyTopicReport {
+    fn __repr__(&self) -> String {
+        format!(
+            "TopicReport(created={}, updated={}, entities_assigned={})",
+            self.created, self.updated, self.entities_assigned
+        )
+    }
+}
+
+/// What `Agent.assert_fact()` wrote.
+#[pyclass(name = "FactUpsert", module = "uniko", frozen)]
+pub struct PyFactUpsert {
+    /// Node id of the fact, for `Agent.set_visibility`.
+    #[pyo3(get)]
+    node_id: i64,
+    /// The fact's external id, for `Agent.invalidate_fact`.
+    #[pyo3(get)]
+    fact_id: String,
+    /// Whether this call created the fact rather than reinforcing it.
+    #[pyo3(get)]
+    was_created: bool,
+    /// How many observations now support the fact.
+    #[pyo3(get)]
+    observation_count: i64,
+}
+
+impl PyFactUpsert {
+    /// Build the Python wrapper from a Rust [`FactUpsert`] and its id.
+    pub fn from_rust(py: Python<'_>, upsert: &FactUpsert, fact_id: String) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                node_id: upsert.node_id,
+                fact_id,
+                was_created: upsert.was_created,
+                observation_count: upsert.observation_count,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyFactUpsert {
+    fn __repr__(&self) -> String {
+        format!(
+            "FactUpsert(fact_id='{}', node_id={}, was_created={}, observation_count={})",
+            self.fact_id,
+            self.node_id,
+            if self.was_created { "True" } else { "False" },
+            self.observation_count
+        )
+    }
+}
+
+/// What `Agent.record_action()` wrote.
+#[pyclass(name = "ActionResult", module = "uniko", frozen)]
+pub struct PyActionResult {
+    /// Node id of the action.
+    #[pyo3(get)]
+    action_node: i64,
+    /// Node id of the artifact holding an output too large to keep inline.
+    #[pyo3(get)]
+    overflow_artifact: Option<i64>,
+}
+
+impl PyActionResult {
+    /// Build the Python wrapper from a Rust [`RecordActionResult`].
+    pub fn from_rust(py: Python<'_>, result: &RecordActionResult) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                action_node: result.action_node,
+                overflow_artifact: result.overflow_artifact,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyActionResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "ActionResult(action_node={}, overflow_artifact={})",
+            self.action_node,
+            self.overflow_artifact
+                .map_or_else(|| "None".to_string(), |n| n.to_string())
+        )
+    }
+}
+
+/// A rule as `Agent.list_rules()` and `Agent.explain_rule()` show it.
+#[pyclass(name = "RuleView", module = "uniko", frozen)]
+pub struct PyRuleView {
+    /// The rule's name.
+    #[pyo3(get)]
+    name: String,
+    /// `"stdlib"`, `"authored"` or `"derived"`.
+    #[pyo3(get)]
+    source_type: String,
+    /// `"candidate"`, `"active"`, `"demoted"` or `"pruned"`.
+    #[pyo3(get)]
+    status: String,
+    /// Confidence in `[0, 1]`.
+    #[pyo3(get)]
+    confidence: f64,
+    /// The Locy source; `None` from `list_rules`.
+    #[pyo3(get)]
+    source: Option<String>,
+    /// A plain-language description, when one was recorded.
+    #[pyo3(get)]
+    natural_language: Option<String>,
+}
+
+impl PyRuleView {
+    /// Build the Python wrapper from a Rust [`RuleView`].
+    pub fn from_rust(py: Python<'_>, rule: &RuleView) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                name: rule.name.clone(),
+                source_type: rule.source_type.clone(),
+                status: rule.status.clone(),
+                confidence: rule.confidence,
+                source: rule.source.clone(),
+                natural_language: rule.natural_language.clone(),
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyRuleView {
+    fn __repr__(&self) -> String {
+        format!(
+            "RuleView(name='{}', source_type='{}', status='{}', confidence={:.2})",
+            self.name, self.source_type, self.status, self.confidence
+        )
+    }
+}
+
 /// Register the output pyclasses on the module.
 ///
 /// # Errors
@@ -1191,5 +1439,11 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySummarizeReport>()?;
     m.add_class::<PyWorkerHealth>()?;
     m.add_class::<PyPipelineHealth>()?;
+    m.add_class::<PyConsolidationReport>()?;
+    m.add_class::<PyPromotionReport>()?;
+    m.add_class::<PyTopicReport>()?;
+    m.add_class::<PyFactUpsert>()?;
+    m.add_class::<PyActionResult>()?;
+    m.add_class::<PyRuleView>()?;
     Ok(())
 }

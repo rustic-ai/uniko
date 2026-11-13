@@ -204,6 +204,51 @@ class IngestOutcome:
     def __repr__(self) -> str: ...
 
 @final
+class ConsolidationReport:
+    cycle: CycleStats
+    procedures: PromotionReport
+    topics: TopicReport
+    def __repr__(self) -> str: ...
+
+@final
+class PromotionReport:
+    created: int
+    reinforced: int
+    promoted: int
+    def __repr__(self) -> str: ...
+
+@final
+class TopicReport:
+    created: int
+    updated: int
+    entities_assigned: int
+    def __repr__(self) -> str: ...
+
+@final
+class FactUpsert:
+    node_id: int
+    fact_id: str
+    was_created: bool
+    observation_count: int
+    def __repr__(self) -> str: ...
+
+@final
+class ActionResult:
+    action_node: int
+    overflow_artifact: int | None
+    def __repr__(self) -> str: ...
+
+@final
+class RuleView:
+    name: str
+    source_type: str
+    status: str
+    confidence: float
+    source: str | None
+    natural_language: str | None
+    def __repr__(self) -> str: ...
+
+@final
 class UnitResult:
     turns: list[ObserveResult]
     was_replay: bool
@@ -275,6 +320,22 @@ class IngestSource:
     def with_revision(self, revision_id: str) -> IngestSource: ...
 
 @final
+class Viewer:
+    def __new__(
+        cls,
+        participant_id: str,
+        teams: Sequence[str] | None = None,
+        orgs: Sequence[str] | None = None,
+    ) -> Viewer: ...
+    @property
+    def participant_id(self) -> str: ...
+    @property
+    def teams(self) -> list[str]: ...
+    @property
+    def orgs(self) -> list[str]: ...
+    def __repr__(self) -> str: ...
+
+@final
 class Scope:
     def __new__(cls) -> Scope: ...
     def sessions(self, sessions: list[str]) -> Scope: ...
@@ -286,6 +347,7 @@ class Scope:
     def sources(self, sources: Sequence[str]) -> Scope: ...
     def include_superseded(self) -> Scope: ...
     def as_participant(self, participant_id: str) -> Scope: ...
+    def as_viewer(self, viewer: Viewer) -> Scope: ...
 
 @final
 class Turn:
@@ -439,6 +501,36 @@ class Session:
     ) -> bool: ...
     def commit_unit(self, turns: Sequence[Turn]) -> Awaitable[UnitResult]: ...
     def commit_unit_sync(self, turns: Sequence[Turn]) -> UnitResult: ...
+    def record_action(
+        self,
+        action_type: str,
+        *,
+        action_id: str | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
+        status: str | None = None,
+        started_at: datetime.datetime | None = None,
+        ended_at: datetime.datetime | None = None,
+        error: str | None = None,
+        triggered_by_message_id: str | None = None,
+        session_id: str | None = None,
+        previous_action_id: str | None = None,
+    ) -> Awaitable[ActionResult]: ...
+    def record_action_sync(
+        self,
+        action_type: str,
+        *,
+        action_id: str | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
+        status: str | None = None,
+        started_at: datetime.datetime | None = None,
+        ended_at: datetime.datetime | None = None,
+        error: str | None = None,
+        triggered_by_message_id: str | None = None,
+        session_id: str | None = None,
+        previous_action_id: str | None = None,
+    ) -> ActionResult: ...
     def summarize(self) -> Awaitable[SummarizeReport]: ...
     def summarize_sync(self) -> SummarizeReport: ...
     def forget_turn(self, message_id: str) -> Awaitable[DeletionReport]: ...
@@ -517,8 +609,134 @@ class Agent:
     def restore_source(self, source_id: str) -> Awaitable[bool]: ...
     def retire_source_sync(self, source_id: str) -> bool: ...
     def restore_source_sync(self, source_id: str) -> bool: ...
-    def consolidate(self) -> Awaitable[CycleStats]: ...
-    def consolidate_sync(self) -> CycleStats: ...
+    def consolidate(self) -> Awaitable[ConsolidationReport]: ...
+    def consolidate_sync(self) -> ConsolidationReport: ...
+    def assert_fact(
+        self,
+        subject: str,
+        predicate: str,
+        object: str | None = None,
+        *,
+        observed_at: datetime.datetime | None = None,
+        supporting_observation_ids: Sequence[str] | None = None,
+        visibility: str | None = None,
+    ) -> Awaitable[FactUpsert]: ...
+    def assert_fact_sync(
+        self,
+        subject: str,
+        predicate: str,
+        object: str | None = None,
+        *,
+        observed_at: datetime.datetime | None = None,
+        supporting_observation_ids: Sequence[str] | None = None,
+        visibility: str | None = None,
+    ) -> FactUpsert: ...
+    def invalidate_fact(
+        self,
+        fact_id: str,
+        *,
+        replacement_fact_id: str | None = None,
+        reason: str | None = None,
+    ) -> Awaitable[None]: ...
+    def invalidate_fact_sync(
+        self,
+        fact_id: str,
+        *,
+        replacement_fact_id: str | None = None,
+        reason: str | None = None,
+    ) -> None: ...
+    def record_action(
+        self,
+        action_type: str,
+        *,
+        action_id: str | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
+        status: str | None = None,
+        started_at: datetime.datetime | None = None,
+        ended_at: datetime.datetime | None = None,
+        error: str | None = None,
+        triggered_by_message_id: str | None = None,
+        session_id: str | None = None,
+        previous_action_id: str | None = None,
+    ) -> Awaitable[ActionResult]: ...
+    def record_action_sync(
+        self,
+        action_type: str,
+        *,
+        action_id: str | None = None,
+        input: Any | None = None,
+        output: Any | None = None,
+        status: str | None = None,
+        started_at: datetime.datetime | None = None,
+        ended_at: datetime.datetime | None = None,
+        error: str | None = None,
+        triggered_by_message_id: str | None = None,
+        session_id: str | None = None,
+        previous_action_id: str | None = None,
+    ) -> ActionResult: ...
+    def record_episode(
+        self,
+        action_type: str,
+        *,
+        episode_id: str | None = None,
+        outcome: str | None = None,
+        state: Any | None = None,
+        delta: Any | None = None,
+        importance: float | None = None,
+        timestamp: datetime.datetime | None = None,
+        triggered_by_message_id: str | None = None,
+        involved_action_ids: Sequence[str] | None = None,
+    ) -> Awaitable[int]: ...
+    def record_episode_sync(
+        self,
+        action_type: str,
+        *,
+        episode_id: str | None = None,
+        outcome: str | None = None,
+        state: Any | None = None,
+        delta: Any | None = None,
+        importance: float | None = None,
+        timestamp: datetime.datetime | None = None,
+        triggered_by_message_id: str | None = None,
+        involved_action_ids: Sequence[str] | None = None,
+    ) -> int: ...
+    def add_observation(
+        self,
+        message_id: str,
+        content: str,
+        subject: str,
+        *,
+        predicate: str | None = None,
+        object: str | None = None,
+        temporal_phrase: str | None = None,
+        temporal_anchor: datetime.datetime | None = None,
+        observed_at: datetime.datetime | None = None,
+        confidence: float | None = None,
+        visibility: str | None = None,
+    ) -> Awaitable[int]: ...
+    def add_observation_sync(
+        self,
+        message_id: str,
+        content: str,
+        subject: str,
+        *,
+        predicate: str | None = None,
+        object: str | None = None,
+        temporal_phrase: str | None = None,
+        temporal_anchor: datetime.datetime | None = None,
+        observed_at: datetime.datetime | None = None,
+        confidence: float | None = None,
+        visibility: str | None = None,
+    ) -> int: ...
+    def set_visibility(self, node_id: int, visibility: str) -> Awaitable[bool]: ...
+    def set_visibility_sync(self, node_id: int, visibility: str) -> bool: ...
+    def list_rules(self) -> Awaitable[list[RuleView]]: ...
+    def list_rules_sync(self) -> list[RuleView]: ...
+    def explain_rule(self, name: str) -> Awaitable[RuleView | None]: ...
+    def explain_rule_sync(self, name: str) -> RuleView | None: ...
+    def delete_rule(self, name: str) -> Awaitable[bool]: ...
+    def delete_rule_sync(self, name: str) -> bool: ...
     def unfinalized_session_ids(self) -> Awaitable[list[str]]: ...
     def unfinalized_session_ids_sync(self) -> list[str]: ...
     def forget_participant(self, participant_id: str) -> Awaitable[DeletionReport]: ...
@@ -535,6 +753,7 @@ class UnikoBuilder:
     def llm(self, spec: LlmSpec) -> UnikoBuilder: ...
     def streaming(self, on: bool) -> UnikoBuilder: ...
     def scope_to_agent(self) -> UnikoBuilder: ...
+    def scope(self, viewer: Viewer | None) -> UnikoBuilder: ...
     def build(self) -> Awaitable[Uniko]: ...
     def build_sync(self) -> Uniko: ...
     def __repr__(self) -> str: ...
@@ -554,6 +773,22 @@ class Uniko:
     def agent(self, agent_id: str) -> Agent: ...
     def config(self) -> dict[str, Any]: ...
     def health(self) -> PipelineHealth | None: ...
+    def add_team_member(self, participant_id: str, team_id: str) -> Awaitable[bool]: ...
+    def add_team_member_sync(self, participant_id: str, team_id: str) -> bool: ...
+    def remove_team_member(
+        self, participant_id: str, team_id: str
+    ) -> Awaitable[bool]: ...
+    def remove_team_member_sync(self, participant_id: str, team_id: str) -> bool: ...
+    def add_org_member(self, participant_id: str, org_id: str) -> Awaitable[bool]: ...
+    def add_org_member_sync(self, participant_id: str, org_id: str) -> bool: ...
+    def remove_org_member(
+        self, participant_id: str, org_id: str
+    ) -> Awaitable[bool]: ...
+    def remove_org_member_sync(self, participant_id: str, org_id: str) -> bool: ...
+    def add_team_to_org(self, team_id: str, org_id: str) -> Awaitable[bool]: ...
+    def add_team_to_org_sync(self, team_id: str, org_id: str) -> bool: ...
+    def remove_team_from_org(self, team_id: str, org_id: str) -> Awaitable[bool]: ...
+    def remove_team_from_org_sync(self, team_id: str, org_id: str) -> bool: ...
     def purge(self) -> Awaitable[DeletionReport]: ...
     def purge_sync(self) -> DeletionReport: ...
     def shutdown(self) -> Awaitable[None]: ...
@@ -584,6 +819,13 @@ __all__ = [
     "SummarizeReport",
     "PipelineHealth",
     "WorkerHealth",
+    "ConsolidationReport",
+    "PromotionReport",
+    "TopicReport",
+    "FactUpsert",
+    "ActionResult",
+    "RuleView",
+    "Viewer",
     "MessageView",
     "ArtifactView",
     "GoalView",

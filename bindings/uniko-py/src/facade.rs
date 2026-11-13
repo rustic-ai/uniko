@@ -13,13 +13,14 @@
 use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
-use uniko_api::tools::{LlmSpec, Uniko, UnikoBuilder, UnikoError};
+use uniko_api::tools::{LlmSpec, RecallScope, Uniko, UnikoBuilder, UnikoError};
 
 use crate::agent::PyAgent;
 use crate::config::{config_from_py, config_to_py, embedding_from_py, reranker_from_py};
 use crate::errors::to_pyerr;
 use crate::macros::{bridge, bridge_sync};
 use crate::outputs::{PyDeletionReport, PyPipelineHealth};
+use crate::scope::PyViewer;
 
 /// The `PyErr` raised when a handle is used after `shutdown`.
 fn closed() -> PyErr {
@@ -124,6 +125,203 @@ impl PyUniko {
             .health()
             .map(|h| PyPipelineHealth::from_rust(py, &h))
             .transpose()
+    }
+
+    /// Record that `participant_id` is a member of team `team_id`, so it
+    /// sees items with `team:{team_id}` visibility. Creates the participant
+    /// and team when absent. Returns False when already recorded.
+    ///
+    /// An `Agent` resolves its own memberships on its first scoped read, so
+    /// take a fresh one from `agent()` to see a change.
+    fn add_team_member<'py>(
+        &self,
+        py: Python<'py>,
+        participant_id: String,
+        team_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let uniko = self.cloned()?;
+        bridge!(py, instance = uniko, {
+            instance
+                .add_team_member(&participant_id, &team_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`add_team_member`](Self::add_team_member).
+    fn add_team_member_sync(
+        &self,
+        py: Python<'_>,
+        participant_id: String,
+        team_id: String,
+    ) -> PyResult<bool> {
+        let uniko = self.cloned()?;
+        bridge_sync!(py, instance = uniko, {
+            instance
+                .add_team_member(&participant_id, &team_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Undo `add_team_member`. Returns False when it was not recorded.
+    fn remove_team_member<'py>(
+        &self,
+        py: Python<'py>,
+        participant_id: String,
+        team_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let uniko = self.cloned()?;
+        bridge!(py, instance = uniko, {
+            instance
+                .remove_team_member(&participant_id, &team_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`remove_team_member`](Self::remove_team_member).
+    fn remove_team_member_sync(
+        &self,
+        py: Python<'_>,
+        participant_id: String,
+        team_id: String,
+    ) -> PyResult<bool> {
+        let uniko = self.cloned()?;
+        bridge_sync!(py, instance = uniko, {
+            instance
+                .remove_team_member(&participant_id, &team_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Record that `participant_id` is a member of org `org_id`. Returns False when already recorded.
+    fn add_org_member<'py>(
+        &self,
+        py: Python<'py>,
+        participant_id: String,
+        org_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let uniko = self.cloned()?;
+        bridge!(py, instance = uniko, {
+            instance
+                .add_org_member(&participant_id, &org_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`add_org_member`](Self::add_org_member).
+    fn add_org_member_sync(
+        &self,
+        py: Python<'_>,
+        participant_id: String,
+        org_id: String,
+    ) -> PyResult<bool> {
+        let uniko = self.cloned()?;
+        bridge_sync!(py, instance = uniko, {
+            instance
+                .add_org_member(&participant_id, &org_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Undo `add_org_member`. Returns False when it was not recorded.
+    fn remove_org_member<'py>(
+        &self,
+        py: Python<'py>,
+        participant_id: String,
+        org_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let uniko = self.cloned()?;
+        bridge!(py, instance = uniko, {
+            instance
+                .remove_org_member(&participant_id, &org_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`remove_org_member`](Self::remove_org_member).
+    fn remove_org_member_sync(
+        &self,
+        py: Python<'_>,
+        participant_id: String,
+        org_id: String,
+    ) -> PyResult<bool> {
+        let uniko = self.cloned()?;
+        bridge_sync!(py, instance = uniko, {
+            instance
+                .remove_org_member(&participant_id, &org_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Record that team `team_id` belongs to org `org_id`, giving its members that org. Returns False when already recorded.
+    fn add_team_to_org<'py>(
+        &self,
+        py: Python<'py>,
+        team_id: String,
+        org_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let uniko = self.cloned()?;
+        bridge!(py, instance = uniko, {
+            instance
+                .add_team_to_org(&team_id, &org_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`add_team_to_org`](Self::add_team_to_org).
+    fn add_team_to_org_sync(
+        &self,
+        py: Python<'_>,
+        team_id: String,
+        org_id: String,
+    ) -> PyResult<bool> {
+        let uniko = self.cloned()?;
+        bridge_sync!(py, instance = uniko, {
+            instance
+                .add_team_to_org(&team_id, &org_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Undo `add_team_to_org`. Returns False when it was not recorded.
+    fn remove_team_from_org<'py>(
+        &self,
+        py: Python<'py>,
+        team_id: String,
+        org_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let uniko = self.cloned()?;
+        bridge!(py, instance = uniko, {
+            instance
+                .remove_team_from_org(&team_id, &org_id)
+                .await
+                .map_err(to_pyerr)
+        })
+    }
+
+    /// Blocking variant of [`remove_team_from_org`](Self::remove_team_from_org).
+    fn remove_team_from_org_sync(
+        &self,
+        py: Python<'_>,
+        team_id: String,
+        org_id: String,
+    ) -> PyResult<bool> {
+        let uniko = self.cloned()?;
+        bridge_sync!(py, instance = uniko, {
+            instance
+                .remove_team_from_org(&team_id, &org_id)
+                .await
+                .map_err(to_pyerr)
+        })
     }
 
     /// Erase the entire graph. Intended for dev/test reset.
@@ -272,6 +470,18 @@ impl PyUnikoBuilder {
     /// Scope every agent's reads to its own visibility.
     fn scope_to_agent<'py>(slf: PyRef<'py, Self>) -> PyResult<PyRef<'py, Self>> {
         slf.map(UnikoBuilder::scope_to_agent)?;
+        Ok(slf)
+    }
+
+    /// Set every agent's read scope: a `Viewer` reads as that viewer, and
+    /// `None` reads everything (the default). `scope_to_agent()` reads as
+    /// each agent itself.
+    fn scope<'py>(slf: PyRef<'py, Self>, viewer: Option<&PyViewer>) -> PyResult<PyRef<'py, Self>> {
+        let scope = match viewer {
+            Some(v) => RecallScope::As(v.viewer()),
+            None => RecallScope::Unrestricted,
+        };
+        slf.map(|b| b.scope(scope))?;
         Ok(slf)
     }
 

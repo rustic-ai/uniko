@@ -33,6 +33,10 @@ HANDLES = {
 # Keep this short: an entry here is a gap a typed caller has to work around.
 TYPED_EXCEPTIONS: dict[str, set[str]] = {}
 
+# Native classes built by the caller rather than returned, so they need no
+# output model even though their public members are all fields.
+INPUT_CLASSES = {"Viewer"}
+
 # Methods a result class may carry besides its fields.
 RESULT_METHODS = {"citations", "message_node_ids"}
 
@@ -78,6 +82,8 @@ def test_every_native_result_class_has_a_model() -> None:
     # fields; handles (Agent, Session, ...) and builders carry methods.
     def is_result(cls: object) -> bool:
         if not isinstance(cls, type) or issubclass(cls, BaseException):
+            return False
+        if cls.__name__ in INPUT_CLASSES:
             return False
         fields = native_fields(cls)
         return bool(fields) and fields >= public_members(cls) - RESULT_METHODS

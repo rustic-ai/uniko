@@ -150,6 +150,7 @@ fn _uniko(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<goals::PyGoals>()?;
     m.add_class::<ingest::PyIngestSource>()?;
     m.add_class::<scope::PyScope>()?;
+    m.add_class::<scope::PyViewer>()?;
     m.add_class::<logic::PyAssumeBuilder>()?;
 
     // Output value types.
