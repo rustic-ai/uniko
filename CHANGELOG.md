@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **Python results that were tuples or counts are now classes.**
+  `Session.commit_unit` returns a `UnitResult` (`turns`, `was_replay`)
+  instead of a `(results, was_replay)` tuple, and `Session.summarize`
+  returns a `SummarizeReport` (`summary`, `finalize`, `finalize_error`)
+  instead of a `(summary, finalize_error)` tuple. `ObserveResult.attachments`
+  is a list of `IngestOutcome`, one per attachment, replacing
+  `attachment_count`; use `len(result.attachments)`.
+- **`uniko.TimeoutError` is now `uniko.UnikoTimeoutError`,** so that
+  `from uniko import *` no longer shadows the built-in `TimeoutError`. The
+  old name still resolves, with a `DeprecationWarning`, until the next minor
+  release.
+- **`Uniko.config()` returns the whole configuration,** nested as the engine
+  holds it, instead of five flat keys: `embedding_model_id` is now
+  `config()["embedding"]["model_id"]`. `UnikoConfigModel` follows suit and
+  rejects unknown keys.
+- **The `retry_max_attempts`, `retry_initial_delay_ms` and
+  `retry_max_delay_ms` fields are gone from `UnikoConfig`.** Nothing ever
+  read them. Configs that still set them load as before from JSON, but the
+  Python `config()` setter rejects them as unknown keys.
+- **Reopening a store with a different embedding model fails** with
+  `UnikoError::Config` (`ConfigError` in Python), where it used to succeed
+  and mix vectors from two models. Each store now records the model id and
+  dimensions it was built with; a store from an earlier release records them
+  on its next open.
+
+### Added
+
+- **Configure an instance from Python** (#45). `UnikoBuilder.config()` takes
+  a dict or a `UnikoConfigModel` with any subset of the fields, nested
+  sections included, and rejects unknown keys with a suggestion for near
+  misses. `UnikoBuilder.embedding()` takes a preset name or a section, and
+  `UnikoBuilder.reranker()` takes a preset name, a section, or `None` for
+  off; both win over `config()` whatever the call order. `Uniko.config()`
+  reads it all back, with `embedding.provider_options` redacted.
+- **Per-call recall overrides** (#45): `Agent::recall_with(query, scope,
+  &RecallOverrides)` in Rust and `Agent.recall_with(query, scope=None, *,
+  limit, token_budget, min_score, reranker, reference_ts)` in Python change
+  those settings for one call.
+- **`Uniko::health()`** (and `Uniko.health()` in Python) reports the
+  streaming pipeline's queue depths, throughput, latency and LLM circuit
+  state, or `None` when streaming is off.
+- **`UnikoBuilder::reranker`** in Rust, beside `embedding`.
+- `IngestOutcome` in Python gains `page_node_ids`, `block_node_ids` and
+  `extraction_error`; `RecallItem` models gain `category`, `source_id` and
+  `revision_id`; the typed wrappers gain `commit_unit`, `retire_source`,
+  `restore_source`, `recall_with` and `health`.
+- `uniko.types` holds `Literal` aliases for the closed sets the API passes as
+  strings (goal and task phases, recall kinds, worker status).
+- CI now builds the Python extension and runs its tests, `mypy.stubtest`
+  against the stub, ruff and ty on every PR. The release workflow installs
+  and imports every wheel, the CUDA and Metal variants included, before it
+  publishes any of them.
+
+### Fixed
+
+- **The streaming pipeline honours `UnikoConfig`.** It was always built from
+  `PipelineConfig::default()`, so `ingest_queue_capacity`,
+  `consolidation_queue_capacity`, `consolidation_threshold`,
+  `consolidation_interval_secs` and the circuit-breaker fields had no effect.
+  `validate()` now also rejects a queue capacity of `0`, which used to panic.
+- **Python `_sync` calls no longer run on the caller's stack.** They ran the
+  engine on the calling thread, so a thread with a small stack could
+  overflow it and abort the process; they now run on the runtime's workers.
+- The Python typed wrappers had drifted from the native module: `summarize`
+  was annotated as returning an `int`, and `commit_unit`, `retire_source` and
+  `restore_source` were missing. A parity test now fails on such drift.
+- `uniko.__all__` no longer lists the private test helpers, and the stub's
+  `__all__` now includes `FinalizeReport` and `CycleStats`.
+- A store whose blob backend or embedding model does not match the config is
+  rejected before the models are prefetched, not after.
+
 ## [0.4.0] - 2026-11-12
 
 ### Breaking

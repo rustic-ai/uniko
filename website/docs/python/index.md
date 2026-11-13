@@ -164,7 +164,7 @@ your skin — the async surface and the synchronous `*_sync` twins are line-for-
 
 Every failure raises a `uniko.UnikoError` (or a subclass), and every instance carries a `.kind`
 string you can branch on. Subclasses cover the cases you'll catch by type — `ConfigError`,
-`LlmError`, `TimeoutError`, `ConflictError` (a transient, retriable SSI abort), and
+`LlmError`, `UnikoTimeoutError`, `ConflictError` (a transient, retriable SSI abort), and
 `UnsupportedError`. Storage-domain failures fold into the base `UnikoError` with distinct kinds
 (`"storage"`, `"search"`, `"schema"`, `"pipeline"`, `"locy"`, `"embedding"`, `"internal"`), so
 branch on `e.kind` for those.

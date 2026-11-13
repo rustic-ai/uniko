@@ -24,6 +24,23 @@ config.validate()?;                              // fail fast on bad combos
     layer a JSON profile on top of the defaults without re-stating every
     knob.
 
+From Python, pass the same fields as a dict to `UnikoBuilder.config()`. Nested
+sections such as `embedding` and `reranker` can be partial too, and an unknown
+key raises `ConfigError` rather than being ignored:
+
+```python
+import uniko
+
+memory = (uniko.Uniko.builder()
+    .config({"recall_limit": 20, "reranker": {"top_n": 60}})
+    .embedding("nomic")
+    .build_sync())
+print(memory.config()["recall_limit"])  # 20
+```
+
+See the [Python API reference](../python/api.md#configuration) for the
+precedence rules.
+
 ---
 
 ## Swappable models
@@ -350,19 +367,17 @@ The default is `HnswSq { m: 16, ef_construction: 100 }` with `Cosine`
 distance. Other variants cover `HnswFlat`, `HnswPq`, `IvfSq`, `IvfPq`,
 and `IvfRq` for different scale / recall / memory trade-offs.
 
-### Pipelines, retries, and circuit breaker
+### Pipelines and circuit breaker
 
 | Field                         | Default  | Meaning |
 |-------------------------------|----------|---------|
 | `ingest_queue_capacity`       | `200`    | Bounded channel capacity for the ingest worker. |
 | `consolidation_queue_capacity`| `32`     | Bounded channel capacity for the consolidation worker. |
-| `retry_max_attempts`          | `3`      | Maximum retry attempts for retryable operations. |
-| `retry_initial_delay_ms`      | `500`    | Initial backoff delay (exponential base). |
-| `retry_max_delay_ms`          | `30000`  | Backoff cap. |
 | `circuit_failure_threshold`   | `5`      | Consecutive failures before the circuit breaker opens. |
 | `circuit_recovery_ms`         | `60000`  | Milliseconds the breaker stays open before probing. |
 
-`validate()` requires `retry_initial_delay_ms <= retry_max_delay_ms`.
+These configure the streaming pipeline (`streaming(true)` on the builder).
+`validate()` rejects a queue capacity of `0`.
 
 ### Blob storage and external files
 
