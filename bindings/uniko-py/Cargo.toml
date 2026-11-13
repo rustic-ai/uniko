@@ -31,4 +31,5 @@ pyo3 = { workspace = true, features = ["abi3-py310"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 tokio = { workspace = true }
 chrono = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }

@@ -11,9 +11,10 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use uniko_api::tools::{
-    AbductionResult, Answer, ArtifactView, AtomicIngestResult, ContextBundle, CycleStats,
-    DeletionReport, FinalizeReport, GoalContext, GoalPhase, GoalView, IngestOutcome, MessageView,
-    ObserveResult, RecallItem, RecallKind, RecallSource, TaskPhase, TaskView,
+    AbductionResult, Answer, ArtifactView, AtomicIngestResult, CircuitState, ContextBundle,
+    CycleStats, DeletionReport, FinalizeReport, GoalContext, GoalPhase, GoalView, IngestOutcome,
+    MessageView, ObserveResult, PipelineHealth, RecallItem, RecallKind, RecallSource,
+    SummarizeReport, TaskPhase, TaskView, UnitResult, WorkerHealth, WorkerStatus,
 };
 
 use crate::convert::{json_to_py, utc_datetime_to_py};
@@ -316,9 +317,8 @@ impl PyAnswer {
 
 /// What [`Session::observe`](uniko_api::tools::Session) ingested.
 ///
-/// Flattens the inner `AtomicIngestResult` (message + extraction node ids) and
-/// reports the attachment count. The full per-attachment `IngestOutcome`
-/// surface arrives in a later phase.
+/// Flattens the inner `AtomicIngestResult` (message + extraction node ids)
+/// and carries one `IngestOutcome` per attachment.
 #[pyclass(name = "ObserveResult", module = "uniko", frozen)]
 pub struct PyObserveResult {
     /// Node id of the ingested message.
@@ -342,9 +342,10 @@ pub struct PyObserveResult {
     /// Node ids of each observation extracted from the message.
     #[pyo3(get)]
     extracted_observations: Vec<i64>,
-    /// Number of attachments ingested alongside the message.
+    /// What each attachment ingested alongside the message produced, in
+    /// the order they were attached.
     #[pyo3(get)]
-    attachment_count: usize,
+    attachments: Vec<Py<PyIngestOutcome>>,
 }
 
 impl PyObserveResult {
@@ -355,6 +356,11 @@ impl PyObserveResult {
             Some((nid, name)) => (Some(*nid), Some(name.clone())),
             None => (None, None),
         };
+        let attachments = result
+            .attachments
+            .iter()
+            .map(|a| PyIngestOutcome::from_rust(py, a))
+            .collect::<PyResult<Vec<_>>>()?;
         Py::new(
             py,
             Self {
@@ -365,7 +371,7 @@ impl PyObserveResult {
                 sender_id,
                 extracted_entities: m.extracted_entities.clone(),
                 extracted_observations: m.extracted_observations.clone(),
-                attachment_count: result.attachments.len(),
+                attachments,
             },
         )
     }
@@ -380,7 +386,7 @@ impl PyObserveResult {
             self.chunk_node_ids.len(),
             self.extracted_entities.len(),
             self.extracted_observations.len(),
-            self.attachment_count
+            self.attachments.len()
         )
     }
 }
@@ -842,6 +848,15 @@ pub struct PyIngestOutcome {
     /// Whether PDF extraction failed (artifact still persisted), PDFs only.
     #[pyo3(get)]
     extraction_failed: Option<bool>,
+    /// Why PDF extraction failed, when it did; `None` otherwise.
+    #[pyo3(get)]
+    extraction_error: Option<String>,
+    /// Node ids of the PDF's pages, in page order. Empty for non-PDFs.
+    #[pyo3(get)]
+    page_node_ids: Vec<i64>,
+    /// Node ids of the PDF's layout blocks. Empty for non-PDFs.
+    #[pyo3(get)]
+    block_node_ids: Vec<i64>,
 }
 
 impl PyIngestOutcome {
@@ -856,6 +871,9 @@ impl PyIngestOutcome {
                 was_deduplicated: a.was_deduplicated,
                 page_count: None,
                 extraction_failed: None,
+                extraction_error: None,
+                page_node_ids: Vec::new(),
+                block_node_ids: Vec::new(),
             },
             IngestOutcome::Pdf(p) => Self {
                 kind: "pdf".to_string(),
@@ -865,6 +883,9 @@ impl PyIngestOutcome {
                 was_deduplicated: p.was_deduplicated,
                 page_count: Some(p.page_count),
                 extraction_failed: Some(p.extraction_failure.is_some()),
+                extraction_error: p.extraction_failure.as_ref().map(ToString::to_string),
+                page_node_ids: p.page_node_ids.clone(),
+                block_node_ids: p.block_node_ids.clone(),
             },
         };
         Py::new(py, wrapper)
@@ -925,6 +946,226 @@ impl PyAbductionResult {
     }
 }
 
+/// What `Session.commit_unit()` committed: one `ObserveResult` per turn.
+#[pyclass(name = "UnitResult", module = "uniko", frozen)]
+pub struct PyUnitResult {
+    /// One result per turn, in the unit's order.
+    #[pyo3(get)]
+    turns: Vec<Py<PyObserveResult>>,
+    /// Whether the unit had already been committed, so this call wrote
+    /// nothing and returned the earlier ids.
+    #[pyo3(get)]
+    was_replay: bool,
+}
+
+impl PyUnitResult {
+    /// Build the Python wrapper from a Rust [`UnitResult`].
+    pub fn from_rust(py: Python<'_>, result: &UnitResult) -> PyResult<Py<Self>> {
+        let turns = result
+            .turns
+            .iter()
+            .map(|t| PyObserveResult::from_rust(py, t))
+            .collect::<PyResult<Vec<_>>>()?;
+        Py::new(
+            py,
+            Self {
+                turns,
+                was_replay: result.was_replay,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyUnitResult {
+    /// Node ids of every turn's message, in order.
+    fn message_node_ids(&self, py: Python<'_>) -> Vec<i64> {
+        self.turns
+            .iter()
+            .map(|t| t.bind(py).get().message_node_id)
+            .collect()
+    }
+
+    fn __len__(&self) -> usize {
+        self.turns.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "UnitResult(turns={}, was_replay={})",
+            self.turns.len(),
+            self.was_replay
+        )
+    }
+}
+
+/// What `Session.summarize()` produced.
+#[pyclass(name = "SummarizeReport", module = "uniko", frozen)]
+pub struct PySummarizeReport {
+    /// Node id of the new summary, or `None` when there was nothing new to
+    /// summarize.
+    #[pyo3(get)]
+    summary: Option<i64>,
+    /// What finalizing the session built first, when that succeeded.
+    #[pyo3(get)]
+    finalize: Option<Py<PyFinalizeReport>>,
+    /// Why finalizing failed, when it did. The summary is still attempted.
+    #[pyo3(get)]
+    finalize_error: Option<String>,
+}
+
+impl PySummarizeReport {
+    /// Build the Python wrapper from a Rust [`SummarizeReport`].
+    pub fn from_rust(py: Python<'_>, report: &SummarizeReport) -> PyResult<Py<Self>> {
+        let finalize = report
+            .finalize
+            .as_ref()
+            .map(|f| PyFinalizeReport::from_rust(py, f))
+            .transpose()?;
+        Py::new(
+            py,
+            Self {
+                summary: report.summary,
+                finalize,
+                finalize_error: report.finalize_error.clone(),
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PySummarizeReport {
+    fn __repr__(&self) -> String {
+        format!(
+            "SummarizeReport(summary={}, finalized={}, finalize_error={})",
+            self.summary
+                .map_or_else(|| "None".to_string(), |id| id.to_string()),
+            if self.finalize.is_some() {
+                "True"
+            } else {
+                "False"
+            },
+            self.finalize_error
+                .as_deref()
+                .map_or_else(|| "None".to_string(), |e| format!("{e:?}"))
+        )
+    }
+}
+
+fn worker_status_str(status: WorkerStatus) -> &'static str {
+    match status {
+        WorkerStatus::Healthy => "healthy",
+        WorkerStatus::Degraded => "degraded",
+        WorkerStatus::Backpressured => "backpressured",
+        WorkerStatus::Stalled => "stalled",
+    }
+}
+
+fn circuit_state_str(state: CircuitState) -> &'static str {
+    match state {
+        CircuitState::Closed => "closed",
+        CircuitState::Open => "open",
+        CircuitState::HalfOpen => "half_open",
+    }
+}
+
+/// One streaming-pipeline worker's health.
+#[pyclass(name = "WorkerHealth", module = "uniko", frozen)]
+pub struct PyWorkerHealth {
+    /// `"healthy"`, `"degraded"` (LLM circuit open), `"backpressured"`
+    /// (queue over 80% full) or `"stalled"` (pending work, nothing
+    /// processed for five minutes).
+    #[pyo3(get)]
+    status: &'static str,
+    /// Items waiting in the queue.
+    #[pyo3(get)]
+    queue_depth: usize,
+    /// The queue's capacity.
+    #[pyo3(get)]
+    queue_capacity: usize,
+    /// Items processed successfully since start.
+    #[pyo3(get)]
+    items_processed: u64,
+    /// Items that failed since start.
+    #[pyo3(get)]
+    items_failed: u64,
+    /// Moving-average latency per item, in milliseconds.
+    #[pyo3(get)]
+    avg_latency_ms: f64,
+}
+
+impl PyWorkerHealth {
+    fn from_rust(py: Python<'_>, health: &WorkerHealth) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                status: worker_status_str(health.status),
+                queue_depth: health.queue_depth,
+                queue_capacity: health.queue_capacity,
+                items_processed: health.items_processed,
+                items_failed: health.items_failed,
+                avg_latency_ms: health.avg_latency_ms,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyWorkerHealth {
+    fn __repr__(&self) -> String {
+        format!(
+            "WorkerHealth(status='{}', queue={}/{}, processed={}, failed={})",
+            self.status,
+            self.queue_depth,
+            self.queue_capacity,
+            self.items_processed,
+            self.items_failed
+        )
+    }
+}
+
+/// A health snapshot of the streaming pipeline, from `Uniko.health()`.
+#[pyclass(name = "PipelineHealth", module = "uniko", frozen)]
+pub struct PyPipelineHealth {
+    /// The ingest worker.
+    #[pyo3(get)]
+    ingest: Py<PyWorkerHealth>,
+    /// The consolidation worker.
+    #[pyo3(get)]
+    consolidation: Py<PyWorkerHealth>,
+    /// The LLM circuit breaker: `"closed"`, `"open"` or `"half_open"`.
+    #[pyo3(get)]
+    llm_circuit: &'static str,
+    /// Seconds since the pipeline started.
+    #[pyo3(get)]
+    uptime_secs: u64,
+}
+
+impl PyPipelineHealth {
+    /// Build the Python wrapper from a Rust [`PipelineHealth`].
+    pub fn from_rust(py: Python<'_>, health: &PipelineHealth) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                ingest: PyWorkerHealth::from_rust(py, &health.ingest)?,
+                consolidation: PyWorkerHealth::from_rust(py, &health.consolidation)?,
+                llm_circuit: circuit_state_str(health.llm_circuit),
+                uptime_secs: health.uptime_secs,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyPipelineHealth {
+    fn __repr__(&self) -> String {
+        format!(
+            "PipelineHealth(llm_circuit='{}', uptime_secs={})",
+            self.llm_circuit, self.uptime_secs
+        )
+    }
+}
+
 /// Register the output pyclasses on the module.
 ///
 /// # Errors
@@ -946,5 +1187,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGoalContext>()?;
     m.add_class::<PyIngestOutcome>()?;
     m.add_class::<PyAbductionResult>()?;
+    m.add_class::<PyUnitResult>()?;
+    m.add_class::<PySummarizeReport>()?;
+    m.add_class::<PyWorkerHealth>()?;
+    m.add_class::<PyPipelineHealth>()?;
     Ok(())
 }

@@ -3,10 +3,12 @@
 
 //! The [`PyScope`] per-call recall scope: dimensional hard-filters.
 //!
-//! Passed to `Agent.recall_in` / `query_in` / `answer_in` to narrow a single
-//! call by session / participant / time. Visibility scoping (`as_viewer`)
-//! needs an async `Viewer` resolution against the store and is deferred; the
-//! instance-level `scope_to_agent` covers the common visibility case.
+//! Passed to `Agent.recall_in` / `recall_with` / `query_in` / `answer_in` to
+//! narrow a single call by session / participant / time.
+//!
+//! `as_viewer` is not bound yet: the engine never writes `private:` /
+//! `team:` / `org:` visibility or team and org membership, so a viewer
+//! scope would filter nothing. It lands together with those writes.
 
 use pyo3::prelude::*;
 use uniko_api::tools::Scope;

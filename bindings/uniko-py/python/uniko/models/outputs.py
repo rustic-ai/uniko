@@ -23,6 +23,16 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..types import (
+    CircuitState,
+    GoalPhase,
+    IngestKind,
+    RecallKind,
+    RecallSourceKind,
+    TaskPhase,
+    WorkerStatus,
+)
+
 # Frozen + from_attributes on every output model. Frozen because these are
 # read-only snapshots; mutating them would not write back to the graph.
 _OUT = ConfigDict(from_attributes=True, frozen=True)
@@ -33,7 +43,7 @@ class RecallSource(BaseModel):
 
     model_config = _OUT
 
-    kind: str
+    kind: RecallSourceKind
     message_id: Optional[str] = None
     artifact_id: Optional[str] = None
     chunk_id: Optional[str] = None
@@ -49,10 +59,13 @@ class RecallItem(BaseModel):
     model_config = _OUT
 
     node_id: int
-    kind: str
+    kind: RecallKind
     score: float
     content: str
     sources: list[RecallSource] = Field(default_factory=list)
+    category: Optional[str] = None
+    source_id: Optional[str] = None
+    revision_id: Optional[str] = None
 
     @classmethod
     def from_native(cls, native: Any) -> "RecallItem":
@@ -123,7 +136,7 @@ class ObserveResult(BaseModel):
     # (node_id, entity_name) pairs.
     extracted_entities: list[tuple[int, str]] = Field(default_factory=list)
     extracted_observations: list[int] = Field(default_factory=list)
-    attachment_count: int
+    attachments: list["IngestOutcome"] = Field(default_factory=list)
 
     @classmethod
     def from_native(cls, native: Any) -> "ObserveResult":
@@ -222,7 +235,7 @@ class GoalView(BaseModel):
     title: str
     description: Optional[str] = None
     status: str
-    phase: str
+    phase: GoalPhase
     created_at: Optional[datetime.datetime] = None
     deadline: Optional[datetime.datetime] = None
     completed_at: Optional[datetime.datetime] = None
@@ -242,7 +255,7 @@ class TaskView(BaseModel):
     title: str
     description: Optional[str] = None
     status: str
-    phase: str
+    phase: TaskPhase
     priority: Optional[float] = None
     goal_id: Optional[str] = None
     created_at: Optional[datetime.datetime] = None
@@ -275,16 +288,87 @@ class IngestOutcome(BaseModel):
 
     model_config = _OUT
 
-    kind: str
+    kind: IngestKind
     artifact_id: str
     artifact_node_id: int
     chunk_node_ids: list[int] = Field(default_factory=list)
     was_deduplicated: bool
     page_count: Optional[int] = None
     extraction_failed: Optional[bool] = None
+    extraction_error: Optional[str] = None
+    page_node_ids: list[int] = Field(default_factory=list)
+    block_node_ids: list[int] = Field(default_factory=list)
 
     @classmethod
     def from_native(cls, native: Any) -> "IngestOutcome":
+        return cls.model_validate(native)
+
+
+ObserveResult.model_rebuild()
+
+
+class UnitResult(BaseModel):
+    """What ``Session.commit_unit()`` committed (native ``UnitResult``)."""
+
+    model_config = _OUT
+
+    turns: list[ObserveResult] = Field(default_factory=list)
+    was_replay: bool
+
+    @classmethod
+    def from_native(cls, native: Any) -> "UnitResult":
+        return cls.model_validate(native)
+
+    def message_node_ids(self) -> list[int]:
+        return [t.message_node_id for t in self.turns]
+
+    def __len__(self) -> int:
+        return len(self.turns)
+
+
+class SummarizeReport(BaseModel):
+    """What ``Session.summarize()`` produced (native ``SummarizeReport``)."""
+
+    model_config = _OUT
+
+    summary: Optional[int] = None
+    finalize: Optional[FinalizeReport] = None
+    finalize_error: Optional[str] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "SummarizeReport":
+        return cls.model_validate(native)
+
+
+class WorkerHealth(BaseModel):
+    """One streaming-pipeline worker's health (native ``WorkerHealth``)."""
+
+    model_config = _OUT
+
+    status: WorkerStatus
+    queue_depth: int
+    queue_capacity: int
+    items_processed: int
+    items_failed: int
+    avg_latency_ms: float
+
+    @classmethod
+    def from_native(cls, native: Any) -> "WorkerHealth":
+        return cls.model_validate(native)
+
+
+class PipelineHealth(BaseModel):
+    """A streaming-pipeline health snapshot (native ``PipelineHealth``)."""
+
+    model_config = _OUT
+
+    ingest: WorkerHealth
+    consolidation: WorkerHealth
+    llm_circuit: CircuitState
+    uptime_secs: int
+
+    @classmethod
+    def from_native(cls, native: Any) -> "PipelineHealth":
         return cls.model_validate(native)
 
 
@@ -329,6 +413,12 @@ __all__ = [
     "Answer",
     "ObserveResult",
     "DeletionReport",
+    "FinalizeReport",
+    "CycleStats",
+    "UnitResult",
+    "SummarizeReport",
+    "WorkerHealth",
+    "PipelineHealth",
     "MessageView",
     "ArtifactView",
     "GoalView",

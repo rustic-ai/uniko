@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use uniko_api::tools::{Agent, NodeId};
+use uniko_api::tools::{Agent, NodeId, RecallOverrides, Scope};
 
 use crate::convert::{self, params_to_rust};
 use crate::data::PyData;
@@ -90,6 +90,42 @@ impl PyAgent {
         let scope = scope.snapshot();
         bridge!(py, agent = self.inner.clone(), {
             let bundle = agent.recall_in(&query, scope).await.map_err(to_pyerr)?;
+            Python::attach(|py| PyContextBundle::from_rust(py, &bundle))
+        })
+    }
+
+    /// Recall with per-call overrides of the instance's recall settings.
+    ///
+    /// `scope` defaults to an empty `Scope`. Each keyword left as `None`
+    /// keeps the configured value. `reranker=True` needs a reranker enabled
+    /// at build time; a `limit` above the reranker's `top_n` raises
+    /// `ConfigError` while it is on.
+    #[pyo3(signature = (query, scope=None, *, limit=None, token_budget=None, min_score=None, reranker=None, reference_ts=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn recall_with<'py>(
+        &self,
+        py: Python<'py>,
+        query: String,
+        scope: Option<&PyScope>,
+        limit: Option<usize>,
+        token_budget: Option<usize>,
+        min_score: Option<f64>,
+        reranker: Option<bool>,
+        reference_ts: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (scope, overrides) = recall_with_args(
+            scope,
+            limit,
+            token_budget,
+            min_score,
+            reranker,
+            reference_ts,
+        )?;
+        bridge!(py, agent = self.inner.clone(), {
+            let bundle = agent
+                .recall_with(&query, scope, &overrides)
+                .await
+                .map_err(to_pyerr)?;
             Python::attach(|py| PyContextBundle::from_rust(py, &bundle))
         })
     }
@@ -275,6 +311,37 @@ impl PyAgent {
         let scope = scope.snapshot();
         bridge_sync!(py, agent = self.inner.clone(), {
             let bundle = agent.recall_in(&query, scope).await.map_err(to_pyerr)?;
+            Python::attach(|py| PyContextBundle::from_rust(py, &bundle))
+        })
+    }
+
+    /// Blocking variant of [`recall_with`](Self::recall_with).
+    #[pyo3(signature = (query, scope=None, *, limit=None, token_budget=None, min_score=None, reranker=None, reference_ts=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn recall_with_sync(
+        &self,
+        py: Python<'_>,
+        query: String,
+        scope: Option<&PyScope>,
+        limit: Option<usize>,
+        token_budget: Option<usize>,
+        min_score: Option<f64>,
+        reranker: Option<bool>,
+        reference_ts: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyContextBundle>> {
+        let (scope, overrides) = recall_with_args(
+            scope,
+            limit,
+            token_budget,
+            min_score,
+            reranker,
+            reference_ts,
+        )?;
+        bridge_sync!(py, agent = self.inner.clone(), {
+            let bundle = agent
+                .recall_with(&query, scope, &overrides)
+                .await
+                .map_err(to_pyerr)?;
             Python::attach(|py| PyContextBundle::from_rust(py, &bundle))
         })
     }
@@ -479,4 +546,23 @@ impl PyAgent {
     fn __repr__(&self) -> String {
         format!("Agent(agent_id='{}')", self.inner.agent_id())
     }
+}
+
+/// The `Scope` and `RecallOverrides` for `recall_with` / `recall_with_sync`.
+fn recall_with_args(
+    scope: Option<&PyScope>,
+    limit: Option<usize>,
+    token_budget: Option<usize>,
+    min_score: Option<f64>,
+    reranker: Option<bool>,
+    reference_ts: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(Scope, RecallOverrides)> {
+    let scope = scope.map(PyScope::snapshot).unwrap_or_default();
+    let mut overrides = RecallOverrides::default();
+    overrides.limit = limit;
+    overrides.token_budget = token_budget;
+    overrides.min_score = min_score;
+    overrides.reranker = reranker;
+    overrides.reference_ts = reference_ts.map(convert::py_to_datetime).transpose()?;
+    Ok((scope, overrides))
 }

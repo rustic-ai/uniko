@@ -14,13 +14,16 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use tokio::sync::Mutex;
-use uniko_api::tools::{NodeId, Session, Turn};
+use uniko_api::tools::{Session, Turn};
 
 use crate::convert;
 use crate::errors::to_pyerr;
 use crate::ingest::PyIngestSource;
 use crate::macros::{bridge, bridge_sync};
-use crate::outputs::{PyDeletionReport, PyFinalizeReport, PyIngestOutcome, PyObserveResult};
+use crate::outputs::{
+    PyDeletionReport, PyFinalizeReport, PyIngestOutcome, PyObserveResult, PySummarizeReport,
+    PyUnitResult,
+};
 
 /// One conversation turn to feed into a [`PySession`].
 ///
@@ -197,9 +200,9 @@ impl PySession {
     /// of it is. Two separate `observe` calls cannot give that — an
     /// interruption between them leaves a question with no answer.
     ///
-    /// Resolves to `(observe_results, was_replay)`. `was_replay` is true when
-    /// every id was already present with identical content, so nothing was
-    /// written.
+    /// Resolves to a `UnitResult`: one `ObserveResult` per turn, and
+    /// `was_replay`, true when every id was already present with identical
+    /// content, so nothing was written.
     ///
     /// Reusing an id with different content, repeating an id inside one unit,
     /// or submitting a unit that is only partly recorded raises
@@ -217,14 +220,7 @@ impl PySession {
         bridge!(py, session = self.inner.clone(), {
             let mut guard = session.lock().await;
             let result = guard.commit_unit(turns).await.map_err(to_pyerr)?;
-            Python::attach(|py| {
-                let turns: Vec<_> = result
-                    .turns
-                    .iter()
-                    .map(|r| PyObserveResult::from_rust(py, r))
-                    .collect::<PyResult<_>>()?;
-                Ok((turns, result.was_replay))
-            })
+            Python::attach(|py| PyUnitResult::from_rust(py, &result))
         })
     }
 
@@ -290,9 +286,9 @@ impl PySession {
 
     /// Generate and persist a summary of the session so far.
     ///
-    /// Resolves to `(summary_node_id, finalize_error)`: the new summary node
-    /// id or `None` when there was nothing new to summarize, paired with the
-    /// chunk-refresh failure message or `None` when it succeeded.
+    /// Resolves to a `SummarizeReport`: the new summary node id or `None`
+    /// when there was nothing new to summarize, what finalizing built, and
+    /// the chunk-refresh failure message or `None` when it succeeded.
     ///
     /// The refresh is best-effort and never fails the call, but its outcome
     /// is reported rather than only logged, so a caller can tell that the
@@ -301,7 +297,7 @@ impl PySession {
         bridge!(py, session = self.inner.clone(), {
             let guard = session.lock().await;
             let report = guard.summarize().await.map_err(to_pyerr)?;
-            Ok((report.summary, report.finalize_error))
+            Python::attach(|py| PySummarizeReport::from_rust(py, &report))
         })
     }
 
@@ -356,7 +352,7 @@ impl PySession {
         &self,
         py: Python<'_>,
         turns: Vec<PyRef<'_, PyTurn>>,
-    ) -> PyResult<(Vec<Py<PyObserveResult>>, bool)> {
+    ) -> PyResult<Py<PyUnitResult>> {
         let turns: Vec<_> = turns
             .iter()
             .map(|t| t.snapshot())
@@ -364,14 +360,7 @@ impl PySession {
         bridge_sync!(py, session = self.inner.clone(), {
             let mut guard = session.lock().await;
             let result = guard.commit_unit(turns).await.map_err(to_pyerr)?;
-            Python::attach(|py| {
-                let turns: Vec<_> = result
-                    .turns
-                    .iter()
-                    .map(|r| PyObserveResult::from_rust(py, r))
-                    .collect::<PyResult<_>>()?;
-                Ok((turns, result.was_replay))
-            })
+            Python::attach(|py| PyUnitResult::from_rust(py, &result))
         })
     }
 
@@ -480,11 +469,11 @@ impl PySession {
     }
 
     /// Blocking variant of [`summarize`](Self::summarize).
-    fn summarize_sync(&self, py: Python<'_>) -> PyResult<(Option<NodeId>, Option<String>)> {
+    fn summarize_sync(&self, py: Python<'_>) -> PyResult<Py<PySummarizeReport>> {
         bridge_sync!(py, session = self.inner.clone(), {
             let guard = session.lock().await;
             let report = guard.summarize().await.map_err(to_pyerr)?;
-            Ok((report.summary, report.finalize_error))
+            Python::attach(|py| PySummarizeReport::from_rust(py, &report))
         })
     }
 

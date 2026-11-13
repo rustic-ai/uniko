@@ -13,13 +13,13 @@
 use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use uniko_api::tools::{LlmSpec, Uniko, UnikoBuilder, UnikoError};
 
 use crate::agent::PyAgent;
+use crate::config::{config_from_py, config_to_py, embedding_from_py, reranker_from_py};
 use crate::errors::to_pyerr;
 use crate::macros::{bridge, bridge_sync};
-use crate::outputs::PyDeletionReport;
+use crate::outputs::{PyDeletionReport, PyPipelineHealth};
 
 /// The `PyErr` raised when a handle is used after `shutdown`.
 fn closed() -> PyErr {
@@ -104,18 +104,26 @@ impl PyUniko {
         Ok(PyAgent::wrap(uniko.agent(agent_id)))
     }
 
-    /// A snapshot of the most relevant configuration values, as a dict.
-    fn config<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    /// The full configuration this instance runs with, as nested dicts.
+    ///
+    /// The shape matches what `UnikoBuilder.config()` accepts, so the result
+    /// can be edited and passed back. `embedding.provider_options` is shown
+    /// as `"<redacted>"` when set, since it can hold API keys.
+    fn config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let guard = self.inner.lock().expect("Uniko mutex poisoned");
         let uniko = guard.as_ref().ok_or_else(closed)?;
-        let config = uniko.config();
-        let dict = PyDict::new(py);
-        dict.set_item("embedding_model_id", config.embedding.model_id.clone())?;
-        dict.set_item("embedding_dimensions", config.embedding.dimensions)?;
-        dict.set_item("recall_limit", config.recall_limit)?;
-        dict.set_item("recall_token_budget", config.recall_token_budget)?;
-        dict.set_item("recall_min_score", config.recall_min_score)?;
-        Ok(dict)
+        config_to_py(py, uniko.config())
+    }
+
+    /// A health snapshot of the streaming pipeline, or `None` when the
+    /// instance was built without `streaming(True)`.
+    fn health(&self, py: Python<'_>) -> PyResult<Option<Py<PyPipelineHealth>>> {
+        let guard = self.inner.lock().expect("Uniko mutex poisoned");
+        let uniko = guard.as_ref().ok_or_else(closed)?;
+        uniko
+            .health()
+            .map(|h| PyPipelineHealth::from_rust(py, &h))
+            .transpose()
     }
 
     /// Erase the entire graph. Intended for dev/test reset.
@@ -173,8 +181,7 @@ impl PyUniko {
 /// Builder for a non-default [`PyUniko`] instance.
 ///
 /// Obtain one with `Uniko.builder()`. Setters are chainable; `build()` is the
-/// async terminal. Embedding/config/scope/extractor setters arrive in later
-/// phases alongside their own wrapper types.
+/// async terminal. The configuration is validated once, at `build()`.
 #[pyclass(name = "UnikoBuilder", module = "uniko")]
 pub struct PyUnikoBuilder {
     // `Option` supports the take-apply-replace pattern over the consuming
@@ -212,6 +219,40 @@ impl PyUnikoBuilder {
     /// Use an ephemeral in-memory store (the default).
     fn in_memory<'py>(slf: PyRef<'py, Self>) -> PyResult<PyRef<'py, Self>> {
         slf.map(UnikoBuilder::in_memory)?;
+        Ok(slf)
+    }
+
+    /// Set the base configuration from a dict or a `UnikoConfigModel`.
+    ///
+    /// Partial input is merged onto the defaults, nested sections included.
+    /// An unknown key raises `ConfigError` naming it. `embedding()` and
+    /// `reranker()` override the matching sections whatever the call order.
+    fn config<'py>(slf: PyRef<'py, Self>, config: &Bound<'_, PyAny>) -> PyResult<PyRef<'py, Self>> {
+        let config = config_from_py(config)?;
+        slf.map(|b| b.raw_config(config))?;
+        Ok(slf)
+    }
+
+    /// Choose the embedding model: a preset name (`"nomic"`, `"minilm"`,
+    /// `"bge-small"`, `"bge-large"`, `"bge-m3"`, `"gemma"`, ...) or a dict
+    /// merged onto the default embedding section.
+    fn embedding<'py>(
+        slf: PyRef<'py, Self>,
+        embedding: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRef<'py, Self>> {
+        let embedding = embedding_from_py(embedding)?;
+        slf.map(|b| b.embedding(embedding))?;
+        Ok(slf)
+    }
+
+    /// Choose the reranker: `"bge-base"`, `"minilm"`, a dict merged onto the
+    /// default reranker section, or `None` to turn reranking off.
+    fn reranker<'py>(
+        slf: PyRef<'py, Self>,
+        reranker: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRef<'py, Self>> {
+        let reranker = reranker_from_py(reranker)?;
+        slf.map(|b| b.reranker(reranker))?;
         Ok(slf)
     }
 

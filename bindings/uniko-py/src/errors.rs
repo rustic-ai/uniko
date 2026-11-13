@@ -36,9 +36,10 @@ create_exception!(
 create_exception!(_uniko, LlmError, UnikoError, "An LLM provider call failed.");
 create_exception!(
     _uniko,
-    TimeoutError,
+    UnikoTimeoutError,
     UnikoError,
-    "An operation exceeded its configured timeout."
+    "An operation exceeded its configured timeout. (Named so that `from uniko import *` \
+     does not shadow the builtin `TimeoutError`.)"
 );
 create_exception!(
     _uniko,
@@ -74,7 +75,7 @@ pub fn to_pyerr(err: CoreError) -> PyErr {
     let (pyerr, kind) = match err {
         CoreError::Config(_) => (ConfigError::new_err(msg), "config"),
         CoreError::Llm(_) => (LlmError::new_err(msg), "llm"),
-        CoreError::Timeout(_) => (TimeoutError::new_err(msg), "timeout"),
+        CoreError::Timeout(_) => (UnikoTimeoutError::new_err(msg), "timeout"),
         CoreError::Conflict(_) => (ConflictError::new_err(msg), "conflict"),
         CoreError::IdConflict(_) => (IdConflictError::new_err(msg), "id_conflict"),
         CoreError::Unsupported(_) => (UnsupportedError::new_err(msg), "unsupported"),
@@ -112,7 +113,7 @@ pub fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add("UnikoError", py.get_type::<UnikoError>())?;
     m.add("ConfigError", py.get_type::<ConfigError>())?;
     m.add("LlmError", py.get_type::<LlmError>())?;
-    m.add("TimeoutError", py.get_type::<TimeoutError>())?;
+    m.add("UnikoTimeoutError", py.get_type::<UnikoTimeoutError>())?;
     m.add("ConflictError", py.get_type::<ConflictError>())?;
     m.add("IdConflictError", py.get_type::<IdConflictError>())?;
     m.add("UnsupportedError", py.get_type::<UnsupportedError>())?;

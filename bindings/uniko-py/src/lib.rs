@@ -19,6 +19,7 @@
 #![recursion_limit = "512"]
 
 mod agent;
+mod config;
 mod convert;
 mod data;
 mod errors;
@@ -155,6 +156,19 @@ fn _uniko(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     outputs::register(m)?;
 
     errors::register_exceptions(py, m)?;
+
+    // `PyModule::add` appends every name to `__all__`, including the
+    // underscore test helpers and `__version__`; keep `from uniko import *`
+    // to the public API.
+    let public: Vec<String> = m
+        .index()?
+        .iter()
+        .map(|name| name.extract::<String>())
+        .collect::<PyResult<Vec<_>>>()?
+        .into_iter()
+        .filter(|name| !name.starts_with('_'))
+        .collect();
+    m.setattr("__all__", public)?;
 
     Ok(())
 }

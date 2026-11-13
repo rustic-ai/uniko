@@ -36,7 +36,9 @@ async def test_goals_lifecycle() -> None:
     assert started.phase == "active"
     assert any(g.goal_id == "g1" for g in await goals.active())
 
-    tid = await goals.create_task("write tests", goal_id="g1", task_id="t1", priority=0.8)
+    tid = await goals.create_task(
+        "write tests", goal_id="g1", task_id="t1", priority=0.8
+    )
     assert isinstance(tid, int)
     tasks = await goals.tasks_of("g1")
     assert any(t.task_id == "t1" and t.priority == 0.8 for t in tasks)
@@ -88,7 +90,12 @@ async def test_turn_attachment_ingested() -> None:
         uniko.IngestSource.from_text("attached document body")
     )
     result = await session.observe(turn)
-    assert result.attachment_count == 1
+    assert len(result.attachments) == 1
+    outcome = result.attachments[0]
+    assert isinstance(outcome, uniko.IngestOutcome)
+    assert outcome.kind == "artifact"
+    assert outcome.chunk_node_ids, "the attachment was chunked"
+    assert outcome.page_node_ids == [] and outcome.extraction_error is None
 
 
 async def test_delete_session_cascade() -> None:

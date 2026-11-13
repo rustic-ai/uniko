@@ -16,11 +16,14 @@ Start typed from the top::
     await agent.session("s1").observe(TurnSpec(sender_id="a", content="hi"))
 
 Maintenance note: this layer mirrors an evolving native surface — it must track
-changes to ``python/uniko/_uniko.pyi``.
+changes to ``python/uniko/_uniko.pyi``. ``tests/test_parity.py`` fails when a
+native method has no counterpart here.
 """
 
 from __future__ import annotations
 
+import datetime
+from collections.abc import Sequence
 from typing import Any, Optional
 
 from .config import UnikoConfigModel
@@ -37,7 +40,10 @@ from .outputs import (
     IngestOutcome,
     MessageView,
     ObserveResult,
+    PipelineHealth,
+    SummarizeReport,
     TaskView,
+    UnitResult,
 )
 
 
@@ -279,11 +285,19 @@ class TypedSession:
     def finalize_sync(self) -> FinalizeReport:
         return FinalizeReport.from_native(self._inner.finalize_sync())
 
-    async def summarize(self) -> Optional[int]:
-        return await self._inner.summarize()
+    async def commit_unit(self, turns: Sequence[Any]) -> UnitResult:
+        native = [_native_arg(t) for t in turns]
+        return UnitResult.from_native(await self._inner.commit_unit(native))
 
-    def summarize_sync(self) -> Optional[int]:
-        return self._inner.summarize_sync()
+    def commit_unit_sync(self, turns: Sequence[Any]) -> UnitResult:
+        native = [_native_arg(t) for t in turns]
+        return UnitResult.from_native(self._inner.commit_unit_sync(native))
+
+    async def summarize(self) -> SummarizeReport:
+        return SummarizeReport.from_native(await self._inner.summarize())
+
+    def summarize_sync(self) -> SummarizeReport:
+        return SummarizeReport.from_native(self._inner.summarize_sync())
 
     async def forget_turn(self, message_id: str) -> DeletionReport:
         return DeletionReport.from_native(await self._inner.forget_turn(message_id))
@@ -352,6 +366,52 @@ class TypedAgent:
             self._inner.recall_in_sync(query, _native_arg(scope))
         )
 
+    async def recall_with(
+        self,
+        query: str,
+        scope: Any = None,
+        *,
+        limit: Optional[int] = None,
+        token_budget: Optional[int] = None,
+        min_score: Optional[float] = None,
+        reranker: Optional[bool] = None,
+        reference_ts: Optional[datetime.datetime] = None,
+    ) -> ContextBundle:
+        return ContextBundle.from_native(
+            await self._inner.recall_with(
+                query,
+                None if scope is None else _native_arg(scope),
+                limit=limit,
+                token_budget=token_budget,
+                min_score=min_score,
+                reranker=reranker,
+                reference_ts=reference_ts,
+            )
+        )
+
+    def recall_with_sync(
+        self,
+        query: str,
+        scope: Any = None,
+        *,
+        limit: Optional[int] = None,
+        token_budget: Optional[int] = None,
+        min_score: Optional[float] = None,
+        reranker: Optional[bool] = None,
+        reference_ts: Optional[datetime.datetime] = None,
+    ) -> ContextBundle:
+        return ContextBundle.from_native(
+            self._inner.recall_with_sync(
+                query,
+                None if scope is None else _native_arg(scope),
+                limit=limit,
+                token_budget=token_budget,
+                min_score=min_score,
+                reranker=reranker,
+                reference_ts=reference_ts,
+            )
+        )
+
     async def answer_in(self, question: str, scope: Any) -> Answer:
         return Answer.from_native(
             await self._inner.answer_in(question, _native_arg(scope))
@@ -387,6 +447,18 @@ class TypedAgent:
 
     def finalize_session_sync(self, session_id: str) -> FinalizeReport:
         return FinalizeReport.from_native(self._inner.finalize_session_sync(session_id))
+
+    async def retire_source(self, source_id: str) -> bool:
+        return await self._inner.retire_source(source_id)
+
+    def retire_source_sync(self, source_id: str) -> bool:
+        return self._inner.retire_source_sync(source_id)
+
+    async def restore_source(self, source_id: str) -> bool:
+        return await self._inner.restore_source(source_id)
+
+    def restore_source_sync(self, source_id: str) -> bool:
+        return self._inner.restore_source_sync(source_id)
 
     async def unfinalized_session_ids(self) -> list[str]:
         return await self._inner.unfinalized_session_ids()
@@ -455,6 +527,25 @@ class TypedUnikoBuilder:
         self._inner = self._inner.in_memory()
         return self
 
+    def config(self, config: Any) -> "TypedUnikoBuilder":
+        """A dict or ``UnikoConfigModel``; only the fields set override defaults."""
+        self._inner = self._inner.config(config)
+        return self
+
+    def embedding(self, embedding: Any) -> "TypedUnikoBuilder":
+        """A preset name, a dict, or an ``EmbeddingConfigModel``."""
+        if hasattr(embedding, "model_dump"):
+            embedding = embedding.model_dump(exclude_unset=True)
+        self._inner = self._inner.embedding(embedding)
+        return self
+
+    def reranker(self, reranker: Any) -> "TypedUnikoBuilder":
+        """A preset name, a dict, a ``RerankerConfigModel``, or ``None`` for off."""
+        if hasattr(reranker, "model_dump"):
+            reranker = reranker.model_dump(exclude_unset=True)
+        self._inner = self._inner.reranker(reranker)
+        return self
+
     def llm(self, spec: Any) -> "TypedUnikoBuilder":
         self._inner = self._inner.llm(_native_arg(spec))
         return self
@@ -516,6 +607,10 @@ class TypedUniko:
 
     def config(self) -> UnikoConfigModel:
         return UnikoConfigModel.model_validate(self._inner.config())
+
+    def health(self) -> Optional[PipelineHealth]:
+        native = self._inner.health()
+        return None if native is None else PipelineHealth.from_native(native)
 
     async def purge(self) -> DeletionReport:
         return DeletionReport.from_native(await self._inner.purge())

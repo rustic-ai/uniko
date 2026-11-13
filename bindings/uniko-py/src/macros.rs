@@ -30,18 +30,32 @@ macro_rules! bridge {
 /// Run `$body` to completion on the shared runtime, blocking the caller.
 ///
 /// `$init` is evaluated with the GIL held (so Arc clones / arg moves happen on
-/// the calling thread), then [`Python::detach`] releases the GIL and
-/// `block_on` drives the future on the shared multi-thread runtime — the same
-/// one [`bridge!`] uses, so submitted/streaming work shares one executor. The
+/// the calling thread), then [`Python::detach`] releases the GIL while the
+/// body runs as a task on the shared multi-thread runtime — the same one
+/// [`bridge!`] uses, so submitted/streaming work shares one executor. The
 /// body re-acquires the GIL via `Python::attach` only for the final output
 /// conversion. `detach` reacquires the GIL before returning, so the resolved
-/// `Py<…>` is handed back to Python safely. `block_on` runs on the Python
-/// caller's thread (never a runtime worker), so it cannot panic on re-entry.
+/// `Py<…>` is handed back to Python safely.
+///
+/// The body is spawned rather than driven by `block_on` directly so it runs
+/// on a runtime worker, whose stack is sized for recall (8 MiB, see the
+/// module init), not on the Python caller's thread, whose stack can be far
+/// smaller. Driving it in place overflowed the stack and aborted the process
+/// on a thread started with a small `threading.stack_size`. The caller's
+/// thread only waits on the join handle. A panic in the body is re-raised
+/// here, as it was when the body ran in place.
 macro_rules! bridge_sync {
     ($py:expr, $name:ident = $init:expr, $body:block) => {{
         let $name = $init;
         $py.detach(move || {
-            pyo3_async_runtimes::tokio::get_runtime().block_on(async move $body)
+            let runtime = pyo3_async_runtimes::tokio::get_runtime();
+            match runtime.block_on(runtime.spawn(async move $body)) {
+                Ok(result) => result,
+                Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+                Err(err) => Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "uniko task did not complete: {err}"
+                ))),
+            }
         })
     }};
 }

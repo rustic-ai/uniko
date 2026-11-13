@@ -35,7 +35,13 @@ from .adapters import (
     recall_in,
     recall_in_sync,
 )
-from .config import UnikoConfigModel
+from .config import (
+    EmbeddingConfigModel,
+    NlpConfigModel,
+    OcrConfigModel,
+    RerankerConfigModel,
+    UnikoConfigModel,
+)
 from .inputs import (
     GoalSpec,
     IngestSourceSpec,
@@ -60,9 +66,13 @@ from .outputs import (
     IngestOutcome,
     MessageView,
     ObserveResult,
+    PipelineHealth,
     RecallItem,
     RecallSource,
+    SummarizeReport,
     TaskView,
+    UnitResult,
+    WorkerHealth,
 )
 from .typed import (
     TypedAgent,
@@ -94,10 +104,18 @@ __all__ = [
     "TaskView",
     "GoalContext",
     "IngestOutcome",
+    "UnitResult",
+    "SummarizeReport",
+    "WorkerHealth",
+    "PipelineHealth",
     "AbducedModification",
     "AbductionResult",
     # Config
     "UnikoConfigModel",
+    "EmbeddingConfigModel",
+    "RerankerConfigModel",
+    "NlpConfigModel",
+    "OcrConfigModel",
     # Input specs
     "GoalSpec",
     "TaskSpec",

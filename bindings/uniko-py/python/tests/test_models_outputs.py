@@ -153,7 +153,7 @@ def test_observe_result_tuple_and_optionals():
         sender_id = None
         extracted_entities = [(5, "Alice"), (6, "Dolomites")]
         extracted_observations = [7]
-        attachment_count = 0
+        attachments: list = []
 
     r = ObserveResult.from_native(FakeObserve())
     assert r.extracted_entities == [(5, "Alice"), (6, "Dolomites")]

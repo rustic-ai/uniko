@@ -51,7 +51,9 @@ async def test_observe_then_recall_roundtrip() -> None:
     agent = uni.agent("assistant")
     session = agent.session("conversation-1")
 
-    result = await session.observe(uniko.Turn("alice", "I love hiking in the mountains."))
+    result = await session.observe(
+        uniko.Turn("alice", "I love hiking in the mountains.")
+    )
     assert result.message_node_id > 0
     assert result.session_node_id > 0
     assert repr(result).startswith("ObserveResult")
