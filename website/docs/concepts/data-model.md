@@ -13,7 +13,7 @@ the whole thing together. The names here are the real ones, registered by `uniko
 
 ## The shape of the graph
 
-uniko's schema registers **25 node types and 54 edge types** with the underlying uni-db
+uniko's schema registers **26 node types and 55 edge types** with the underlying uni-db
 graph. They are organised into layers that map onto a cognitive-memory model — episodic
 (what happened), semantic (what we know), procedural (what works), and the meta-memory that
 tracks how knowledge was derived.

@@ -284,6 +284,8 @@ from `UnikoConfig::default()`.
 | `recall_min_score`          | `0.001` | Minimum fused score for inclusion. |
 | `recall_vector_weight`      | `0.5`   | Vector-similarity weight in hybrid fusion `[0.0–1.0]`. |
 | `recall_bm25_weight`        | `0.5`   | BM25 fulltext weight in hybrid fusion `[0.0–1.0]`. |
+| `recall_lexical_enabled`    | `true`  | Phase 3 lexical channel over `Chunk.search_text`, matching identifiers and figures whole; see [Tool Output](tool-output.md). |
+| `recall_fact_hybrid`        | `true`  | Fuse BM25 over `Fact.object` into Phase 1's Fact search. |
 | `rrf_k`                     | `60.0`  | `k` constant for reciprocal rank fusion across query variants; higher flattens top-rank weighting. |
 | `recall_per_variant_limit`  | `None`  | LIMIT applied to each per-variant Cypher query; `None` falls back to `recall_limit`. |
 | `query_variants`            | `[]`    | Multi-query reformulation labels. Empty (the default) selects the **single** `keywords` variant. Pass all four — `keywords`, `original`, `declarative`, `type_anchored` — to opt into multi-query. |
@@ -369,6 +371,7 @@ The chunking thresholds match the ingest pipeline's content router:
 | `max_chunk_tokens`                 | `256`   | Maximum tokens per chunk. |
 | `min_chunk_tokens`                 | `32`    | Minimum tokens per chunk (fragments below this merge). |
 | `chunk_overlap_tokens`             | `0`     | Overlap tokens between adjacent chunks; `0` = auto (10% of max, capped at 50). |
+| `chunk_context_max_tokens`         | `64`    | Token budget for a tool-output chunk's context header (tool, address, inherited values). |
 | `session_inactivity_secs`          | `3600`  | Inactivity window after which an open Session auto-closes and is summarised; `0` disables. |
 
 !!! note

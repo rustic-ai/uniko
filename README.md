@@ -168,7 +168,7 @@ Full documentation lives at **https://rustic-ai.github.io/uniko/**:
 
 ## Project status
 
-uniko is a **shipped Rust library** covering Phases 1–3: the typed schema (24 node types, 53
+uniko is a **shipped Rust library** covering Phases 1–3: the typed schema (26 node types, 55
 edge types), atomic ingest with local NLP extraction, async consolidation
 (observations -> Facts), three-phase recall, procedure promotion, topic detection, and formal
 Locy reasoning (`sequence_detector` live).

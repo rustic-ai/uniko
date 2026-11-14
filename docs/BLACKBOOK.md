@@ -544,7 +544,7 @@ uniko keeps the entire memory of an agent in **one uni-db property graph** — g
 
 The single source of truth for the catalog is `crates/uniko-store/src/schema/constants.rs` — the two arrays `labels::ALL` (26 node labels) and `edges::ALL` (55 edge types), grouped by cognitive layer. Per-node property and index definitions live in sibling files (`schema/facts.rs`, `schema/entities.rs`, `schema/observations.rs`, `schema/messages.rs`, `schema/chunks.rs`, `schema/procedures.rs`, `schema/topics.rs`, …) and are installed by the idempotent, two-phase `register_schema` (`schema/mod.rs`).
 
-> **Counts drift easily — `constants.rs` is authoritative.** `labels::ALL` = 25 node labels, `edges::ALL` = 54 edge types. The downstream artifacts (`website/docs/reference/schema.md`, `concepts/data-model.md`, and the `config/schema.json` snapshot) currently agree with it, but they are *downstream*: regenerate the snapshot with `cargo run --bin export-schema` and update the docs in the same change as any schema edit. Two additions are the usual casualties — the `Pattern` label and the `CONTRADICTED_BY` edge, both Locy-consumer additions (`episode_pattern_detector`, `contradiction_detector`).
+> **Counts drift easily — `constants.rs` is authoritative.** `labels::ALL` = 26 node labels, `edges::ALL` = 55 edge types. The downstream artifacts (`website/docs/reference/schema.md`, `concepts/data-model.md`, and the `config/schema.json` snapshot) currently agree with it, but they are *downstream*: regenerate the snapshot with `cargo run --bin export-schema` and update the docs in the same change as any schema edit. Two additions are the usual casualties — the `Pattern` label and the `CONTRADICTED_BY` edge, both Locy-consumer additions (`episode_pattern_detector`, `contradiction_detector`).
 
 ### 3.1 The central design rule: knowledge is derived, never directly stored
 
@@ -1034,7 +1034,7 @@ Message chunking triggers only when `count_tokens(content) > message_chunk_thres
 | `Structured` | `StructuredChunker` (csv/json) |
 | everything else | `TextChunker` |
 
-`TextChunker` (`chunking/text.rs`) splits recursively — paragraphs (`\n\n`) → sentences → words — greedily accumulating to `max_chunk_tokens` (default 256), merges sub-`min_chunk_tokens` (default 32) chunks with a neighbor, applies a **char-approximate** (~4 chars/token) overlap at word boundaries, and extracts a markdown heading. Because overlap is prepended *after* the greedy pass and `token_count` is recomputed, final chunks can slightly exceed `max_chunk_tokens`.
+`TextChunker` (`chunking/text.rs`) is span-based: **every chunk's `text` is exactly `content[start..end]`**. A span over `max_chunk_tokens` (default 256) is split at the strongest boundary it contains, recursively — blank lines (including `\r\n`), then line breaks, then sentence ends (`.`, `!` or `?` followed by whitespace, so `3.14`, `src/foo.rs` and `v1.2.3` are never cut), then whitespace, then characters for a run with none. Pieces are packed greedily back up to the limit, a span under `min_chunk_tokens` (default 32) is merged into a neighbour while the result fits, and overlap moves a chunk's `start` back into its predecessor at a word boundary rather than copying text, so `token_count` (recounted on the final slice) can exceed the limit only by the overlap. The heading is the first markdown heading inside the chunk, else the last before it. Before this, sentences were cut after every `.`/`?`/`!`, rejoined with spaces, and overlap was prepended text, so chunk text did not match its offsets.
 
 `create_chunks_in_tx` batch-creates `:Chunk` nodes with a deterministic `chunk_id(parent_ext_id, index)` and `HAS_CHUNK` edges (carrying `index`) from a dynamic parent label. `ChunkData` carries `text, index, start, end, token_count, chunk_type, language, symbol_name, heading, metadata`.
 
@@ -1050,6 +1050,21 @@ Under `Refresh` the rebuild is **incremental**: chunks are compared index by ind
 
 !!! note
     Before 0.2.x these chunkers existed but were called only by `uniko-bench`. Since the Phase 1 session boost walks `Session-[:HAS_CHUNK]->Chunk`, and `phase1_strategy` defaults to `"boost"`, a facade-ingested KB got **no** Phase 1 contribution at all. See §6.
+
+### 4.8.1 Tool output
+
+An agent's tool calls are recorded with `ToolCall` (`facade/tool.rs`): on a `Turn` they are written by `write_tool_calls_in_tx` (`ingest/tool.rs`) inside the unit's transaction, after the turn's attachments; alone, `ingest_tool_calls` opens a transaction for them. Each is an `:Action` (`action_type = "tool_call"`, `tool_name`, `payload_hash`) with `PERFORMED_BY`, `IN_SESSION`, `TRIGGERED_BY` and `NEXT_ACTION`, and its result is prepared through `prepare_source` as an `Artifact {kind: "tool_output"}` with id `{call_id}:output`, linked `PRODUCED`. A call id is the replay key: same `payload_hash` → no write, different → `IdConflict`. `record_action` runs on the same writer, with `chain_in_session = false` and an artifact only above `action_output_artifact_threshold`.
+
+A `tool_output` artifact — and a message whose `content_type` is `tool_result`, `json`, `csv`, `structured` or a JSON/CSV MIME (`message::structured_format`) — is chunked by `ingest/structure/`:
+
+- `detect_format` tries, in order: one JSON value (`structure/json.rs`, a span-keeping parser), NDJSON, a unified diff, a Markdown table, a delimiter that splits the first lines into equal field counts, mostly timestamped/levelled lines (log), else text.
+- `chunk_structured` splits along that structure. JSON: a value that fits is one chunk; an object too big is split into runs of small members plus a descent into each big one; an array into runs of elements; a huge string by the text chunker. Rows, records and lines are packed in runs; a diff is split per hunk. Every chunk's text is a verbatim slice, and `metadata` carries its `address` and `context`.
+- The **context header** is the tool line (name + compact arguments), `at: {address}`, lead lines (a table's `columns:`, a diff's `file:`), then inherited `key=value` pairs nearest first — each enclosing object's scalar members and its small sibling objects' scalars (`meta.currency=EUR`), excluding the member descended into — cut at `chunk_context_max_tokens` (default 64).
+- `create_chunks_in_tx` writes `context` and `address` as their own columns, and `search_text = normalize_for_search(context + text)` for **every** chunk. `Chunk.embedding` is auto-embedded from `["context", "text"]`; uni-db skips a missing source, so a chunk without a header embeds exactly as before.
+
+Structured data (a non-`Text` format) gets no NER, NLP or observations (`extract_for_unit`, `prepare_observations`); a prose `tool_result` still does. A structured message is chunked once it exceeds `max_chunk_tokens`, not `message_chunk_threshold`.
+
+`normalize_for_search` (`structure/normalize.rs`) strips thousands separators inside digit groups, keeps tokens of letters, digits and `_ - . / : @ # + % $` whole, and adds their parts split at separators and lower→upper case changes. `Chunk.search_text` is indexed `FullTextWithAnalyzer` with a whitespace base, no stemming and no stop words, so the tokens survive as written.
 
 ### 4.9 Artifacts and PDFs
 
@@ -1565,6 +1580,8 @@ let agent = memory.agent("assistant-1");
 
 Vector search over the **consolidated** tier only: `Fact.embedding` top-20, `Procedure.embedding` top-10, `Topic.embedding` top-5. (Procedure/Topic return 0 rows until P5/P6 have run.) Coverage is computed against `COVERAGE_GATE_PHASE1 = 0.75` **and** requires `>= 3` items.
 
+With `recall_fact_hybrid` (default on) the Fact target runs `recall_hybrid_search` instead: `similar_to([embedding, object], [qvec, keywords], weighted)` over a full-text index on `Fact.object`, with the recall vector/BM25 weights, so a fact whose words match the query is found even when its embedding is not the nearest. On the LongMemEval oracle split (100 questions, retrieval only, same reused stores) it moved R@5 from 0.847 to 0.934 and NDCG@5 from 0.888 to 0.954.
+
 **F58 drift override** (`:975`): if Phase 1 would exit early but a query `entity_ref` resolves to an `unstable` Entity (`kb.any_unstable_entities`), the cascade is forced past Phase 1 into Phase 2+. This makes queries about volatile entities consult recent episodic evidence rather than trusting a stale consolidated Fact.
 
 #### Phase 2 — Expand (`phase2_expand`, `:1472`)
@@ -1583,6 +1600,8 @@ Each source is min-max normalized (`normalize_scores_in_place`), RRF-fused (`rrf
 #### Phase 3 — Broaden (`:1047+`)
 
 Per-variant fan-out: each `QueryVariant` runs `run_recall_for_variant` (`kb.recall_chunk_and_entity_scoped` — hybrid vector + BM25 + entity-scoped), concurrently; optional sparse Chunk channels; RRF-fused across variants + sparse. If the scored set is empty, it falls back to the Phase-2 items.
+
+**Message-owned chunks and the lexical channel.** The owner-scoped arms of `recall_chunk_and_entity_scoped` search Artifact-owned chunks (2 × limit) and, since the tool-output work, Message-owned chunks (limit) — the pieces of a long turn were previously reachable only through graph expansion. After the variants, `run_lexical_source` searches `Chunk.search_text` with the query's literals (`intent::extract_literals`: quoted phrases, tokens with a digit, joined identifiers, inner case changes, acronyms), normalised like the index; without literals it uses the keyword variant. Its list joins the RRF pool (`rrf_fuse_weighted`) at weight `lexical_literal_weight` (2.0) when literals exist, 1.0 otherwise. `populate_sources` maps a chunk of an artifact an Action `PRODUCED` to `RecallSource::Tool`, a session transcript chunk to `RecallSource::Session`, and copies a chunk's `context` and `address` onto the item.
 
 `RecallItem`s are then built with tier weights, and optionally reranked (`:1160`):
 
@@ -1608,7 +1627,7 @@ coverage = 0.4·facet_coverage + 0.3·mean_score + 0.3·diversity(distinct_tiers
 facet_coverage = min(#semantic+procedural items, facet_count) / facet_count
 ```
 
-`finalize_bundle` (`:657`) sorts descending, truncates to `limit`, and sums `TOKENS_PER_ITEM = 50` until the token budget is hit.
+`finalize_bundle` sorts descending, truncates to `limit`, counts each item's real tokens (`count_tokens`, stored as `RecallItem.token_count`), and keeps items in rank order while they fit the budget — an item too big for what is left is skipped, not fatal. It used to count a flat 50 tokens per item, so a bundle of long chunks could run several times past the budget.
 
 #### Intent profiling (`recall/intent.rs`)
 
@@ -1648,7 +1667,7 @@ A ~40-field tuning struct, normally built from the KB config via `RecallConfig::
 - **Recall is FAIL-OPEN by default.** `ViewerScope::Unrestricted` returns policy-scoped `Fact`/`Observation` items **unfiltered** with only a `WARN` (`:704-714`). A production caller serving a specific participant MUST set `RecallConfig.viewer` or build with `.scope_to_agent()`, or data leaks across visibility. (Unknown visibility schemes fail **closed** — see §6.6.)
 - **`reference_ts` is a per-query anchor, never a KB setting.** Recalling a historical corpus without setting it computes the temporal window around *now*, which never overlaps old data and silently disables the Phase-2 temporal channel (`:424-431`).
 - **`answer_type_boost` defaults to 1.0 (no-op) deliberately** — the naive rule measured −0.149 R@5 / −0.186 NDCG@5 because common predicted types (e.g. `measurement` for "how many") swamp top-K (`:492-500`).
-- **Leftover debug prints.** Three `eprintln!("RECALL_PROF …")` statements ship in the hot path (phase2 gate `:1528-1531`, `run_sparse_source` `:1748-1752`, `run_phase2_source` `:1831-1835`); they write to stderr on every recall.
+- **Debug prints.** The `RECALL_PROF` `eprintln!`s that used to ship in the hot path are now `tracing::debug!` events (`recall phase 2 sparse gate`, `recall sparse source`, `recall phase 2 source`, `recall chunk and entity-scoped search`).
 - `populate_sources` and the viewer/redaction filters run on the **small final bundle**, not the candidate set — a `populate_sources` failure is swallowed (items keep empty `sources`) rather than failing the recall.
 
 ---
@@ -2591,6 +2610,7 @@ The crate is **CPU-by-default** (`features = default = []`) so `cargo check/clip
 | `longmemeval-bench` | Harness | LongMemEval retrieval + judge |
 | `uniko-cypher` | Tool | Cypher console over an ingested KB |
 | `nlp-compare` | Tool | One NLP preset against gold labels: NER, POS, dialogue act, gate, latency |
+| `tool-recall` | Tool | Recall and the read tools on answers that live in agent tool output |
 | `nlp-parity` | Tool | A/B in-crate NLP decode vs xervo |
 | `insert-microbench` | Microbench | Node/edge insert: Cypher vs bulk |
 | `update-microbench` | Microbench | UNWIND-SET per-row cost repro |
@@ -2800,6 +2820,22 @@ Measured speedups: **524× on edges**, **49.6× on nodes-no-embed**, and only **
 #### `profile-writes` — the no-contention floor
 
 Runs `ExecuteBuilder::profile()` on per-edge-type UNWIND-MATCH-CREATE patterns against a populated KB to isolate the single-writer per-call write floor.
+
+#### `tool-recall`
+
+`tool-recall` (`src/tool_recall/`) asks whether recall finds answers that live in an agent's tool output. `synth.rs` generates, from a seed, sessions in which an assistant calls `list_orders` (pretty JSON with `meta.currency`/`meta.amount_unit` and 28 items), `get_customer`, `run_sql` (a CSV whose unit is only in the arguments), `fetch_logs` (150 lines, one error) and `run_tests` (40 lines, one failure, the commit only in the arguments); a later session re-fetches an order with a new status. Each question carries gold evidence tokens that must all appear in one item, and the inherited values the record needs: lookup, inherited (currency/unit, a CSV column and unit, a commit), aggregation (shipped orders' amounts), join (an order's customer tier), latest (the re-fetched status; `stale` counts the old record ranking above), and unanswerable (an id that exists nowhere). `run.rs` ingests through the public facade in one of three modes — tool results as `content_type = "tool_result"` turns, `record_action`, or `ToolCall` — and scores with no LLM: hit@1/5/k, hit within the first 2,048 tokens of the bundle, MRR, coverage of multi-record evidence, context-completeness (the hit item's content plus its context header carry every inherited value), and a scripted reader that makes one `Sources::search` call and keeps five hits.
+
+Measured on an M2 Max at 24 sessions (120 calls, 180 answerable questions), seed 7, default config:
+
+| Build, mode | hit@k | hit within 2k tokens | MRR | context-complete | mean bundle tokens |
+|---|---|---|---|---|---|
+| before, `tool_result` turns | 0.761 | 0.178 | 0.368 | 0.744 | 25,751 |
+| before, `record_action` | 0.000 | 0.000 | 0.000 | 0.000 | 586 |
+| after, `tool_result` turns | 0.861 | 0.683 | 0.544 | 0.683 | 3,699 |
+| after, `record_action` | 0.861 | 0.767 | 0.504 | — | 2,952 |
+| after, `ToolCall` | 0.872 | 0.789 | 0.521 | 0.872 | 2,946 |
+
+"Before" is the commit preceding the tool-output work. Its high context-completeness for turns came from bundles running to 25k tokens — whole messages counted at 50 tokens each — so a hit almost always dragged its header along; within a 2k budget it found 18% of answers. With `ToolCall`, every hit carries its inherited values in its context header. The reader (one search, five hits, about 1.1–1.4k tokens) finds lookups at rank 1 in 98% of questions and abstains on every unanswerable one. Two weak spots remain: inherited questions hit at rank 1 only 25% of the time (the header makes the right chunk findable, not first), and for latest-status questions the stale record still outranks the current one half the time — recall has no recency signal for chunks.
 
 #### `uniko-cypher`, `nlp-compare`, `nlp-parity`
 

@@ -29,6 +29,7 @@ nav:
       - Overview: guides/index.md
       - Working with the Facade: guides/facade.md
       - Agent Tools: guides/agent-tools.md
+      - Tool Output: guides/tool-output.md
       - Recall & Retrieval: guides/retrieval.md
       - Reasoning with Locy: guides/reasoning-with-locy.md
       - Configuration: guides/configuration.md
