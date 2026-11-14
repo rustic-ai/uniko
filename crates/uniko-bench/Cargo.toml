@@ -38,6 +38,10 @@ name = "nlp-compare"
 path = "src/nlp_compare_main.rs"
 
 [[bin]]
+name = "tool-recall"
+path = "src/tool_recall_main.rs"
+
+[[bin]]
 name = "profile-writes"
 path = "src/profile_writes_main.rs"
 

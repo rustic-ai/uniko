@@ -27,6 +27,7 @@ pub mod longmemeval;
 pub mod pricing;
 pub mod query;
 pub mod report;
+pub mod tool_recall;
 
 #[doc(inline)]
 pub use data::{
