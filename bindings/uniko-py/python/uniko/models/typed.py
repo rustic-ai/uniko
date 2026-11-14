@@ -654,6 +654,14 @@ class TypedUnikoBuilder:
         self._inner = self._inner.reranker(reranker)
         return self
 
+    def nlp(self, nlp: Any) -> "TypedUnikoBuilder":
+        """A preset name (``"v1"``, ``"v7-small"``, ...), a dict, or an
+        ``NlpConfigModel``."""
+        if hasattr(nlp, "model_dump"):
+            nlp = nlp.model_dump(exclude_unset=True)
+        self._inner = self._inner.nlp(nlp)
+        return self
+
     def llm(self, spec: Any) -> "TypedUnikoBuilder":
         self._inner = self._inner.llm(_native_arg(spec))
         return self

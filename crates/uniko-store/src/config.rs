@@ -321,22 +321,60 @@ impl EmbeddingConfig {
     }
 }
 
-/// NLP cascade model selection.
+/// Which generation of the kniv NLP family [`NlpConfig::model_id`] holds.
 ///
-/// The bench's NER + observation extraction steps invoke a Raw-task
-/// xervo alias backed by uni-db's `local/onnx` provider.  Defaults
-/// match the legacy hardcoded values that lived in
-/// `storage/mod.rs::embed_catalog`; surfacing them here lets a bench
-/// profile swap the cascade (e.g. `*-small` vs `*-xsmall`, FP32 vs
-/// INT8) without a code change.
+/// The two generations take different loader options, so the catalog has
+/// to be told which one it is loading: uni-xervo's own probe cannot tell
+/// them apart, because the v1 repo also ships `onnx/onnx_meta.json`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NlpGeneration {
+    /// The v1 cascade: one ONNX graph over at most 128 subwords
+    /// (`kniv-deberta-nlp-base-en-*`). Loads [`NlpConfig::artifact`].
+    #[default]
+    V1,
+    /// kniv v7 (`kniv-v7-*-en`): a set of graphs over word windows of up to
+    /// 1,024 subwords (512 for `xlarge-d`). Loads the precision named by
+    /// [`NlpConfig::variant`]; [`NlpConfig::artifact`] does not apply.
+    V7,
+}
+
+/// NLP model selection for NER and observation extraction.
+///
+/// Defaults to the kniv v1 cascade. [`NlpConfig::preset`] names the
+/// published alternatives, including every kniv v7 size:
+///
+/// | preset | model | encoder |
+/// |---|---|---|
+/// | `v1` | `kniv-deberta-nlp-base-en-xsmall` | DeBERTa, 128 subwords |
+/// | `v7-tiny` | `kniv-v7-tiny-en` | Ettin 17M |
+/// | `v7-small` | `kniv-v7-small-en` | Ettin 32M |
+/// | `v7-medium` | `kniv-v7-medium-en` | Ettin 68M |
+/// | `v7-large` | `kniv-v7-large-en` | ModernBERT-base |
+/// | `v7-xlarge` | `kniv-v7-xlarge-u-en` | UltraBERT 380M |
+/// | `v7-xlarge-d` | `kniv-v7-xlarge-d-en` | DeBERTa-v3-large, 512 subwords |
+///
+/// The model only shapes what ingest extracts; the store does not record
+/// it, so a store can be reopened with a different one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NlpConfig {
-    /// HuggingFace model id for the NLP cascade.
+    /// HuggingFace model id.
     #[serde(default = "default_nlp_model_id")]
     pub model_id: String,
-    /// Which ONNX artifact under `model_id/` to load.
+    /// Which kniv generation `model_id` is. Must match the model.
+    #[serde(default)]
+    pub generation: NlpGeneration,
+    /// Which ONNX artifact under `model_id/` to load. kniv v1 only.
     #[serde(default = "default_nlp_artifact")]
     pub artifact: String,
+    /// The precision to load, as a fallback chain such as `"int8,fp16"`.
+    /// kniv v7 only.
+    ///
+    /// Each graph loads the first listed precision the release publishes
+    /// and falls back to fp32, which every release ships. An empty string
+    /// loads fp32.
+    #[serde(default = "default_nlp_variant")]
+    pub variant: String,
     /// Maximum batch size for the ONNX session.
     #[serde(default = "default_nlp_max_batch_size")]
     pub max_batch_size: usize,
@@ -351,11 +389,58 @@ impl Default for NlpConfig {
     fn default() -> Self {
         Self {
             model_id: default_nlp_model_id(),
+            generation: NlpGeneration::V1,
             artifact: default_nlp_artifact(),
+            variant: default_nlp_variant(),
             max_batch_size: default_nlp_max_batch_size(),
             execution_providers: None,
         }
     }
+}
+
+impl NlpConfig {
+    /// The preset names [`preset`](NlpConfig::preset) accepts.
+    pub const PRESETS: &[&str] = &[
+        "v1",
+        "v7-tiny",
+        "v7-small",
+        "v7-medium",
+        "v7-large",
+        "v7-xlarge",
+        "v7-xlarge-d",
+    ];
+
+    /// A kniv v7 model by its HuggingFace id, loading INT8 graphs where the
+    /// release publishes them.
+    #[must_use]
+    pub fn kniv_v7(model_id: impl Into<String>) -> Self {
+        Self {
+            model_id: model_id.into(),
+            generation: NlpGeneration::V7,
+            ..Self::default()
+        }
+    }
+
+    /// A published model by preset name (see the table on [`NlpConfig`]),
+    /// or `None` for an unknown name.
+    #[must_use]
+    pub fn preset(name: &str) -> Option<Self> {
+        let size = match name {
+            "v1" => return Some(Self::default()),
+            "v7-tiny" => "tiny",
+            "v7-small" => "small",
+            "v7-medium" => "medium",
+            "v7-large" => "large",
+            "v7-xlarge" => "xlarge-u",
+            "v7-xlarge-d" => "xlarge-d",
+            _ => return None,
+        };
+        Some(Self::kniv_v7(format!("dragonscale-ai/kniv-v7-{size}-en")))
+    }
+}
+
+fn default_nlp_variant() -> String {
+    "int8".to_string()
 }
 
 fn default_nlp_model_id() -> String {
@@ -1170,6 +1255,35 @@ mod tests {
         let json = serde_json::to_string(&original).expect("serialize");
         let restored: UnikoConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn nlp_presets_name_every_kniv_size() {
+        assert_eq!(NlpConfig::preset("v1"), Some(NlpConfig::default()));
+        for name in NlpConfig::PRESETS.iter().filter(|n| **n != "v1") {
+            let nlp = NlpConfig::preset(name).expect(name);
+            assert_eq!(nlp.generation, NlpGeneration::V7, "{name}");
+            assert_eq!(nlp.variant, "int8", "{name}");
+            assert!(
+                nlp.model_id.starts_with("dragonscale-ai/kniv-v7-"),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            NlpConfig::preset("v7-xlarge").unwrap().model_id,
+            "dragonscale-ai/kniv-v7-xlarge-u-en"
+        );
+        assert_eq!(NlpConfig::preset("v7-huge"), None);
+    }
+
+    #[test]
+    fn nlp_generation_defaults_to_v1_and_reads_lowercase() {
+        // A config written before `generation` existed still means v1.
+        let old: NlpConfig = serde_json::from_str(r#"{"model_id": "m"}"#).unwrap();
+        assert_eq!(old.generation, NlpGeneration::V1);
+        let v7: NlpConfig = serde_json::from_str(r#"{"generation": "v7"}"#).unwrap();
+        assert_eq!(v7.generation, NlpGeneration::V7);
+        assert!(serde_json::from_str::<NlpConfig>(r#"{"generation": "v9"}"#).is_err());
     }
 }
 

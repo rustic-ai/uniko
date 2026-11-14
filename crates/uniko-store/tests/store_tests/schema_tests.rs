@@ -867,3 +867,40 @@ async fn test_summary_summarizes_session() {
 
     db.shutdown().await.unwrap();
 }
+
+/// The NLP alias carries the option keys of the configured generation only:
+/// uni-xervo rejects a v1 key on a v7 model and the reverse.
+#[test]
+fn nlp_catalog_options_follow_the_generation() {
+    use uniko_store::config::NlpConfig;
+    use uniko_store::schema::NLP_ALIAS;
+
+    let options = |nlp: NlpConfig| {
+        let config = UnikoConfig {
+            nlp,
+            ..UnikoConfig::default()
+        };
+        embed_catalog(&config)
+            .into_iter()
+            .find(|spec| spec.alias == NLP_ALIAS)
+            .expect("nlp alias")
+    };
+
+    let v1 = options(NlpConfig::default());
+    assert_eq!(v1.options["generation"], "v1");
+    assert_eq!(v1.options["onnx_path"], "onnx/cascade-int8.onnx");
+    assert!(v1.options.get("variant").is_none());
+
+    let v7 = options(NlpConfig::preset("v7-small").unwrap());
+    assert_eq!(v7.model_id, "dragonscale-ai/kniv-v7-small-en");
+    assert_eq!(v7.options["generation"], "v7");
+    assert_eq!(v7.options["variant"], "int8");
+    for v1_only in [
+        "onnx_path",
+        "tokenizer_path",
+        "label_maps_path",
+        "max_seq_len",
+    ] {
+        assert!(v7.options.get(v1_only).is_none(), "{v1_only}");
+    }
+}

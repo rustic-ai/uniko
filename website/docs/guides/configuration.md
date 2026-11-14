@@ -156,33 +156,60 @@ own `/tokenize` endpoint, so keep that budget at or below the server's
 (512 for BGE). Task prefixes are left unset — set `document_prefix` /
 `query_prefix` yourself to match whichever model the server holds.
 
-### The NLP cascade
+### The NLP model
 
-NER and observation extraction run through a single ONNX cascade model,
-**kniv-deberta**. `NlpConfig` exposes the model id, the ONNX artifact to
-load, and a batch size:
+NER and observation extraction run through a kniv NLP model. The default
+is the v1 cascade, **kniv-deberta** (one ONNX graph over at most 128
+subwords). Every size of **kniv v7** is available as an alternative: v7
+reads whole windows of up to 1,024 subwords, so each sentence is analysed
+with its neighbours in view.
+
+Pick one by preset with `NlpConfig::preset` (or `UnikoBuilder::nlp`):
+
+| Preset        | Model                                   | Encoder |
+|---------------|-----------------------------------------|---------|
+| `v1`          | `dragonscale-ai/kniv-deberta-nlp-base-en-xsmall` | DeBERTa, 128 subwords (default) |
+| `v7-tiny`     | `dragonscale-ai/kniv-v7-tiny-en`        | Ettin 17M |
+| `v7-small`    | `dragonscale-ai/kniv-v7-small-en`       | Ettin 32M |
+| `v7-medium`   | `dragonscale-ai/kniv-v7-medium-en`      | Ettin 68M |
+| `v7-large`    | `dragonscale-ai/kniv-v7-large-en`       | ModernBERT-base |
+| `v7-xlarge`   | `dragonscale-ai/kniv-v7-xlarge-u-en`    | UltraBERT 380M |
+| `v7-xlarge-d` | `dragonscale-ai/kniv-v7-xlarge-d-en`    | DeBERTa-v3-large, 512 subwords |
 
 ```rust
-use uniko_store::config::NlpConfig;
+use uniko_api::tools::NlpConfig;
 
-let nlp = NlpConfig::default();
-// model_id:        "dragonscale-ai/kniv-deberta-nlp-base-en-xsmall"
-// artifact:        "onnx/cascade-int8.onnx"
-// max_batch_size:  16
+let memory = Uniko::builder()
+    .nlp(NlpConfig::preset("v7-small").expect("known preset"))
+    .build()
+    .await?;
 ```
+
+```python
+memory = uniko.Uniko.builder().nlp("v7-small").build_sync()
+```
+
+The presets fill in these fields; set them directly for a model of your own:
 
 | Field                | Default | Meaning |
 |----------------------|---------|---------|
-| `model_id`           | `dragonscale-ai/kniv-deberta-nlp-base-en-xsmall` | HuggingFace id of the cascade model. |
-| `artifact`           | `onnx/cascade-int8.onnx` | Which ONNX export under `model_id/` to load (e.g. INT8 vs FP32). |
+| `model_id`           | `dragonscale-ai/kniv-deberta-nlp-base-en-xsmall` | HuggingFace id of the model. |
+| `generation`         | `v1`    | Which kniv generation `model_id` is: `v1` or `v7`. Must match the model; the two take different loader options. |
+| `artifact`           | `onnx/cascade-int8.onnx` | v1 only: which ONNX export under `model_id/` to load (e.g. INT8 vs FP32). |
+| `variant`            | `int8`  | v7 only: the precision to load, as a fallback chain such as `int8,fp16`. Each graph falls back to fp32, which every release ships. |
 | `max_batch_size`     | `16`    | Maximum batch size for the ONNX session. |
 | `execution_providers`| `None`  | EP override; `None` picks a feature-aware default (CUDA+CPU on `gpu-cuda`, CoreML+CPU on `gpu-metal`, CPU otherwise). |
 
-Swapping the cascade variant (xsmall ↔ small, INT8 ↔ FP32) is a config
-edit — change `model_id` or `artifact` and the loader picks it up.
+Both generations feed the same extraction: they share the entity (OntoNotes),
+part-of-speech, dependency and semantic-role labels. v7's six dialogue acts
+are mapped onto the v1 sentence classes that decide which sentences yield
+observations (`Directive` counts as a request and `Commissive` as an offer,
+so both stay informative). The model is not recorded in the store, so a
+store can be reopened with another one. A `catalog_path` replaces the
+built-in catalog, `nlp` section included.
 
-The cascade's SRL (semantic-role-labelling) head is gated separately on
-the main config:
+The SRL (semantic-role-labelling) head is gated separately on the main
+config:
 
 ```rust
 config.nlp_srl_enabled = true; // default: true

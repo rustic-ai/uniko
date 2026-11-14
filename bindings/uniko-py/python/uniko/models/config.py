@@ -20,7 +20,7 @@ fields and defaults stay in step with the engine.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -62,12 +62,21 @@ class RerankerConfigModel(BaseModel):
 
 
 class NlpConfigModel(BaseModel):
-    """The NER / observation-extraction cascade (``nlp``)."""
+    """The NLP model behind NER and observation extraction (``nlp``).
+
+    ``generation`` must match ``model_id``: ``"v1"`` for the default
+    cascade, ``"v7"`` for a ``kniv-v7-*-en`` model. ``artifact`` applies to
+    v1 only and ``variant`` (a precision fallback chain such as
+    ``"int8,fp16"``) to v7 only. ``UnikoBuilder.nlp("v7-small")`` and the
+    other presets fill these in.
+    """
 
     model_config = _CFG
 
     model_id: str = "dragonscale-ai/kniv-deberta-nlp-base-en-xsmall"
+    generation: Literal["v1", "v7"] = "v1"
     artifact: str = "onnx/cascade-int8.onnx"
+    variant: str = "int8"
     max_batch_size: int = 16
     execution_providers: Optional[list[str]] = None
 

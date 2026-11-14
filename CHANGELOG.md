@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`NlpConfig` has two new fields,** `generation` and `variant`, so a
+  struct literal needs them or `..NlpConfig::default()`. Serialized configs
+  without them still read as the v1 cascade.
 - **Python results that were tuples or counts are now classes.**
   `Session.commit_unit` returns a `UnitResult` (`turns`, `was_replay`)
   instead of a `(results, was_replay)` tuple, and `Session.summarize`
@@ -52,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **kniv v7 as the NLP model.** `NlpConfig` gains `generation` (`v1`, the
+  default, or `v7`) and a v7 precision `variant`, and `NlpConfig::preset`
+  names every published size: `v7-tiny`, `v7-small`, `v7-medium`,
+  `v7-large`, `v7-xlarge` and `v7-xlarge-d` (and `v1`). Pick one with
+  `UnikoBuilder::nlp` or, in Python, `UnikoBuilder.nlp("v7-small")`. Under
+  v7 a message is analysed in one pass and split by sentence; its word
+  tokens map one to one, and its six dialogue acts are projected onto the
+  v1 sentence classes the observation gate reads.
 - **Configure an instance from Python** (#45). `UnikoBuilder.config()` takes
   a dict or a `UnikoConfigModel` with any subset of the fields, nested
   sections included, and rejects unknown keys with a suggestion for near
@@ -108,6 +119,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Sentence splitting no longer cuts at titles, initials, months or
+  dotted acronyms.** The v1 path split at every period, so "Sen. Robert F.
+  Kennedy was shot." became three pieces, and the two under four words were
+  dropped unanalysed. It now follows kniv v7's reference rule: a sentence
+  ends at `.`, `!` or `?` before a capital, digit or quote, but not after
+  "Dr.", "F.", "Dec." or "U.S.". On the `nlp-compare` bench, v1's NER on
+  whole messages rises from 0.708 to 0.750 F1 on CoNLL04 and from 0.737 to
+  0.750 on the kniv corpus. The v7 path splits inside uni-xervo, which needs
+  the same fix.
 - **The streaming pipeline honours `UnikoConfig`.** It was always built from
   `PipelineConfig::default()`, so `ingest_queue_capacity`,
   `consolidation_queue_capacity`, `consolidation_threshold`,

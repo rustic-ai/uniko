@@ -138,6 +138,7 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `config` | `config(config: dict \| UnikoConfigModel) -> UnikoBuilder` | — (sync) | Base configuration, merged onto the defaults. |
 | `embedding` | `embedding(embedding: str \| dict) -> UnikoBuilder` | — (sync) | Embedding model: a preset name or an `embedding` section. |
 | `reranker` | `reranker(reranker: str \| dict \| None) -> UnikoBuilder` | — (sync) | Reranker: `"bge-base"`, `"minilm"`, a `reranker` section, or `None` for off. |
+| `nlp` | `nlp(nlp: str \| dict) -> UnikoBuilder` | — (sync) | NLP model for entity and observation extraction: `"v1"` (default), a kniv v7 size (`"v7-tiny"`, `"v7-small"`, `"v7-medium"`, `"v7-large"`, `"v7-xlarge"`, `"v7-xlarge-d"`), or an `nlp` section. Wins over `config()` in either order. |
 | `llm` | `llm(spec: LlmSpec) -> UnikoBuilder` | — (sync) | Generation model — **required for `answer()`**. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |

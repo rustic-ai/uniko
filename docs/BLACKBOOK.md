@@ -2590,7 +2590,7 @@ The crate is **CPU-by-default** (`features = default = []`) so `cargo check/clip
 | `uniko-bench` | Harness | LoCoMo10 accuracy + cost + latency |
 | `longmemeval-bench` | Harness | LongMemEval retrieval + judge |
 | `uniko-cypher` | Tool | Cypher console over an ingested KB |
-| `nlp-compare` | Tool | NLP cascade latency across model sizes |
+| `nlp-compare` | Tool | One NLP preset against gold labels: NER, POS, dialogue act, gate, latency |
 | `nlp-parity` | Tool | A/B in-crate NLP decode vs xervo |
 | `insert-microbench` | Microbench | Node/edge insert: Cypher vs bulk |
 | `update-microbench` | Microbench | UNWIND-SET per-row cost repro |
@@ -2810,7 +2810,7 @@ Runs `ExecuteBuilder::profile()` on per-edge-type UNWIND-MATCH-CREATE patterns a
     --query "MATCH (m:Message) RETURN count(m) AS n" --format json
 ```
 
-`nlp-compare` runs the NLP cascade through xsmall/small/base variants over LME messages measuring per-call latency and entity/observation counts (no graph writes). `nlp-parity` A/B-tests uniko's in-crate NLP decode against `uni_xervo`'s `NlpModel::analyze` over the same ONNX artifact, reporting per-axis agreement (tokenization / POS / NER-Jaccard / DEP arcs / CLS / SRL) — the parity proof that justified migrating decode into xervo, and which pinned the three representation gaps the adapter reconciles (SentencePiece metaspace word reconstruction, DEP head→word mapping, BIO span merging).
+`nlp-compare` scores one `NlpConfig` preset (`v1`, `v7-small`, …) through `NlpPipeline` against gold sentences sampled by `scripts/nlp_eval_prep.py` (the kniv corpus dev split and CoNLL04 test): NER span F1, POS accuracy, sentence class and observation-gate agreement, plus load time and per-sentence and per-message latency (no graph writes). `nlp-parity` A/B-tests uniko's in-crate NLP decode against `uni_xervo`'s `NlpModel::analyze` over the same ONNX artifact, reporting per-axis agreement (tokenization / POS / NER-Jaccard / DEP arcs / CLS / SRL) — the parity proof that justified migrating decode into xervo, and which pinned the three representation gaps the adapter reconciles (SentencePiece metaspace word reconstruction, DEP head→word mapping, BIO span merging).
 
 ---
 

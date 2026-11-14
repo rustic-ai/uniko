@@ -21,6 +21,16 @@
 //!    [`super::decode::parse_ner_type`], exactly as the in-crate decoder
 //!    did, preserving the same [`NerEntityType`](super::types::NerEntityType)
 //!    mapping.
+//!
+//! kniv v7 differs from v1 in two of these, which [`Layout`] tells the
+//! adapter about:
+//!
+//! - its tokens are already whole words, with no metaspace, so they map
+//!   one to one instead of being regrouped (regrouping would glue every
+//!   word of a message into one);
+//! - its six dialogue acts are not v1's eight, so they are projected onto
+//!   the v1 labels (see [`V7_ACTS`]) that the observation gate and
+//!   [`SentenceClass::from_label`] are written against.
 
 use uni_xervo::traits::NlpResult as XervoNlp;
 
@@ -28,12 +38,57 @@ use super::assets::LabelMaps;
 use super::decode::{build_span, parse_ner_type};
 use super::types::{DepArc, NerSpan, NlpResult, SentenceClass, SrlArg, SrlFrame};
 
+/// How a model lays out its output, fixed per model.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Layout<'a> {
+    /// Each token is one whole word (kniv v7), rather than a SentencePiece
+    /// subword to regroup (kniv v1).
+    pub word_tokens: bool,
+    /// The model's own dialogue-act vocabulary, parallel to
+    /// `SpeechAct::scores`, when it is not uniko's v1 label set (kniv v7).
+    /// `None` reads acts as v1 labels.
+    pub acts: Option<&'a [String]>,
+}
+
+/// kniv v7's dialogue acts and the v1 label each one stands in for.
+///
+/// v7 follows the ISO 24617-2 families; v1's labels split some of them
+/// finer. `Directive` (asking someone to act) is v1's `request`, and
+/// `Commissive` (committing oneself to act) is v1's `offer`, so both stay
+/// informative as before. `Feedback` (acknowledging or answering) maps to
+/// `confirm`. No v7 act maps to `status` or `reject`.
+pub const V7_ACTS: &[(&str, &str)] = &[
+    ("Inform", "inform"),
+    ("Question", "question"),
+    ("Directive", "request"),
+    ("Commissive", "offer"),
+    ("Feedback", "confirm"),
+    ("Social", "social"),
+];
+
+/// The v1 label a kniv v7 dialogue act stands in for.
+fn v1_act(v7: &str) -> Option<&'static str> {
+    V7_ACTS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(v7))
+        .map(|(_, v1)| *v1)
+}
+
 /// Convert one xervo sentence result into uniko's [`NlpResult`].
 ///
 /// `srl_enabled` mirrors `UnikoConfig.nlp_srl_enabled`; when `false`,
 /// `srl_frames` is left empty regardless of what xervo returned.
-pub fn xervo_to_uniko(x: &XervoNlp, labels: &LabelMaps, srl_enabled: bool) -> NlpResult {
-    let (words, tok2word) = reconstruct_words(x);
+pub fn xervo_to_uniko(
+    x: &XervoNlp,
+    labels: &LabelMaps,
+    srl_enabled: bool,
+    layout: Layout<'_>,
+) -> NlpResult {
+    let (words, tok2word) = if layout.word_tokens {
+        word_tokens(x)
+    } else {
+        reconstruct_words(x)
+    };
     let n = words.len();
 
     // First token index of each word (first-subword-wins, matching uniko).
@@ -133,20 +188,9 @@ pub fn xervo_to_uniko(x: &XervoNlp, labels: &LabelMaps, srl_enabled: bool) -> Nl
         Vec::new()
     };
 
-    // CLS: top speech act → class + index. xervo exposes only the top
-    // label + confidence (no full softmax), so `cls_probs` stays empty
-    // and the observation gate falls back to `sentence_class`.
-    let (cls_index, cls_confidence, sentence_class) = match x.speech_acts.first() {
-        Some(act) => (
-            labels
-                .cls_labels
-                .iter()
-                .position(|l| l.eq_ignore_ascii_case(&act.label))
-                .unwrap_or(0),
-            act.confidence,
-            SentenceClass::from_label(&act.label),
-        ),
-        None => (0, 0.0, SentenceClass::Statement),
+    let (cls_index, cls_confidence, cls_probs, sentence_class) = match layout.acts {
+        Some(acts) => project_acts(x, acts, labels),
+        None => v1_acts(x, labels),
     };
 
     NlpResult {
@@ -155,12 +199,79 @@ pub fn xervo_to_uniko(x: &XervoNlp, labels: &LabelMaps, srl_enabled: bool) -> Nl
         pos_indices,
         cls_index,
         cls_confidence,
-        cls_probs: Vec::new(),
+        cls_probs,
         entities,
         dep_arcs,
         sentence_class,
         srl_frames,
     }
+}
+
+/// CLS for a v1 model: the top speech act → class + index.
+///
+/// `cls_probs` stays empty, so the observation gate uses the top class and
+/// its confidence (see `observations::cls_gate_admits`).
+fn v1_acts(x: &XervoNlp, labels: &LabelMaps) -> (usize, f32, Vec<f32>, SentenceClass) {
+    match x.speech_acts.first() {
+        Some(act) => (
+            labels
+                .cls_labels
+                .iter()
+                .position(|l| l.eq_ignore_ascii_case(&act.label))
+                .unwrap_or(0),
+            act.confidence,
+            Vec::new(),
+            SentenceClass::from_label(&act.label),
+        ),
+        None => (0, 0.0, Vec::new(), SentenceClass::Statement),
+    }
+}
+
+/// CLS for a model with its own act vocabulary (kniv v7): its per-act
+/// scores, re-indexed onto the v1 labels through [`V7_ACTS`].
+///
+/// v7 scores each act with its own sigmoid, so a sentence can be both
+/// `Inform` and `Social`. Filling `cls_probs` lets the observation gate
+/// admit it on any informative act that clears its threshold, instead of
+/// on the top one alone. Where two acts would land on one v1 label the
+/// higher score wins.
+fn project_acts(
+    x: &XervoNlp,
+    acts: &[String],
+    labels: &LabelMaps,
+) -> (usize, f32, Vec<f32>, SentenceClass) {
+    let Some(act) = x.speech_acts.first() else {
+        return (0, 0.0, Vec::new(), SentenceClass::Statement);
+    };
+    let index_of = |v1: &str| labels.cls_labels.iter().position(|l| l == v1);
+    let mut probs = vec![0.0_f32; labels.cls_labels.len()];
+    for (name, &score) in acts.iter().zip(&act.scores) {
+        if let Some(i) = v1_act(name).and_then(index_of) {
+            probs[i] = probs[i].max(score);
+        }
+    }
+    // The top act by score; `act.label` can be "NONE" when no act clears
+    // the model's own threshold.
+    let top = act
+        .scores
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .and_then(|(i, _)| acts.get(i))
+        .map_or(act.label.as_str(), String::as_str);
+    let v1 = v1_act(top).unwrap_or("inform");
+    (
+        index_of(v1).unwrap_or(0),
+        act.confidence,
+        probs,
+        SentenceClass::from_label(v1),
+    )
+}
+
+/// Word units for a model whose tokens are already words (kniv v7).
+fn word_tokens(x: &XervoNlp) -> (Vec<String>, Vec<usize>) {
+    let words = x.tokens.iter().map(|t| t.text.clone()).collect();
+    (words, (0..x.tokens.len()).collect())
 }
 
 /// Reconstruct uniko word units from xervo tokens by SentencePiece

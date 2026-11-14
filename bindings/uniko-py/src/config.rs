@@ -2,7 +2,7 @@
 // Copyright 2024-2026 Dragonscale Industries Inc.
 
 //! Python <-> [`UnikoConfig`] conversion for `UnikoBuilder.config()`,
-//! `.embedding()`, `.reranker()` and `Uniko.config()`.
+//! `.embedding()`, `.reranker()`, `.nlp()` and `Uniko.config()`.
 //!
 //! Input is merged onto the serialized default rather than deserialized on
 //! its own, for two reasons. `UnikoConfig` is `#[serde(default)]` without
@@ -15,7 +15,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use serde_json::{Map, Value as Json};
-use uniko_api::tools::{EmbeddingConfig, RerankerConfig, UnikoConfig, UnikoError};
+use uniko_api::tools::{EmbeddingConfig, NlpConfig, RerankerConfig, UnikoConfig, UnikoError};
 
 use crate::convert::json_to_py;
 use crate::errors::to_pyerr;
@@ -257,6 +257,21 @@ pub fn embedding_from_py(obj: &Bound<'_, PyAny>) -> PyResult<EmbeddingConfig> {
     }
     let input = input_json(obj, "embedding")?;
     merged(&UnikoConfig::default().embedding, input, "embedding")
+}
+
+/// `UnikoBuilder.nlp(...)`: a preset name (`"v1"`, `"v7-small"`, ...), or a
+/// partial `nlp` section over the default.
+pub fn nlp_from_py(obj: &Bound<'_, PyAny>) -> PyResult<NlpConfig> {
+    if let Ok(name) = obj.extract::<String>() {
+        return NlpConfig::preset(&name).ok_or_else(|| {
+            config_error(format!(
+                "unknown NLP preset '{name}'; expected one of: {}",
+                NlpConfig::PRESETS.join(", ")
+            ))
+        });
+    }
+    let input = input_json(obj, "nlp")?;
+    merged(&UnikoConfig::default().nlp, input, "nlp")
 }
 
 /// `UnikoBuilder.reranker(...)`: a preset name, a partial reranker section

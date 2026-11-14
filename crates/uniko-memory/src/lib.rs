@@ -124,7 +124,9 @@ pub use summary::generate_session_summary;
 #[doc(inline)]
 pub use task::{CreateTaskParams, create_task};
 #[doc(no_inline)]
-pub use uniko_store::config::{EmbeddingConfig, RerankerConfig, UnikoConfig};
+pub use uniko_store::config::{
+    EmbeddingConfig, NlpConfig, NlpGeneration, RerankerConfig, UnikoConfig,
+};
 
 /// Sort `items` in descending order by the `f64` key returned by `score`.
 ///
