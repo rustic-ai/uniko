@@ -1,6 +1,6 @@
 //! Schema registration for the uniko cognitive memory system.
 //!
-//! Provides [`register_schema`] which registers all 25 node types, 54 edge
+//! Provides [`register_schema`] which registers all 26 node types, 55 edge
 //! types, and all indexes with the database.  The call is idempotent: running
 //! it multiple times on the same database has no visible effect beyond the
 //! first.
@@ -81,11 +81,16 @@ pub(crate) fn vector_index(config: &UnikoConfig) -> VectorIndexCfg {
     }
 }
 
-/// Build an `EmbeddingCfg` for `alias` over `source_property`.
-fn embedding_cfg(alias: &str, source_property: &str, config: &UnikoConfig) -> EmbeddingCfg {
+/// Build an `EmbeddingCfg` for `alias` over `source_properties`.
+///
+/// With several sources uni-db embeds the present ones joined by a space,
+/// in order, and skips a missing one — so `["context", "text"]` embeds a
+/// chunk's context header with its text, and a chunk with no header
+/// exactly as `["text"]` would.
+fn embedding_cfg(alias: &str, source_properties: &[&str], config: &UnikoConfig) -> EmbeddingCfg {
     EmbeddingCfg {
         alias: alias.to_string(),
-        source_properties: vec![source_property.to_string()],
+        source_properties: source_properties.iter().map(|p| (*p).to_string()).collect(),
         batch_size: config.embedding.batch_size,
         document_prefix: config.embedding.document_prefix.clone(),
         query_prefix: config.embedding.query_prefix.clone(),
@@ -97,8 +102,8 @@ fn embedding_cfg(alias: &str, source_property: &str, config: &UnikoConfig) -> Em
 /// The dense, sparse, and multi-vector indexes on Chunk/Observation must
 /// point at the SAME alias and source property for uni-db to fuse them into
 /// one single-pass `EmbedHybrid` inference; this builder keeps them identical.
-fn hybrid_embedding_cfg(source_property: &str, config: &UnikoConfig) -> EmbeddingCfg {
-    embedding_cfg(HYBRID_EMBED_ALIAS, source_property, config)
+fn hybrid_embedding_cfg(source_properties: &[&str], config: &UnikoConfig) -> EmbeddingCfg {
+    embedding_cfg(HYBRID_EMBED_ALIAS, source_properties, config)
 }
 
 /// Build a dense auto-embed vector index on the plain [`EMBED_ALIAS`].
@@ -106,13 +111,13 @@ fn hybrid_embedding_cfg(source_property: &str, config: &UnikoConfig) -> Embeddin
 /// For lone-dense auto-embed nodes (Message, Summary, …). uni-db computes
 /// and stores the embedding on create/update via the `Embed`-task model.
 pub(crate) fn auto_embed_vector_index(
-    source_property: &str,
+    source_properties: &[&str],
     config: &UnikoConfig,
 ) -> VectorIndexCfg {
     VectorIndexCfg {
         algorithm: config.vector_algorithm.to_uni_algo(),
         metric: config.vector_metric.to_uni_metric(),
-        embedding: Some(embedding_cfg(EMBED_ALIAS, source_property, config)),
+        embedding: Some(embedding_cfg(EMBED_ALIAS, source_properties, config)),
     }
 }
 
@@ -122,13 +127,13 @@ pub(crate) fn auto_embed_vector_index(
 /// the dense column joins the sparse + ColBERT columns in one `EmbedHybrid`
 /// group. Used by Chunk/Observation when the embedder is hybrid.
 pub(crate) fn auto_embed_hybrid_vector_index(
-    source_property: &str,
+    source_properties: &[&str],
     config: &UnikoConfig,
 ) -> VectorIndexCfg {
     VectorIndexCfg {
         algorithm: config.vector_algorithm.to_uni_algo(),
         metric: config.vector_metric.to_uni_metric(),
-        embedding: Some(hybrid_embedding_cfg(source_property, config)),
+        embedding: Some(hybrid_embedding_cfg(source_properties, config)),
     }
 }
 
@@ -144,12 +149,15 @@ pub(crate) fn auto_embed_hybrid_vector_index(
 /// Panics if [`crate::config::EmbeddingConfig::sparse_dimensions`] is
 /// `None`. Callers gate on it — the schema only adds the column for hybrid
 /// embedders, so reaching this with a dense-only config is a bug.
-pub(crate) fn auto_embed_sparse_index(source_property: &str, config: &UnikoConfig) -> IndexType {
+pub(crate) fn auto_embed_sparse_index(
+    source_properties: &[&str],
+    config: &UnikoConfig,
+) -> IndexType {
     let dimensions = config
         .embedding
         .sparse_dimensions
         .expect("auto_embed_sparse_index requires embedding.sparse_dimensions");
-    IndexType::sparse_with_embedding(dimensions, hybrid_embedding_cfg(source_property, config))
+    IndexType::sparse_with_embedding(dimensions, hybrid_embedding_cfg(source_properties, config))
 }
 
 /// Build an exact multi-vector (ColBERT) auto-embed index for MaxSim rerank.
@@ -159,13 +167,13 @@ pub(crate) fn auto_embed_sparse_index(source_property: &str, config: &UnikoConfi
 /// add build cost for no benefit. Shares the embed alias to join the hybrid
 /// group.
 pub(crate) fn auto_embed_multivector_index(
-    source_property: &str,
+    source_properties: &[&str],
     config: &UnikoConfig,
 ) -> VectorIndexCfg {
     VectorIndexCfg {
         algorithm: VectorAlgo::Flat,
         metric: config.vector_metric.to_uni_metric(),
-        embedding: Some(hybrid_embedding_cfg(source_property, config)),
+        embedding: Some(hybrid_embedding_cfg(source_properties, config)),
     }
 }
 

@@ -207,13 +207,14 @@ async fn record_action_overflows_large_output_to_artifact() {
         .expect("record_action");
     let artifact_node = result.overflow_artifact.expect("overflow artifact created");
 
-    // PRODUCED edge present and artifact has the full content.
+    // PRODUCED edge present; the artifact is a `tool_output` whose stored
+    // bytes are the full payload and whose chunks reassemble it.
     let session = kb.db().session();
     let rows = session
         .query_with(
-            "MATCH (a:Action)-[:PRODUCED]->(art:Artifact) \
+            "MATCH (a:Action)-[:PRODUCED]->(art:Artifact)-[:HAS_CONTENT]->(ac:ArtifactContent) \
              WHERE id(a) = $aid AND id(art) = $art \
-             RETURN art.content AS content, art.kind AS kind",
+             RETURN art.kind AS kind, ac.content_id AS cid",
         )
         .param("aid", result.action_node)
         .param("art", artifact_node)
@@ -222,13 +223,25 @@ async fn record_action_overflows_large_output_to_artifact() {
         .expect("query");
     let row = rows.rows().first().expect("PRODUCED edge");
     let kind: String = row.get("kind").expect("kind");
-    assert_eq!(kind, "action_output");
-    let content: String = row.get("content").expect("content");
-    assert!(
-        content.len() > 5_000,
-        "expected full payload, got len {}",
-        content.len()
+    assert_eq!(kind, "tool_output");
+    let cid: String = row.get("cid").expect("content id");
+    let bytes = kb.fetch_blob(&cid).await.expect("blob");
+    assert_eq!(
+        bytes,
+        big.as_bytes(),
+        "the artifact stores the payload verbatim"
     );
+    let chunks = session
+        .query_with(
+            "MATCH (art:Artifact)-[:HAS_CHUNK]->(c:Chunk) WHERE id(art) = $art \
+             RETURN count(c) AS n",
+        )
+        .param("art", artifact_node)
+        .fetch_all()
+        .await
+        .expect("query");
+    let n: i64 = chunks.rows().first().expect("count").get("n").expect("n");
+    assert!(n > 1, "the payload is chunked for recall, got {n} chunk(s)");
 
     // Action.output is a short stub, not the full payload.
     let rows = session

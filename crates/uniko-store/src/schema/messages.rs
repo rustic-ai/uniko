@@ -47,7 +47,7 @@ pub(crate) fn register_labels<'a>(
         .index("content", IndexType::FullText)
         .index(
             "embedding",
-            IndexType::Vector(super::auto_embed_vector_index("content", config)),
+            IndexType::Vector(super::auto_embed_vector_index(&["content"], config)),
         )
         .done()
 }

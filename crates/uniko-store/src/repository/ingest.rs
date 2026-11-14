@@ -2,6 +2,8 @@
 //! entity/participant fan-out for observation chunks. Backs
 //! `uniko_extract::ingest::session_chunk`.
 
+use uni_db::Value;
+
 use crate::error::Result;
 use crate::storage::KnowledgeBase;
 use crate::types::NodeId;
@@ -29,6 +31,35 @@ pub struct SessionChunkRow {
 }
 
 impl KnowledgeBase {
+    /// The latest Action in session `session_nid` other than `exclude`, by
+    /// `started_at`, read inside `tx` so it sees the caller's own writes.
+    ///
+    /// This is what a tool call chains `NEXT_ACTION` from when the caller
+    /// names no previous action.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on query
+    /// failure.
+    pub async fn latest_session_action_in_tx(
+        &self,
+        tx: &uni_db::Transaction,
+        session_nid: NodeId,
+        exclude: NodeId,
+    ) -> Result<Option<NodeId>> {
+        let rows = tx
+            .query_with(
+                "MATCH (a:Action)-[:IN_SESSION]->(s:Session) \
+                 WHERE id(s) = $sid AND id(a) <> $me \
+                 RETURN id(a) AS nid ORDER BY a.started_at DESC LIMIT 1",
+            )
+            .param("sid", Value::Int(session_nid))
+            .param("me", Value::Int(exclude))
+            .fetch_all()
+            .await?;
+        Ok(rows.rows().first().and_then(|r| r.get::<i64>("nid").ok()))
+    }
+
     /// The public, unforgotten messages in `session_id`, oldest first,
     /// with the sender's name.
     ///

@@ -62,6 +62,10 @@ pub struct IntentProfile {
     /// Phase 3 lands the field plumbing so Track B drops in without
     /// touching IntentProfile call sites.
     pub query_modalities: QueryModalities,
+    /// Exact strings the query names — quoted phrases, identifiers, figures,
+    /// paths, acronyms — kept verbatim (see [`extract_literals`]). Drives the
+    /// lexical chunk channel, which matches them whole.
+    pub literals: Vec<String>,
 }
 
 /// Modality of a query input, as opposed to the corpus's
@@ -269,7 +273,79 @@ pub async fn build_intent_at(
         expected_answer_type,
         temporal_window,
         query_modalities: QueryModalities::default(),
+        literals: extract_literals(query),
     })
+}
+
+/// Exact strings a query names, verbatim and in order of appearance.
+///
+/// A literal is a quoted phrase (`"…"`, `'…'` or `` `…` ``), or a token
+/// that is evidently not a word: it contains a digit (`ORD-48213`,
+/// `2026-07`, `3.14`), joins parts with `_ - . / : @ #` (`request_id`,
+/// `src/foo.rs`), changes case inside itself (`orderId`), or is an acronym
+/// of two or more capitals (`APAC`). Trailing sentence punctuation is
+/// dropped; duplicates are removed.
+#[must_use]
+pub fn extract_literals(query: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        let s = s.trim();
+        if !s.is_empty() && !out.iter().any(|x| x == s) {
+            out.push(s.to_string());
+        }
+    };
+    // Quoted phrases first, then the remaining text token by token.
+    let mut rest = String::with_capacity(query.len());
+    let mut chars = query.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let close = match c {
+            '"' | '`' => Some(c),
+            '\'' if i == 0 || query[..i].ends_with(char::is_whitespace) => Some(c),
+            '“' => Some('”'),
+            _ => None,
+        };
+        if let Some(close) = close
+            && let Some(len) = query[i + c.len_utf8()..].find(close)
+        {
+            let inner = &query[i + c.len_utf8()..i + c.len_utf8() + len];
+            push(inner);
+            // Skip past the closing quote.
+            let end = i + c.len_utf8() + len + close.len_utf8();
+            while chars.peek().is_some_and(|(j, _)| *j < end) {
+                chars.next();
+            }
+            rest.push(' ');
+            continue;
+        }
+        rest.push(c);
+    }
+    for raw in rest.split_whitespace() {
+        let token = raw.trim_matches(|c: char| {
+            matches!(
+                c,
+                '?' | ',' | '.' | '!' | ';' | ':' | '(' | ')' | '[' | ']' | '\'' | '"'
+            )
+        });
+        if token.is_empty() {
+            continue;
+        }
+        let has_digit = token.chars().any(|c| c.is_ascii_digit());
+        let joined = token
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .contains(['_', '-', '.', '/', ':', '@', '#']);
+        let inner_case = token
+            .chars()
+            .zip(token.chars().skip(1))
+            .any(|(a, b)| a.is_lowercase() && b.is_uppercase());
+        let acronym = token.chars().filter(char::is_ascii_alphabetic).count() >= 2
+            && token
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+        if has_digit || joined || inner_case || acronym {
+            push(token);
+        }
+    }
+    out
 }
 
 /// Bundle of derived facts about a question, used by variant builders.
@@ -637,5 +713,40 @@ mod tests {
             }],
         };
         assert!(build_declarative_text(&analysis).is_none());
+    }
+}
+
+#[cfg(test)]
+mod literal_tests {
+    use super::extract_literals;
+
+    #[test]
+    fn finds_identifiers_figures_paths_and_quotes() {
+        let q = "What error did request req-9f3a2b1c hit in src/pay.rs, and was \"card declined\" the cause for APAC in 2026-07?";
+        let lits = extract_literals(q);
+        for want in [
+            "card declined",
+            "req-9f3a2b1c",
+            "src/pay.rs",
+            "APAC",
+            "2026-07",
+        ] {
+            assert!(lits.iter().any(|l| l == want), "missing {want}: {lits:?}");
+        }
+        for word in ["What", "error", "request", "cause", "the", "I"] {
+            assert!(
+                !lits.iter().any(|l| l == word),
+                "word {word} is not a literal: {lits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_questions_have_no_literals() {
+        assert!(extract_literals("Where did Caroline go on holiday last summer?").is_empty());
+        assert_eq!(
+            extract_literals("status of orderId please"),
+            vec!["orderId".to_string()]
+        );
     }
 }

@@ -72,6 +72,12 @@ pymethods_with_sync! {
             PyData::wrap(self.inner.clone())
         }
 
+        /// Deterministic read tools: search, outline, read, tool calls.
+        #[getter]
+        fn sources(&self) -> crate::sources::PySources {
+            crate::sources::PySources::wrap(self.inner.clone())
+        }
+
         /// The agent's goal/task lifecycle surface.
         #[getter]
         fn goals(&self) -> PyGoals {

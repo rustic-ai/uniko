@@ -788,6 +788,11 @@ pub struct UnikoConfig {
     pub min_chunk_tokens: usize,
     /// Overlap tokens between adjacent chunks (0 = auto: 10% of max, capped at 50).
     pub chunk_overlap_tokens: usize,
+    /// Token budget for a structure-aware chunk's context header — the tool,
+    /// the chunk's address, and the values it inherits from enclosing
+    /// records. Embedded and indexed with the chunk; never part of its text.
+    #[serde(default = "default_chunk_context_max_tokens")]
+    pub chunk_context_max_tokens: usize,
 
     // NLP cascade
     /// Whether to compute SRL frames (one extra ONNX forward per VERB
@@ -824,6 +829,22 @@ pub struct UnikoConfig {
     pub recall_vector_weight: f64,
     /// BM25 fulltext weight in hybrid fusion \[0.0–1.0\].
     pub recall_bm25_weight: f64,
+    /// Search Facts in Phase 1 by their words as well as their embedding.
+    ///
+    /// When `true` (the default), Phase 1 fuses BM25 over `Fact.object`
+    /// with the Fact vector search, using `recall_vector_weight` /
+    /// `recall_bm25_weight`, so a Fact naming an exact identifier or figure
+    /// is found even when its embedding is not the nearest. On the
+    /// LongMemEval oracle split (100 questions) it raised R@5 from 0.847 to
+    /// 0.934.
+    #[serde(default = "default_true")]
+    pub recall_fact_hybrid: bool,
+    /// Add Phase 3's lexical channel over `Chunk.search_text`, which matches
+    /// identifiers and figures in the query whole (a request id, an order
+    /// number, `2026-07`). The query's literals, when it has any, count
+    /// double in fusion.
+    #[serde(default = "default_true")]
+    pub recall_lexical_enabled: bool,
     /// Add a learned-sparse retrieval channel for Chunk and Observation.
     ///
     /// When `true` (and the embedder is hybrid, i.e.
@@ -919,6 +940,14 @@ pub struct UnikoConfig {
     pub session_inactivity_secs: u64,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_chunk_context_max_tokens() -> usize {
+    64
+}
+
 impl Default for UnikoConfig {
     fn default() -> Self {
         Self {
@@ -946,11 +975,14 @@ impl Default for UnikoConfig {
             max_chunk_tokens: 256,
             min_chunk_tokens: 32,
             chunk_overlap_tokens: 0, // 0 = auto: 10% of max, capped at 50
+            chunk_context_max_tokens: default_chunk_context_max_tokens(),
             recall_limit: 15,
             recall_token_budget: 8192,
             recall_min_score: 0.001,
             recall_vector_weight: 0.5,
             recall_bm25_weight: 0.5,
+            recall_fact_hybrid: true,
+            recall_lexical_enabled: true,
             recall_sparse_enabled: false,
             nlp_srl_enabled: true,
             entity_strict_admission: true,

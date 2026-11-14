@@ -145,27 +145,6 @@ impl ExcludeSet {
 }
 
 impl KnowledgeBase {
-    /// Vector search over `label.embed_field`, projecting `content_field`.
-    ///
-    /// `label`/`embed_field`/`content_field` are trusted identifiers from
-    /// the caller's fixed target table; `qvec` and `limit` are bound.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on
-    /// query failure (the caller decides whether to skip the tier).
-    /// Resolve a [`ScopeFilter`] into the allow-set of in-scope node ids.
-    ///
-    /// Unions the node types that can anchor *every* active dimension:
-    /// Messages, Observations, and Episodes for session/time; Messages and
-    /// Observations for participant; Chunks for a session-only scope (via
-    /// their owning Session/Message). Types with no anchor for an active
-    /// dimension (Facts, Topics) are absent, so they fall out of recall.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on query
-    /// failure.
     /// Run read-only Cypher through the graph query engine, decoding each
     /// row into a column→[`Value`] map.
     ///
@@ -204,6 +183,17 @@ impl KnowledgeBase {
     }
 
     /// Resolve a [`ScopeFilter`] into the allow-set of in-scope node ids.
+    ///
+    /// Unions the node types that can anchor *every* active dimension:
+    /// Messages, Observations, and Episodes for session/time; Messages and
+    /// Observations for participant; Chunks for a session-only scope (via
+    /// their owning Session/Message). Types with no anchor for an active
+    /// dimension (Facts, Topics) are absent, so they fall out of recall.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on query
+    /// failure.
     pub async fn resolve_scope_allow_set(&self, f: &ScopeFilter) -> Result<Vec<NodeId>> {
         // An explicit empty list matches nothing — short-circuit before
         // building an `IN ()` predicate (which the SQL backend rejects).
@@ -428,6 +418,15 @@ impl KnowledgeBase {
             .collect())
     }
 
+    /// Vector search over `label.embed_field`, projecting `content_field`.
+    ///
+    /// `label`/`embed_field`/`content_field` are trusted identifiers from
+    /// the caller's fixed target table; `qvec` and `limit` are bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on
+    /// query failure (the caller decides whether to skip the tier).
     pub async fn recall_vector_search(
         &self,
         label: &str,
@@ -450,6 +449,57 @@ impl KnowledgeBase {
         let mut builder = session
             .query_with(&cypher)
             .param("qvec", Value::Vector(qvec.to_vec()))
+            .param("lim", limit);
+        if let Some(v) = allow_param(allow) {
+            builder = builder.param("allow", v);
+        }
+        let result = builder.fetch_all().await?;
+        Ok(decode_scored_rows(result.rows()))
+    }
+
+    /// Hybrid search over `label`: vector similarity on `embed_field` and
+    /// BM25 on `text_field`, fused by `similar_to`'s weighted method,
+    /// projecting `content_field`.
+    ///
+    /// Identifiers are trusted, from the caller's fixed target table;
+    /// vectors, text, weights and limit are bound or formatted as numbers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on
+    /// query failure (the caller decides whether to skip the tier).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one search, its fields and knobs"
+    )]
+    pub async fn recall_hybrid_search(
+        &self,
+        label: &str,
+        embed_field: &str,
+        text_field: &str,
+        content_field: &str,
+        qvec: &[f32],
+        qtxt: &str,
+        limit: i64,
+        vector_weight: f64,
+        bm25_weight: f64,
+        allow: Option<&[NodeId]>,
+    ) -> Result<Vec<ScoredRow>> {
+        let session = self.db.session();
+        let cypher = format!(
+            "MATCH (m:{label}) \
+             WHERE m.{embed_field} IS NOT NULL{allow_and} \
+             RETURN id(m) AS nid, labels(m)[0] AS lbl, \
+                    coalesce(m.{content_field}, '') AS content, \
+                    similar_to([m.{embed_field}, m.{text_field}], [$qvec, $qtxt], \
+                               {{method: 'weighted', weights: [{vector_weight}, {bm25_weight}]}}) AS score \
+             ORDER BY score DESC LIMIT $lim",
+            allow_and = allow_clause("m", allow),
+        );
+        let mut builder = session
+            .query_with(&cypher)
+            .param("qvec", Value::Vector(qvec.to_vec()))
+            .param("qtxt", qtxt)
             .param("lim", limit);
         if let Some(v) = allow_param(allow) {
             builder = builder.param("allow", v);
@@ -632,6 +682,41 @@ impl KnowledgeBase {
         let mut builder = session
             .query_with(&cypher)
             .param("qtxt", qtxt)
+            .param("lim", limit);
+        if let Some(v) = allow_param(allow) {
+            builder = builder.param("allow", v);
+        }
+        let result = builder.fetch_all().await?;
+        Ok(decode_scored_rows(result.rows()))
+    }
+
+    /// Lexical search over `Chunk.search_text`, the normalised form of a
+    /// chunk's context header and text. `lex` must be normalised the same
+    /// way (`uniko_extract::ingest::structure::normalize`), so identifiers
+    /// and figures match whole. Projects the chunk's verbatim `text`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on
+    /// query failure.
+    pub async fn recall_lexical_chunks(
+        &self,
+        lex: &str,
+        limit: i64,
+        allow: Option<&[NodeId]>,
+    ) -> Result<Vec<ScoredRow>> {
+        let session = self.db.session();
+        let cypher = format!(
+            "MATCH (m:Chunk) WHERE m.search_text IS NOT NULL{allow_and} \
+             RETURN id(m) AS nid, labels(m)[0] AS lbl, \
+                    coalesce(m.text, '') AS content, \
+                    similar_to(m.search_text, $lex) AS score \
+             ORDER BY score DESC LIMIT $lim",
+            allow_and = allow_clause("m", allow),
+        );
+        let mut builder = session
+            .query_with(&cypher)
+            .param("lex", lex)
             .param("lim", limit);
         if let Some(v) = allow_param(allow) {
             builder = builder.param("allow", v);
@@ -999,12 +1084,13 @@ impl KnowledgeBase {
     }
 
     /// Per-variant chunk hybrid (vector+BM25 over `session`/`observation`
-    /// chunks and Artifact-owned chunks) plus the entity-scoped fan-out,
-    /// max-merged per node id.
+    /// chunks, Artifact-owned chunks and Message-owned chunks) plus the
+    /// entity-scoped fan-out, max-merged per node id.
     ///
-    /// `session` and `observation` each receive `per_variant_limit` candidates;
-    /// the Artifact-owned arm receives twice that limit, preserving the former
-    /// combined `block` + `page` budget without enumerating Artifact types.
+    /// `session`, `observation` and the Message-owned arm each receive
+    /// `per_variant_limit` candidates; the Artifact-owned arm receives twice
+    /// that limit, preserving the former combined `block` + `page` budget
+    /// without enumerating Artifact types.
     ///
     /// Infallible by contract: individual sub-queries that fail are logged
     /// at debug and skipped (the cascade is best-effort). The structural
@@ -1080,31 +1166,39 @@ impl KnowledgeBase {
             }
         }
 
-        // The former block/page arms each had their own limit. Artifact
-        // ownership replaces both closed type checks, so retain their combined
-        // 2 × limit as one open-ended Artifact candidate budget.
-        let artifact_limit = per_variant_limit.saturating_mul(2);
-        let cypher = format!(
-            "MATCH (m:Chunk) \
-             WHERE (m)<-[:HAS_CHUNK]-(:Artifact){allow_and} \
-             RETURN id(m) AS nid, labels(m)[0] AS lbl, \
-                    m.text AS content, \
-                    similar_to({sources}, {queries}{fusion}) AS score \
-             ORDER BY score DESC LIMIT $lim"
-        );
-        let mut builder = session.query_with(&cypher).param("lim", artifact_limit);
-        if let Some(v) = allow_param(allow) {
-            builder = builder.param("allow", v);
-        }
-        if needs_qvec {
-            builder = builder.param("qvec", Value::Vector(qvec.to_vec()));
-        }
-        if needs_qtxt {
-            builder = builder.param("qtxt", qtxt);
-        }
-        match builder.fetch_all().await {
-            Ok(result) => merge_scored_rows(result.rows(), &mut scored),
-            Err(e) => tracing::debug!(error = %e, "Artifact hybrid similar_to failed"),
+        // Owner-scoped arms. Artifact-owned chunks keep the former combined
+        // `block` + `page` budget (2 × limit). Message-owned chunks — the
+        // pieces of a long turn, such as a tool result — get their own
+        // budget: without this arm they were reachable only through graph
+        // expansion, never by what they say.
+        for (owner, limit) in [
+            ("Artifact", per_variant_limit.saturating_mul(2)),
+            ("Message", per_variant_limit),
+        ] {
+            let cypher = format!(
+                "MATCH (m:Chunk) \
+                 WHERE (m)<-[:HAS_CHUNK]-(:{owner}){allow_and} \
+                 RETURN id(m) AS nid, labels(m)[0] AS lbl, \
+                        m.text AS content, \
+                        similar_to({sources}, {queries}{fusion}) AS score \
+                 ORDER BY score DESC LIMIT $lim"
+            );
+            let mut builder = session.query_with(&cypher).param("lim", limit);
+            if let Some(v) = allow_param(allow) {
+                builder = builder.param("allow", v);
+            }
+            if needs_qvec {
+                builder = builder.param("qvec", Value::Vector(qvec.to_vec()));
+            }
+            if needs_qtxt {
+                builder = builder.param("qtxt", qtxt);
+            }
+            match builder.fetch_all().await {
+                Ok(result) => merge_scored_rows(result.rows(), &mut scored),
+                Err(e) => {
+                    tracing::debug!(owner, error = %e, "owner-scoped hybrid similar_to failed")
+                }
+            }
         }
         let chunk_ms = t_start.elapsed().as_millis() as u64;
 
@@ -1192,12 +1286,12 @@ impl KnowledgeBase {
                 }
             }
         }
-        eprintln!(
-            "RECALL_PROF chunk_and_entity_scoped entities={} chunk_search_ms={} entity_scoped_ms={} total_ms={}",
-            entity_refs.len(),
-            chunk_ms,
-            (t_start.elapsed().as_millis() as u64).saturating_sub(chunk_ms),
-            t_start.elapsed().as_millis() as u64
+        tracing::debug!(
+            entities = entity_refs.len(),
+            chunk_search_ms = chunk_ms,
+            entity_scoped_ms = (t_start.elapsed().as_millis() as u64).saturating_sub(chunk_ms),
+            total_ms = t_start.elapsed().as_millis() as u64,
+            "recall chunk and entity-scoped search"
         );
 
         scored

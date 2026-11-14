@@ -31,6 +31,8 @@ mod macros;
 mod outputs;
 mod scope;
 mod session;
+mod sources;
+mod tool;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -147,6 +149,8 @@ fn _uniko(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<agent::PyAgent>()?;
     m.add_class::<session::PySession>()?;
     m.add_class::<session::PyTurn>()?;
+    m.add_class::<tool::PyToolCall>()?;
+    sources::register(m)?;
     m.add_class::<data::PyData>()?;
     m.add_class::<goals::PyGoals>()?;
     m.add_class::<ingest::PyIngestSource>()?;

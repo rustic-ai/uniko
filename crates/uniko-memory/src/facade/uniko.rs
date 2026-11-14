@@ -234,6 +234,18 @@ impl Uniko {
         self.streaming.as_ref().map(|pipeline| pipeline.health())
     }
 
+    /// Fill `Chunk.search_text` for chunks written before it existed, so
+    /// the lexical recall channel and [`Sources::search`](crate::Sources::search)
+    /// see them. Run it once after opening a store from an earlier release;
+    /// idempotent, and returns how many chunks it filled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a read or write failure.
+    pub async fn backfill_search_text(&self) -> Result<usize, UnikoError> {
+        uniko_extract::ingest::structure::backfill_chunk_search_text(&self.kb, 0).await
+    }
+
     /// Erase the entire graph. Intended for dev/test reset.
     ///
     /// # Errors

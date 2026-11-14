@@ -32,7 +32,7 @@ fn test_label_count() {
 #[test]
 fn test_edge_count() {
     // Completeness tripwire: bump when an edge is added to `edges::ALL`
-    // (the array is the source of truth). Currently 54 edge types — grown
+    // (the array is the source of truth). Currently 55 edge types — grown
     // from the earlier 48 via REINFORCED, ATTACHED_TO, CONTRADICTED_BY, and
     // later additions, and FROM_SOURCE for typed record provenance.
     assert_eq!(edges::ALL.len(), 55, "expected 55 edge types");

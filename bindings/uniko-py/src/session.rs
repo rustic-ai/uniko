@@ -23,7 +23,7 @@ use crate::ingest::PyIngestSource;
 use crate::macros::{bridge, bridge_sync, pymethods_with_sync};
 use crate::outputs::{
     PyActionResult, PyDeletionReport, PyFinalizeReport, PyIngestOutcome, PyObserveResult,
-    PySummarizeReport, PyUnitResult,
+    PySummarizeReport, PyToolCallResult, PyUnitResult,
 };
 
 /// One conversation turn to feed into a [`PySession`].
@@ -142,6 +142,16 @@ impl PyTurn {
         Ok(slf)
     }
 
+    /// Record a tool call this turn made; it commits with the turn.
+    fn tool_call<'py>(
+        slf: PyRef<'py, Self>,
+        call: &crate::tool::PyToolCall,
+    ) -> PyResult<PyRef<'py, Self>> {
+        let call = call.snapshot()?;
+        slf.map(|t| t.tool_call(call));
+        Ok(slf)
+    }
+
     /// Attach several documents/files at once.
     fn attachments<'py>(
         slf: PyRef<'py, Self>,
@@ -216,7 +226,7 @@ pymethods_with_sync! {
             bridge!(py, session = self.inner.clone(), {
                 let guard = session.lock().await;
                 if let Err(e) = guard.finalize().await {
-                    eprintln!("uniko: session __aexit__ finalize failed: {e}");
+                    warn_finalize_failed("__aexit__", &e);
                 }
                 // Never suppress an in-flight exception.
                 Ok(false)
@@ -239,7 +249,7 @@ pymethods_with_sync! {
             bridge_sync!(py, session = self.inner.clone(), {
                 let guard = session.lock().await;
                 if let Err(e) = guard.finalize().await {
-                    eprintln!("uniko: session __exit__ finalize failed: {e}");
+                    warn_finalize_failed("__exit__", &e);
                 }
                 Ok(false)
             })
@@ -388,6 +398,20 @@ pymethods_with_sync! {
             }
         }
 
+        /// Record a tool call on its own, apart from any turn.
+        fn observe_tool / observe_tool_sync(&self, py, call: PyRef<'_, crate::tool::PyToolCall>) -> Py<PyToolCallResult> {
+            prepare {
+                let call = call.snapshot()?;
+
+            }
+            run(session = self.inner.clone()) {
+                let guard = session.lock().await;
+                let result = guard.observe_tool(call).await.map_err(to_pyerr)?;
+                Python::attach(|py| PyToolCallResult::from_rust(py, &result))
+
+            }
+        }
+
         /// Record an action this session's agent took, linked to this session
         /// unless `session_id` names another.
         #[pyo3(signature = (action_type, *, action_id=None, input=None, output=None, status=None, started_at=None, ended_at=None, error=None, triggered_by_message_id=None, session_id=None, previous_action_id=None))]
@@ -454,4 +478,19 @@ pymethods_with_sync! {
         }
 
     }
+}
+
+/// Surface a finalize failure on context-manager exit as a Python
+/// `RuntimeWarning`: exit must not raise over an in-flight exception, and a
+/// warning reaches Python users where a write to stderr from the extension
+/// would not be filterable or capturable.
+fn warn_finalize_failed(which: &str, e: &impl std::fmt::Display) {
+    Python::attach(|py| {
+        let msg = std::ffi::CString::new(format!("uniko: session {which} finalize failed: {e}"))
+            .unwrap_or_default();
+        let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
+        // A warning filter set to "error" makes this raise; exit still
+        // returns normally, so the failure stays a warning.
+        let _ = PyErr::warn(py, &category, &msg, 1);
+    });
 }

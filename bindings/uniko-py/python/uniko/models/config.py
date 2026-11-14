@@ -141,6 +141,7 @@ class UnikoConfigModel(BaseModel):
     max_chunk_tokens: int = 256
     min_chunk_tokens: int = 32
     chunk_overlap_tokens: int = 0
+    chunk_context_max_tokens: int = 64
 
     # Extraction.
     nlp_srl_enabled: bool = True
@@ -153,6 +154,8 @@ class UnikoConfigModel(BaseModel):
     recall_min_score: float = 0.001
     recall_vector_weight: float = 0.5
     recall_bm25_weight: float = 0.5
+    recall_fact_hybrid: bool = True
+    recall_lexical_enabled: bool = True
     recall_sparse_enabled: bool = False
     query_variants: list[str] = Field(default_factory=list)
     rrf_k: float = 60.0

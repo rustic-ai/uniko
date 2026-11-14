@@ -5,6 +5,22 @@ use uni_db::{DataType, IndexType, ScalarType, SchemaBuilder};
 use super::constants::{edges, labels};
 use crate::config::UnikoConfig;
 
+/// What a chunk's embedding is computed from, in order.
+const EMBED_SOURCES: &[&str] = &["context", "text"];
+
+/// Analyzer for `Chunk.search_text`: whitespace tokens, lower-cased and
+/// ASCII-folded, nothing stemmed or dropped, long tokens kept.
+fn search_text_analyzer() -> uni_db::common::core::schema::AnalyzerConfig {
+    use uni_db::common::core::schema::{AnalyzerConfig, BaseTokenizer};
+    AnalyzerConfig {
+        base: BaseTokenizer::Whitespace,
+        stem: false,
+        remove_stop_words: false,
+        max_token_length: Some(128),
+        ..AnalyzerConfig::default()
+    }
+}
+
 pub(crate) fn register_labels<'a>(
     builder: SchemaBuilder<'a>,
     config: &UnikoConfig,
@@ -33,6 +49,14 @@ pub(crate) fn register_labels<'a>(
         .property_nullable("symbol_name", DataType::String)
         .property_nullable("speaker", DataType::String)
         .property_nullable("heading", DataType::String)
+        // Structure-aware chunks (tool output): the header of values the
+        // slice inherits from outside itself, and where the slice sits
+        // (`/data/items[3-9]`, `rows 10-19`). Embedded with `text`.
+        .property_nullable("context", DataType::String)
+        .property_nullable("address", DataType::String)
+        // `context` + `text` normalised for exact lexical matching of
+        // identifiers and figures; see `search_text_analyzer`.
+        .property_nullable("search_text", DataType::String)
         .property_nullable("mime_type", DataType::String)
         // Modality + positioning. `modality` is nullable for migration —
         // existing rows are backfilled to `"text"` by the migration; new
@@ -85,18 +109,31 @@ pub(crate) fn register_labels<'a>(
             DataType::List(Box::new(DataType::Vector { dimensions: mv_dim })),
         );
     }
+    // A chunk is embedded from its context header and its text: a tool
+    // output's record carries what it inherits (tool, address, enclosing
+    // values) into its vector, and a chunk with no header embeds its text
+    // alone, as before.
+    //
     // When hybrid, the dense `embedding` joins the sparse + ColBERT columns
     // on the EmbedHybrid alias (one pass); otherwise it stays on the plain
     // dense alias.
     let dense_idx = if config.embedding.sparse_dimensions.is_some()
         || config.embedding.multivector_dimensions.is_some()
     {
-        super::auto_embed_hybrid_vector_index("text", config)
+        super::auto_embed_hybrid_vector_index(EMBED_SOURCES, config)
     } else {
-        super::auto_embed_vector_index("text", config)
+        super::auto_embed_vector_index(EMBED_SOURCES, config)
     };
     b = b
         .index("text", IndexType::FullText)
+        // Normalised search text (`uniko_extract::ingest::structure::
+        // normalize`): already split into whole tokens, so the analyzer
+        // only lower-cases and folds — no stemming or stop words, which
+        // would mangle identifiers and figures.
+        .index(
+            "search_text",
+            IndexType::FullTextWithAnalyzer(search_text_analyzer()),
+        )
         .index("chunk_type", IndexType::Scalar(ScalarType::Hash))
         .index("language", IndexType::Scalar(ScalarType::Hash))
         .index("symbol_name", IndexType::Scalar(ScalarType::Hash))
@@ -106,13 +143,13 @@ pub(crate) fn register_labels<'a>(
     if config.embedding.sparse_dimensions.is_some() {
         b = b.index(
             "sparse_embedding",
-            super::auto_embed_sparse_index("text", config),
+            super::auto_embed_sparse_index(EMBED_SOURCES, config),
         );
     }
     if config.embedding.multivector_dimensions.is_some() {
         b = b.index(
             "colbert_embedding",
-            IndexType::Vector(super::auto_embed_multivector_index("text", config)),
+            IndexType::Vector(super::auto_embed_multivector_index(EMBED_SOURCES, config)),
         );
     }
     b.done()

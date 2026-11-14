@@ -36,6 +36,10 @@ pub struct UnitTurn {
     /// transaction and linked `Artifact -ATTACHED_TO-> Message` for this
     /// turn.
     pub attachments: Vec<PreparedSource>,
+    /// Tool calls this turn made, already prepared. Written inside the
+    /// unit's transaction, each Action linked `TRIGGERED_BY` this turn's
+    /// message and `PERFORMED_BY` its sender.
+    pub tools: Vec<super::tool::PreparedToolCall>,
 }
 
 /// What one [`ingest_turns_atomic`] call wrote.
@@ -46,6 +50,8 @@ pub struct UnitIngestResult {
     pub turns: Vec<AtomicIngestResult>,
     /// Attachment outcomes, grouped per turn and parallel to `turns`.
     pub attachments: Vec<Vec<IngestOutcome>>,
+    /// Tool-call outcomes, grouped per turn and parallel to `turns`.
+    pub tool_calls: Vec<Vec<super::tool::ToolCallOutcome>>,
     /// True when every `message_id` was already present with identical
     /// content: nothing was written and no transaction was opened.
     pub was_replay: bool,
@@ -74,6 +80,12 @@ const FAIL_AFTER_TURN_ENV: &str = "UNIKO_TEST_FAIL_AFTER_TURN";
 /// different guarantees, and only the second one depends on durability.
 #[doc(hidden)]
 const ABORT_AFTER_TURN_ENV: &str = "UNIKO_TEST_ABORT_AFTER_TURN";
+
+/// Fault-injection hook: fail the unit inside the transaction after every
+/// turn's tool calls are written, so a test can prove an Action and its
+/// result artifact roll back with the turn that made them.
+#[doc(hidden)]
+const FAIL_AFTER_TOOLS_ENV: &str = "UNIKO_TEST_FAIL_AFTER_TOOLS";
 
 /// Atomic multi-turn ingest.
 ///
@@ -181,6 +193,7 @@ pub async fn ingest_turns_atomic(
         return Ok(UnitIngestResult {
             turns,
             attachments: unit.iter().map(|_| Vec::new()).collect(),
+            tool_calls: unit.iter().map(|_| Vec::new()).collect(),
             was_replay: true,
             attempts: 0,
         });
@@ -247,8 +260,16 @@ pub async fn ingest_turns_atomic(
     // `KnowledgeBase::lock_ingest_unit`.
     let content_ids: Vec<String> = unit
         .iter()
-        .flat_map(|t| t.attachments.iter())
-        .flat_map(PreparedSource::content_ids)
+        .flat_map(|t| {
+            t.attachments
+                .iter()
+                .flat_map(PreparedSource::content_ids)
+                .chain(
+                    t.tools
+                        .iter()
+                        .flat_map(super::tool::PreparedToolCall::content_ids),
+                )
+        })
         .collect();
     let _guards = kb
         .lock_ingest_unit(&unit_prep.merged.entity_ids, &content_ids)
@@ -269,7 +290,7 @@ pub async fn ingest_turns_atomic(
 
     let (
         turn_results,
-        attachment_outcomes,
+        (attachment_outcomes, tool_outcomes),
         final_prev_nid,
         final_prev_ts,
         final_sentence_ctx,
@@ -388,9 +409,43 @@ pub async fn ingest_turns_atomic(
                 };
                 let mut per_turn = Vec::with_capacity(turn.attachments.len());
                 for prepared in &turn.attachments {
-                    per_turn.push(prepared.apply_in_tx(kb, &tx, ctx, &mut seen).await?);
+                    let outcome = prepared.apply_in_tx(kb, &tx, ctx, &mut seen).await?;
+                    // A scoped turn's attachment is no wider-read than the
+                    // turn. Only a newly created artifact is scoped: a
+                    // deduplicated one keeps its first ingest's audience.
+                    if let Some(vis) = turn.message.visibility.as_deref()
+                        && let Some(artifact_nid) = outcome.newly_created_artifact()
+                    {
+                        kb.set_owned_chunks_visibility_in_tx(&tx, artifact_nid, vis)
+                            .await?;
+                    }
+                    per_turn.push(outcome);
                 }
                 attachment_outcomes.push(per_turn);
+            }
+
+            // (f) Tool calls, per turn, after the turn's attachments.
+            let mut tool_outcomes: Vec<Vec<super::tool::ToolCallOutcome>> =
+                Vec::with_capacity(unit.len());
+            for (i, turn) in unit.iter().enumerate() {
+                if turn.tools.is_empty() {
+                    tool_outcomes.push(Vec::new());
+                    continue;
+                }
+                let ctx = super::tool::ToolWriteCtx {
+                    session_nid: Some(session_nid),
+                    performer_nid: sender_nids[&turn.message.sender_id],
+                    triggered_by_nid: Some(message_nids[i]),
+                };
+                tool_outcomes.push(
+                    super::tool::write_tool_calls_in_tx(kb, &tx, &turn.tools, ctx, &mut seen)
+                        .await?,
+                );
+            }
+            if std::env::var_os(FAIL_AFTER_TOOLS_ENV).is_some() {
+                return Err(UnikoError::Internal(format!(
+                    "{FAIL_AFTER_TOOLS_ENV}: injected failure after the unit's tool calls"
+                )));
             }
 
             Ok((
@@ -398,7 +453,7 @@ pub async fn ingest_turns_atomic(
                 message_nids,
                 entities_per_turn,
                 obs_per_turn,
-                attachment_outcomes,
+                (attachment_outcomes, tool_outcomes),
                 sentence_ctx,
                 prev_nid,
                 prev_ts,
@@ -412,7 +467,7 @@ pub async fn ingest_turns_atomic(
                 message_nids,
                 entities_per_turn,
                 obs_per_turn,
-                attachment_outcomes,
+                (attachment_outcomes, tool_outcomes),
                 sentence_ctx,
                 prev_nid,
                 prev_ts,
@@ -445,7 +500,7 @@ pub async fn ingest_turns_atomic(
                             .collect();
                         break (
                             results,
-                            attachment_outcomes,
+                            (attachment_outcomes, tool_outcomes),
                             prev_nid,
                             prev_ts,
                             sentence_ctx,
@@ -500,9 +555,14 @@ pub async fn ingest_turns_atomic(
         }
     }
 
+    for (turn, outcomes) in unit.iter().zip(tool_outcomes.iter()) {
+        super::tool::finish_tool_calls_post_commit(kb, &turn.tools, outcomes).await;
+    }
+
     Ok(UnitIngestResult {
         turns,
         attachments: attachment_outcomes,
+        tool_calls: tool_outcomes,
         was_replay: false,
         attempts,
     })

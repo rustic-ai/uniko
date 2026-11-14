@@ -30,8 +30,10 @@
 mod data;
 mod goals;
 mod session;
+mod sources;
 #[cfg(test)]
 mod tests;
+mod tool;
 mod uniko;
 
 pub use data::{ArtifactView, Data, MessageView};
@@ -41,6 +43,11 @@ pub use session::{
 };
 // Shared by `Agent::finalize_session`; the module itself stays private.
 pub(crate) use session::finalize_session;
+pub use sources::{
+    Outline, OutlineEntry, ReadRange, ReadResult, SearchHit, SearchOptions, SourceRef, Sources,
+    ToolCallView,
+};
+pub use tool::{ToolCall, ToolCallResult, ToolOutput};
 pub use uniko::{LlmSpec, Uniko, UnikoBuilder};
 
 use crate::policy::Viewer;

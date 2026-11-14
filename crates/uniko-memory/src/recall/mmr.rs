@@ -126,6 +126,9 @@ mod tests {
             category: None,
             source_id: None,
             revision_id: None,
+            token_count: 0,
+            context: None,
+            address: None,
         }
     }
 

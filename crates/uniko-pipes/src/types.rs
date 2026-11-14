@@ -185,6 +185,10 @@ pub struct IngestSource {
     /// changed bytes is rejected.
     #[serde(default)]
     pub revision_id: Option<String>,
+    /// Artifact kind recorded on the `:Artifact` (`"document"` when unset).
+    /// A tool call's result is ingested with kind `"tool_output"`.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 impl IngestSource {
@@ -214,6 +218,7 @@ impl IngestSource {
             category: None,
             source_id: None,
             revision_id: None,
+            kind: None,
         }
     }
 
@@ -227,7 +232,15 @@ impl IngestSource {
             category: None,
             source_id: None,
             revision_id: None,
+            kind: None,
         }
+    }
+
+    /// Set the artifact kind (`"document"` when unset).
+    #[must_use]
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = Some(kind.into());
+        self
     }
 
     /// Set an explicit MIME, skipping sniffing.

@@ -379,6 +379,62 @@ impl KnowledgeBase {
         tx.commit().await?;
         Ok(updated as usize)
     }
+
+    /// Up to `limit` chunks that have no `search_text` yet, as
+    /// `(node id, text, context)`. Paired with
+    /// [`set_chunk_search_text`](Self::set_chunk_search_text) by the
+    /// `search_text` backfill, which owns the normalisation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`] on database failure.
+    pub async fn chunks_missing_search_text(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(NodeId, String, Option<String>)>> {
+        let rows = self
+            .db
+            .session()
+            .query_with(
+                "MATCH (c:Chunk) WHERE c.search_text IS NULL \
+                 RETURN id(c) AS nid, c.text AS text, c.context AS ctx LIMIT $lim",
+            )
+            .param("lim", Value::Int(i64::try_from(limit).unwrap_or(i64::MAX)))
+            .fetch_all()
+            .await?;
+        Ok(rows
+            .rows()
+            .iter()
+            .filter_map(|r| {
+                let nid: i64 = r.get("nid").ok()?;
+                let text: String = r.get("text").unwrap_or_default();
+                let ctx: Option<String> = r.get("ctx").ok();
+                Some((nid, text, ctx))
+            })
+            .collect())
+    }
+
+    /// Write `search_text` for each `(node id, text)` in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`] on database failure.
+    pub async fn set_chunk_search_text(&self, updates: &[(NodeId, String)]) -> Result<usize> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        let session = self.db.session();
+        let tx = session.tx().await?;
+        for (nid, text) in updates {
+            tx.query_with("MATCH (c:Chunk) WHERE id(c) = $nid SET c.search_text = $t")
+                .param("nid", Value::Int(*nid))
+                .param("t", Value::String(text.clone()))
+                .fetch_all()
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(updates.len())
+    }
 }
 
 /// Average a slice of equal-length f32 vectors. Returns `None` for

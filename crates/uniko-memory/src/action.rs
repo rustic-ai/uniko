@@ -8,29 +8,37 @@
 //!
 //! When the output exceeds the configured token threshold
 //! ([`UnikoConfig::action_output_artifact_threshold`], default 256
-//! tokens — F20), the full payload overflows into an Artifact node
-//! linked by `PRODUCED`, and the Action stores a short stub instead.
-//! This keeps the hot path's payload small while preserving searchable
-//! content in the Artifact node's full-text and embedding indexes.
+//! tokens — F20), the full payload is stored verbatim as an Artifact of
+//! kind `tool_output` through the normal artifact path — content stored
+//! once, chunked, searchable by recall — linked by `PRODUCED`, and the
+//! Action keeps a short stub instead. The Action and that Artifact commit
+//! in one transaction. For a tool call whose result should always be
+//! searchable, prefer [`ToolCall`](crate::ToolCall).
+//!
+//! [`UnikoConfig::action_output_artifact_threshold`]:
+//!     uniko_store::config::UnikoConfig::action_output_artifact_threshold
 
+#[cfg(feature = "onnx")]
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 
-use uniko_extract::embedding::embed_document;
 use uniko_extract::ingest::count_tokens;
+use uniko_extract::ingest::modality::ModalityRegistry;
+use uniko_extract::ingest::source::{IngestContext, prepare_source};
+use uniko_extract::ingest::tool::{PreparedToolCall, ingest_tool_calls};
 #[cfg(feature = "onnx")]
 use uniko_extract::nlp::NlpPipeline;
 #[cfg(feature = "onnx")]
 use uniko_extract::nlp::types::NerEntityType;
+use uniko_pipes::IngestSource;
+#[cfg(feature = "onnx")]
 use uniko_store::Value;
 use uniko_store::id::new_id;
+#[cfg(feature = "onnx")]
 use uniko_store::schema::{edges, labels};
-use uniko_store::types::datetime_value;
 use uniko_store::{KnowledgeBase, NodeId, UnikoError};
-
-use crate::value_convert::json_to_value;
 
 /// Inputs for [`record_action`].
 ///
@@ -89,159 +97,97 @@ pub struct RecordActionResult {
 /// Participant.  Optional wiring (when the params provide identifiers
 /// that resolve to existing nodes): `TRIGGERED_BY` to the Message,
 /// `IN_SESSION` to the Session, `NEXT_ACTION` from the previous
-/// Action, `PRODUCED` to an overflow Artifact.  Each optional edge is
+/// Action, `PRODUCED` to the output Artifact.  Each optional edge is
 /// best-effort — when a referenced node is missing, the edge is
-/// skipped with a tracing debug rather than failing the call (so
-/// callers don't need to pre-check existence under churn).
+/// skipped rather than failing the call (so callers don't need to
+/// pre-check existence under churn).  Everything is written in one
+/// transaction.
+///
+/// Recording an `action_id` again with the same output is a no-op that
+/// returns the existing Action; with a different output it is refused.
 ///
 /// The Participant identified by `agent_id` must exist — callers
 /// typically create it once at agent bootstrap (same contract as
-/// [`crate::record_episode`]).
+/// [`crate::record_episode`]).  The Action's embedding is written after
+/// the commit, best-effort.
 ///
 /// # Errors
 ///
 /// - [`UnikoError::Storage`] when the agent is missing or graph
 ///   operations fail.
-/// - [`UnikoError::Embedding`] when the action embedding fails.  The
-///   Action node is still created so it can be back-filled later, but
-///   the error surfaces to the caller.
+/// - [`UnikoError::IdConflict`] when `action_id` was already recorded with
+///   a different output.
 pub async fn record_action(
     kb: &KnowledgeBase,
     agent_id: &str,
     params: RecordActionParams,
 ) -> Result<RecordActionResult, UnikoError> {
-    // Resolve the agent up-front.
-    let participant_node = kb
-        .get_node_by_ext_id(labels::PARTICIPANT, "participant_id", agent_id)
-        .await?
-        .ok_or_else(|| {
-            UnikoError::Storage(format!(
-                "record_action: Participant '{agent_id}' not found — create it before recording"
-            ))
-        })?;
-    let participant_id = participant_node.0;
-
-    let action_id = params.action_id.unwrap_or_else(new_id);
+    let action_id = params.action_id.clone().unwrap_or_else(new_id);
     let started_at = params.started_at.unwrap_or_else(Utc::now);
     let ended_at = params.ended_at.unwrap_or(started_at);
-    let duration_ms = ended_at
-        .signed_duration_since(started_at)
-        .num_milliseconds()
-        .max(0);
 
     // ── Output overflow handling (F20) ──
     let threshold = kb.config().action_output_artifact_threshold;
-    let (action_output_value, overflow_text) = split_overflow(params.output.as_ref(), threshold);
+    let (inline_output, overflow) = split_overflow(params.output.as_ref(), threshold);
+    let output_bytes = params.output.as_ref().map(output_text);
+    let payload_hash = output_bytes
+        .as_deref()
+        .map(|t| uniko_extract::ingest::tool::payload_hash(t.as_bytes()));
+    let payload = match overflow {
+        Some((text, structured)) => {
+            let mut source = IngestSource::text(text)
+                .with_id(format!("{action_id}:output"))
+                .with_kind(uniko_extract::ingest::tool::TOOL_OUTPUT_KIND);
+            if structured && let Ok(m) = uniko_pipes::content::Mime::parse("application/json") {
+                source = source.with_mime(m);
+            }
+            source.metadata.insert(
+                "tool_name".into(),
+                JsonValue::String(params.action_type.clone()),
+            );
+            if let Some(input) = &params.input {
+                source
+                    .metadata
+                    .insert("tool_arguments".into(), input.clone());
+            }
+            let context = IngestContext {
+                session_id: params.session_id.clone(),
+                triggered_by_message_id: None,
+            };
+            Some(prepare_source(kb, &ModalityRegistry::default(), source, &context).await?)
+        }
+        None => None,
+    };
 
-    let mut props: HashMap<String, Value> = HashMap::new();
-    props.insert("action_id".into(), Value::String(action_id.clone()));
-    props.insert(
-        "action_type".into(),
-        Value::String(params.action_type.clone()),
-    );
-    if let Some(input) = params.input.as_ref() {
-        props.insert("input".into(), json_to_value(input));
-    }
-    if let Some(out) = action_output_value {
-        props.insert("output".into(), out);
-    }
-    if let Some(status) = params.status.as_deref() {
-        props.insert("status".into(), Value::String(status.to_string()));
-    }
-    if let Some(err) = params.error.as_deref() {
-        props.insert("error".into(), Value::String(err.to_string()));
-    }
-    props.insert("started_at".into(), datetime_value(started_at));
-    props.insert("ended_at".into(), datetime_value(ended_at));
-    props.insert("duration_ms".into(), Value::Int(duration_ms));
-
-    let action_node = kb
-        .merge_node(labels::ACTION, "action_id", &action_id, &props)
-        .await?;
-
-    // ── Mandatory PERFORMED_BY edge ──
-    kb.create_edge(
-        edges::PERFORMED_BY,
-        action_node,
-        participant_id,
-        &HashMap::new(),
+    let prepared = PreparedToolCall {
+        action_id,
+        action_type: params.action_type.clone(),
+        tool_name: None,
+        input: params.input.clone(),
+        inline_output,
+        output_preview: output_bytes.map(|t| t.chars().take(400).collect()),
+        status: params.status.clone(),
+        error: params.error.clone(),
+        started_at,
+        ended_at,
+        payload,
+        payload_hash,
+        triggered_by_message_id: params.triggered_by_message_id.clone(),
+        previous_action_id: params.previous_action_id.clone(),
+        chain_in_session: false,
+        visibility: None,
+    };
+    let outcomes = ingest_tool_calls(
+        kb,
+        std::slice::from_ref(&prepared),
+        params.session_id.as_deref(),
+        false,
+        agent_id,
     )
     .await?;
-
-    // ── Optional TRIGGERED_BY (Action → Message) ──
-    if let Some(msg_id) = params.triggered_by_message_id.as_deref() {
-        match kb
-            .get_node_by_ext_id(labels::MESSAGE, "message_id", msg_id)
-            .await?
-        {
-            Some(msg) => {
-                kb.create_edge(edges::TRIGGERED_BY, action_node, msg.0, &HashMap::new())
-                    .await?;
-            }
-            None => {
-                tracing::debug!(
-                    msg_id,
-                    "record_action: triggered_by Message not found — TRIGGERED_BY skipped"
-                );
-            }
-        }
-    }
-
-    // ── Optional IN_SESSION (Action → Session) ──
-    if let Some(sid) = params.session_id.as_deref() {
-        match kb
-            .get_node_by_ext_id(labels::SESSION, "session_id", sid)
-            .await?
-        {
-            Some(sess) => {
-                kb.create_edge(edges::IN_SESSION, action_node, sess.0, &HashMap::new())
-                    .await?;
-            }
-            None => {
-                tracing::debug!(
-                    session_id = sid,
-                    "record_action: Session not found — IN_SESSION skipped"
-                );
-            }
-        }
-    }
-
-    // ── Optional NEXT_ACTION (previous → this) ──
-    if let Some(prev_id) = params.previous_action_id.as_deref() {
-        match kb
-            .get_node_by_ext_id(labels::ACTION, "action_id", prev_id)
-            .await?
-        {
-            Some(prev) => {
-                kb.create_edge(edges::NEXT_ACTION, prev.0, action_node, &HashMap::new())
-                    .await?;
-            }
-            None => {
-                tracing::debug!(
-                    prev_id,
-                    "record_action: previous Action not found — NEXT_ACTION skipped"
-                );
-            }
-        }
-    }
-
-    // ── Output overflow into an Artifact (F20) ──
-    let mut overflow_artifact: Option<NodeId> = None;
-    if let Some(payload) = overflow_text {
-        let artifact_node = create_overflow_artifact(kb, action_node, &payload, started_at).await?;
-        overflow_artifact = Some(artifact_node);
-    }
-
-    // ── Embedding ──
-    let embed_text = build_embed_text(
-        &params.action_type,
-        params.input.as_ref(),
-        params.output.as_ref(),
-    );
-    let vec = embed_document(kb, &embed_text).await?;
-    let mut emb_props = HashMap::new();
-    emb_props.insert("embedding".into(), Value::Vector(vec));
-    kb.update_node(action_node, &emb_props).await?;
+    let outcome = outcomes
+        .first()
+        .ok_or_else(|| UnikoError::Internal("record_action: no outcome".into()))?;
 
     // ── NER via Kniv NLP cascade ──
     //
@@ -253,11 +199,18 @@ pub async fn record_action(
     // MENTIONS → Message.  Best-effort: when the NLP runtime is
     // unavailable (no ONNX provider) we log and continue.
     #[cfg(feature = "onnx")]
-    link_action_entities(kb, action_node, &embed_text).await;
+    if !outcome.was_replay {
+        let embed_text = build_embed_text(
+            &params.action_type,
+            params.input.as_ref(),
+            params.output.as_ref(),
+        );
+        link_action_entities(kb, outcome.action_node, &embed_text).await;
+    }
 
     Ok(RecordActionResult {
-        action_node,
-        overflow_artifact,
+        action_node: outcome.action_node,
+        overflow_artifact: outcome.artifact_node(),
     })
 }
 
@@ -350,64 +303,44 @@ fn entity_type_str(t: NerEntityType) -> &'static str {
 /// Decide whether the output payload should be inlined on the Action
 /// node or spilled into an Artifact.
 ///
-/// Returns `(action_property, overflow_text)`:
-/// - `action_property = Some(value)` when the payload (or a stub
-///   pointer) should be stored on the Action.
-/// - `overflow_text = Some(text)` when an Artifact must be created.
+/// Returns `(action_output, overflow)`:
+/// - `action_output = Some(value)` when the payload (or a stub pointer)
+///   should be stored on the Action.
+/// - `overflow = Some((text, structured))` when an Artifact must be
+///   created from `text`; `structured` marks a JSON payload.
 ///
-/// Non-string payloads are inlined regardless of token count because
-/// they are typically small structured values — only string payloads
-/// risk blowing up token budgets.
+/// A string is measured as is, a structured payload by its pretty-printed
+/// JSON; either one over `threshold_tokens` overflows.
 fn split_overflow(
     output: Option<&JsonValue>,
     threshold_tokens: usize,
-) -> (Option<Value>, Option<String>) {
+) -> (Option<JsonValue>, Option<(String, bool)>) {
     let Some(out) = output else {
         return (None, None);
     };
-    match out {
-        JsonValue::String(s) => {
-            let tokens = count_tokens(s);
-            if tokens > threshold_tokens {
-                // Replace the inlined output with a short stub so the
-                // Action still records the kind of payload it produced.
-                let stub = format!("<overflow: {tokens} tokens spilled to Artifact>");
-                (Some(Value::String(stub)), Some(s.clone()))
-            } else {
-                (Some(Value::String(s.clone())), None)
-            }
-        }
-        other => (Some(json_to_value(other)), None),
+    let structured = !out.is_string();
+    let text = output_text(out);
+    let tokens = count_tokens(&text);
+    if tokens > threshold_tokens {
+        // Replace the inlined output with a short stub so the Action still
+        // records the kind of payload it produced.
+        let stub = format!("<overflow: {tokens} tokens stored as a tool_output artifact>");
+        (Some(JsonValue::String(stub)), Some((text, structured)))
+    } else {
+        (Some(out.clone()), None)
     }
 }
 
-/// Create an Artifact node for an overflowed Action output and link it
-/// via `PRODUCED`.
-async fn create_overflow_artifact(
-    kb: &KnowledgeBase,
-    action_node: NodeId,
-    payload: &str,
-    timestamp: DateTime<Utc>,
-) -> Result<NodeId, UnikoError> {
-    let artifact_id = new_id();
-    let hash = simple_hash(payload);
-    let mut props = HashMap::new();
-    props.insert("kind".into(), Value::String("action_output".into()));
-    props.insert("content".into(), Value::String(payload.to_string()));
-    props.insert("hash".into(), Value::String(hash));
-    props.insert("size".into(), Value::Int(payload.len() as i64));
-    props.insert("created_at".into(), datetime_value(timestamp));
-    let artifact_node = kb
-        .merge_node(labels::ARTIFACT, "artifact_id", &artifact_id, &props)
-        .await?;
-
-    // PRODUCED: Action → Artifact (F18).
-    kb.create_edge(edges::PRODUCED, action_node, artifact_node, &HashMap::new())
-        .await?;
-
-    Ok(artifact_node)
+/// The verbatim text of an output: a string as is, anything else as
+/// pretty-printed JSON.
+fn output_text(v: &JsonValue) -> String {
+    match v {
+        JsonValue::String(s) => s.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
 }
 
+#[cfg(any(feature = "onnx", test))]
 /// Build the embedding source string for an Action.
 ///
 /// Concatenates action type with summarised input and output text.
@@ -432,6 +365,7 @@ fn build_embed_text(
     buf
 }
 
+#[cfg(any(feature = "onnx", test))]
 /// Render a JSON value as a short embedding-friendly string.
 fn json_text(v: &JsonValue) -> String {
     match v {
@@ -440,6 +374,7 @@ fn json_text(v: &JsonValue) -> String {
     }
 }
 
+#[cfg(any(feature = "onnx", test))]
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -447,21 +382,6 @@ fn truncate_chars(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     out.push('…');
     out
-}
-
-/// Compact 64-bit hash used as a content fingerprint on overflowed
-/// Artifacts.  Not cryptographic — collision-resistance is "good
-/// enough" to dedupe identical outputs from the same action.
-///
-/// Uses truncated SHA-256 (first 64 bits as big-endian hex) rather than
-/// [`std::collections::hash_map::DefaultHasher`] because the latter is not
-/// guaranteed stable across rustc versions, and this fingerprint is
-/// persisted to the store as `Artifact.hash`.
-fn simple_hash(s: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(s.as_bytes());
-    let lead = u64::from_be_bytes(digest[..8].try_into().expect("Sha256 yields >= 8 bytes"));
-    format!("{lead:016x}")
 }
 
 #[cfg(test)]
@@ -472,7 +392,7 @@ mod tests {
     #[test]
     fn split_overflow_inlines_short_string() {
         let (prop, overflow) = split_overflow(Some(&json!("short text")), 256);
-        assert!(matches!(prop, Some(Value::String(_))));
+        assert!(matches!(prop, Some(JsonValue::String(_))));
         assert!(overflow.is_none());
     }
 
@@ -481,20 +401,32 @@ mod tests {
         let big = "word ".repeat(2_000);
         let (prop, overflow) = split_overflow(Some(&JsonValue::String(big.clone())), 256);
         match prop {
-            Some(Value::String(stub)) => {
+            Some(JsonValue::String(stub)) => {
                 assert!(stub.contains("overflow"), "stub was: {stub}");
             }
             other => panic!("expected stub String, got {other:?}"),
         }
-        assert_eq!(overflow.as_deref(), Some(big.as_str()));
+        assert_eq!(overflow, Some((big, false)));
     }
 
     #[test]
-    fn split_overflow_passes_through_structured_payloads() {
-        // Non-string payloads are inlined regardless of size.
-        let (prop, overflow) = split_overflow(Some(&json!({"a": [1, 2, 3]})), 4);
-        assert!(matches!(prop, Some(Value::Map(_))));
+    fn split_overflow_inlines_small_structured_payloads() {
+        let (prop, overflow) = split_overflow(Some(&json!({"a": [1, 2, 3]})), 256);
+        assert!(matches!(prop, Some(JsonValue::Object(_))));
         assert!(overflow.is_none());
+    }
+
+    #[test]
+    fn split_overflow_spills_large_structured_payloads_as_json() {
+        let items: Vec<_> = (0..200).map(|i| json!({"id": i, "status": "ok"})).collect();
+        let (prop, overflow) = split_overflow(Some(&json!({"items": items})), 64);
+        assert!(matches!(prop, Some(JsonValue::String(ref s)) if s.contains("overflow")));
+        let (text, structured) = overflow.expect("overflowed");
+        assert!(structured);
+        assert!(
+            text.contains("\"status\": \"ok\""),
+            "pretty-printed JSON expected"
+        );
     }
 
     #[test]

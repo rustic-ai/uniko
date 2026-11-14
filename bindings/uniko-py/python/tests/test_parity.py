@@ -26,6 +26,7 @@ HANDLES = {
     "Agent": typed.TypedAgent,
     "Session": typed.TypedSession,
     "Data": typed.TypedData,
+    "Sources": typed.TypedSources,
     "Goals": typed.TypedGoals,
 }
 

@@ -45,6 +45,9 @@ class RecallSource(BaseModel):
 
     kind: RecallSourceKind
     message_id: Optional[str] = None
+    session_id: Optional[str] = None
+    call_id: Optional[str] = None
+    tool_name: Optional[str] = None
     artifact_id: Optional[str] = None
     chunk_id: Optional[str] = None
 
@@ -66,6 +69,9 @@ class RecallItem(BaseModel):
     category: Optional[str] = None
     source_id: Optional[str] = None
     revision_id: Optional[str] = None
+    token_count: int = 0
+    context: Optional[str] = None
+    address: Optional[str] = None
 
     @classmethod
     def from_native(cls, native: Any) -> "RecallItem":
@@ -137,9 +143,123 @@ class ObserveResult(BaseModel):
     extracted_entities: list[tuple[int, str]] = Field(default_factory=list)
     extracted_observations: list[int] = Field(default_factory=list)
     attachments: list["IngestOutcome"] = Field(default_factory=list)
+    tool_calls: list["ToolCallResult"] = Field(default_factory=list)
 
     @classmethod
     def from_native(cls, native: Any) -> "ObserveResult":
+        return cls.model_validate(native)
+
+
+class SearchHit(BaseModel):
+    """A lexical search hit (native ``SearchHit``)."""
+
+    model_config = _OUT
+
+    source_kind: str
+    source_id: str
+    chunk_id: str
+    chunk_index: int
+    address: Optional[str] = None
+    start: int
+    end: int
+    text: str
+    context: Optional[str] = None
+    score: float
+    session_id: Optional[str] = None
+    call_id: Optional[str] = None
+    tool_name: Optional[str] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "SearchHit":
+        return cls.model_validate(native)
+
+
+class OutlineEntry(BaseModel):
+    """One entry of an outline (native ``OutlineEntry``)."""
+
+    model_config = _OUT
+
+    address: str
+    kind: str
+    summary: str
+    start: int
+    end: int
+    depth: int = 0
+
+
+class Outline(BaseModel):
+    """The shape of a source (native ``Outline``)."""
+
+    model_config = _OUT
+
+    source_kind: str
+    source_id: str
+    format: str
+    total_bytes: int
+    total_lines: int
+    entries: list[OutlineEntry] = Field(default_factory=list)
+    truncated: bool = False
+
+    @classmethod
+    def from_native(cls, native: Any) -> "Outline":
+        return cls.model_validate(native)
+
+
+class ReadResult(BaseModel):
+    """Verbatim text read from a source (native ``ReadResult``)."""
+
+    model_config = _OUT
+
+    source_kind: str
+    source_id: str
+    text: str
+    start: int
+    end: int
+    first_line: int
+    last_line: int
+    truncated: bool = False
+    next_bytes: Optional[tuple[int, int]] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "ReadResult":
+        return cls.model_validate(native)
+
+
+class ToolCallView(BaseModel):
+    """A recorded tool call (native ``ToolCallView``)."""
+
+    model_config = _OUT
+
+    call_id: str
+    tool_name: Optional[str] = None
+    action_type: str
+    arguments: Any = None
+    status: Optional[str] = None
+    error: Optional[str] = None
+    started_at: Optional[datetime.datetime] = None
+    ended_at: Optional[datetime.datetime] = None
+    triggered_by: Optional[str] = None
+    session_id: Optional[str] = None
+    artifact_id: Optional[str] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "ToolCallView":
+        return cls.model_validate(native)
+
+
+class ToolCallResult(BaseModel):
+    """What recording one tool call produced (native ``ToolCallResult``)."""
+
+    model_config = _OUT
+
+    call_id: str
+    action_node: int
+    artifact_id: Optional[str] = None
+    artifact_node: Optional[int] = None
+    was_replay: bool = False
+
+    @classmethod
+    def from_native(cls, native: Any) -> "ToolCallResult":
         return cls.model_validate(native)
 
 
@@ -199,6 +319,9 @@ class MessageView(BaseModel):
     message_id: str
     sender_id: str
     content: str
+    content_type: str = "text"
+    category: Optional[str] = None
+    visibility: Optional[str] = None
     timestamp: datetime.datetime
     session_id: str
     addressed_to: list[str] = Field(default_factory=list)
@@ -513,6 +636,12 @@ __all__ = [
     "ContextBundle",
     "Answer",
     "ObserveResult",
+    "ToolCallResult",
+    "SearchHit",
+    "Outline",
+    "OutlineEntry",
+    "ReadResult",
+    "ToolCallView",
     "DeletionReport",
     "FinalizeReport",
     "CycleStats",

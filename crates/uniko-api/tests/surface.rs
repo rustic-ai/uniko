@@ -27,6 +27,9 @@ fn facade_entry_points_are_exported() {
     assert_exists::<uniko_api::tools::WorkerStatus>();
     assert_exists::<uniko_api::tools::CircuitState>();
     assert_exists::<uniko_api::tools::TurnUnit>();
+    assert_exists::<uniko_api::tools::ToolCall>();
+    assert_exists::<uniko_api::tools::ToolCallResult>();
+    assert_exists::<uniko_api::tools::ToolOutput>();
     assert_exists::<uniko_api::tools::UnitResult>();
     assert_exists::<uniko_api::tools::Answer>();
     // Recall item provenance: typed kind + source lineage.

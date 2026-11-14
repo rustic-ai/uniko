@@ -75,6 +75,9 @@ fn fact_item(node_id: i64) -> RecallItem {
         category: None,
         source_id: None,
         revision_id: None,
+        token_count: 0,
+        context: None,
+        address: None,
     }
 }
 
@@ -155,6 +158,9 @@ async fn filter_bundle_leaves_non_policy_items_alone() {
             category: None,
             source_id: None,
             revision_id: None,
+            token_count: 0,
+            context: None,
+            address: None,
         },
     ]);
     filter_bundle(&kb, &mut bundle, &alice)

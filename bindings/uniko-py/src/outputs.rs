@@ -15,7 +15,8 @@ use uniko_api::tools::{
     ContextBundle, CycleStats, DeletionReport, FactUpsert, FinalizeReport, GoalContext, GoalPhase,
     GoalView, IngestOutcome, MatchedProcedure, MessageView, ObserveResult, PipelineHealth,
     PromotionReport, RecallItem, RecallKind, RecallSource, RecordActionResult, RuleView,
-    SummarizeReport, TaskPhase, TaskView, TopicReport, UnitResult, WorkerHealth, WorkerStatus,
+    SummarizeReport, TaskPhase, TaskView, ToolCallResult, TopicReport, UnitResult, WorkerHealth,
+    WorkerStatus,
 };
 
 use crate::convert::{json_to_py, utc_datetime_to_py};
@@ -68,9 +69,18 @@ fn recall_kind_str(kind: RecallKind) -> &'static str {
 /// Lineage of a recalled item: where its content originated.
 #[pyclass(name = "RecallSource", module = "uniko", frozen)]
 pub struct PyRecallSource {
-    /// `"message"`, `"attachment"`, or `"document"`.
+    /// `"message"`, `"attachment"`, `"document"`, `"session"` or `"tool"`.
     #[pyo3(get)]
     kind: String,
+    /// The tool call this traces to (its call id), for a tool result.
+    #[pyo3(get)]
+    call_id: Option<String>,
+    /// The tool, for a tool result recorded as a tool call.
+    #[pyo3(get)]
+    tool_name: Option<String>,
+    /// The session this traces to, for a session transcript chunk.
+    #[pyo3(get)]
+    session_id: Option<String>,
     /// The message this traces to, when applicable.
     #[pyo3(get)]
     message_id: Option<String>,
@@ -92,6 +102,9 @@ impl PyRecallSource {
             } => Self {
                 kind: "message".to_string(),
                 message_id: Some(message_id.clone()),
+                session_id: None,
+                call_id: None,
+                tool_name: None,
                 artifact_id: None,
                 chunk_id: chunk_id.clone(),
             },
@@ -102,6 +115,9 @@ impl PyRecallSource {
             } => Self {
                 kind: "attachment".to_string(),
                 message_id: Some(message_id.clone()),
+                session_id: None,
+                call_id: None,
+                tool_name: None,
                 artifact_id: Some(artifact_id.clone()),
                 chunk_id: chunk_id.clone(),
             },
@@ -111,6 +127,35 @@ impl PyRecallSource {
             } => Self {
                 kind: "document".to_string(),
                 message_id: None,
+                session_id: None,
+                call_id: None,
+                tool_name: None,
+                artifact_id: Some(artifact_id.clone()),
+                chunk_id: chunk_id.clone(),
+            },
+            RecallSource::Session {
+                session_id,
+                chunk_id,
+            } => Self {
+                kind: "session".to_string(),
+                message_id: None,
+                session_id: Some(session_id.clone()),
+                call_id: None,
+                tool_name: None,
+                artifact_id: None,
+                chunk_id: chunk_id.clone(),
+            },
+            RecallSource::Tool {
+                call_id,
+                tool_name,
+                artifact_id,
+                chunk_id,
+            } => Self {
+                kind: "tool".to_string(),
+                message_id: None,
+                session_id: None,
+                call_id: Some(call_id.clone()),
+                tool_name: tool_name.clone(),
                 artifact_id: Some(artifact_id.clone()),
                 chunk_id: chunk_id.clone(),
             },
@@ -123,8 +168,8 @@ impl PyRecallSource {
 impl PyRecallSource {
     fn __repr__(&self) -> String {
         format!(
-            "RecallSource(kind='{}', message_id={:?}, artifact_id={:?}, chunk_id={:?})",
-            self.kind, self.message_id, self.artifact_id, self.chunk_id
+            "RecallSource(kind='{}', message_id={:?}, session_id={:?}, artifact_id={:?}, chunk_id={:?})",
+            self.kind, self.message_id, self.session_id, self.artifact_id, self.chunk_id
         )
     }
 }
@@ -160,6 +205,16 @@ pub struct PyRecallItem {
     /// Which revision of that source grounded this item (issue #41).
     #[pyo3(get)]
     revision_id: Option<String>,
+    /// Tokens in `content`, as the token budget counts them.
+    #[pyo3(get)]
+    token_count: usize,
+    /// For a tool-output chunk: the header of what it inherits (tool,
+    /// arguments, address, enclosing values). `content` stays verbatim.
+    #[pyo3(get)]
+    context: Option<String>,
+    /// Where the chunk sits in its source (`/data/items[3-9]`, `rows 10-19`).
+    #[pyo3(get)]
+    address: Option<String>,
 }
 
 impl PyRecallItem {
@@ -181,6 +236,9 @@ impl PyRecallItem {
                 category: item.category.clone(),
                 source_id: item.source_id.clone(),
                 revision_id: item.revision_id.clone(),
+                token_count: item.token_count,
+                context: item.context.clone(),
+                address: item.address.clone(),
             },
         )
     }
@@ -347,6 +405,9 @@ pub struct PyObserveResult {
     /// the order they were attached.
     #[pyo3(get)]
     attachments: Vec<Py<PyIngestOutcome>>,
+    /// What each tool call the turn made produced, in the order added.
+    #[pyo3(get)]
+    tool_calls: Vec<Py<PyToolCallResult>>,
 }
 
 impl PyObserveResult {
@@ -362,6 +423,11 @@ impl PyObserveResult {
             .iter()
             .map(|a| PyIngestOutcome::from_rust(py, a))
             .collect::<PyResult<Vec<_>>>()?;
+        let tool_calls = result
+            .tool_calls
+            .iter()
+            .map(|t| PyToolCallResult::from_rust(py, t))
+            .collect::<PyResult<Vec<_>>>()?;
         Py::new(
             py,
             Self {
@@ -373,6 +439,7 @@ impl PyObserveResult {
                 extracted_entities: m.extracted_entities.clone(),
                 extracted_observations: m.extracted_observations.clone(),
                 attachments,
+                tool_calls,
             },
         )
     }
@@ -382,12 +449,61 @@ impl PyObserveResult {
 impl PyObserveResult {
     fn __repr__(&self) -> String {
         format!(
-            "ObserveResult(message_node_id={}, chunks={}, entities={}, observations={}, attachments={})",
+            "ObserveResult(message_node_id={}, chunks={}, entities={}, observations={}, attachments={}, tool_calls={})",
             self.message_node_id,
             self.chunk_node_ids.len(),
             self.extracted_entities.len(),
             self.extracted_observations.len(),
-            self.attachments.len()
+            self.attachments.len(),
+            self.tool_calls.len()
+        )
+    }
+}
+
+/// What recording one tool call produced.
+#[pyclass(name = "ToolCallResult", module = "uniko", frozen)]
+pub struct PyToolCallResult {
+    /// The call's id (its `action_id`).
+    #[pyo3(get)]
+    call_id: String,
+    /// Node id of the Action.
+    #[pyo3(get)]
+    action_node: i64,
+    /// The result artifact's id, when the call had a result.
+    #[pyo3(get)]
+    artifact_id: Option<String>,
+    /// The result artifact's node id, when the call had a result.
+    #[pyo3(get)]
+    artifact_node: Option<i64>,
+    /// The call was already recorded with the same result: nothing written.
+    #[pyo3(get)]
+    was_replay: bool,
+}
+
+impl PyToolCallResult {
+    /// Build the Python wrapper from a Rust [`ToolCallResult`].
+    pub fn from_rust(py: Python<'_>, r: &ToolCallResult) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                call_id: r.call_id.clone(),
+                action_node: r.action_node,
+                artifact_id: r.artifact_id.clone(),
+                artifact_node: r.artifact_node,
+                was_replay: r.was_replay,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyToolCallResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "ToolCallResult(call_id='{}', artifact_id={:?}, was_replay={})",
+            self.call_id,
+            self.artifact_id,
+            if self.was_replay { "True" } else { "False" }
         )
     }
 }
@@ -549,6 +665,15 @@ pub struct PyMessageView {
     /// The message text.
     #[pyo3(get)]
     content: String,
+    /// The turn's content type (`"text"` unless the turn set one).
+    #[pyo3(get)]
+    content_type: String,
+    /// The caller's record category, when the turn set one.
+    #[pyo3(get)]
+    category: Option<String>,
+    /// Who may see the turn; `None` is public.
+    #[pyo3(get)]
+    visibility: Option<String>,
     /// When the message was recorded (tz-aware UTC `datetime`).
     #[pyo3(get)]
     timestamp: Py<PyAny>,
@@ -572,6 +697,9 @@ impl PyMessageView {
                 message_id: view.message_id.clone(),
                 sender_id: view.sender_id.clone(),
                 content: view.content.clone(),
+                content_type: view.content_type.clone(),
+                category: view.category.clone(),
+                visibility: view.visibility.clone(),
                 timestamp: utc_datetime_to_py(py, view.timestamp)?.unbind(),
                 session_id: view.session_id.clone(),
                 addressed_to: view.addressed_to.clone(),
@@ -1463,6 +1591,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyContextBundle>()?;
     m.add_class::<PyAnswer>()?;
     m.add_class::<PyObserveResult>()?;
+    m.add_class::<PyToolCallResult>()?;
     m.add_class::<PyDeletionReport>()?;
     m.add_class::<PyFinalizeReport>()?;
     m.add_class::<PyCycleStats>()?;

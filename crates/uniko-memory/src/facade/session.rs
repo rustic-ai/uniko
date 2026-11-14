@@ -199,19 +199,33 @@ impl Session {
                 .unwrap_or_else(uniko_store::id::new_id);
             turn.message_id = Some(message_id.clone());
             let attachments = std::mem::take(&mut turn.attachments);
+            let calls = std::mem::take(&mut turn.tool_calls);
 
             let context = IngestContext {
                 session_id: Some(session_id.clone()),
-                triggered_by_message_id: Some(message_id),
+                triggered_by_message_id: Some(message_id.clone()),
             };
             let mut prepared = Vec::with_capacity(attachments.len());
             for source in attachments {
                 prepared.push(prepare_source(&self.kb, &self.extractors, source, &context).await?);
             }
+            let tool_ctx = super::tool::ToolPrepCtx {
+                kb: &self.kb,
+                extractors: &self.extractors,
+                session_id: &session_id,
+                turn_message_id: Some(&message_id),
+                inline_threshold: self.kb.config().action_output_artifact_threshold,
+            };
+            let mut tools = Vec::with_capacity(calls.len());
+            for mut call in calls {
+                call.visibility_or(turn.visibility.as_ref());
+                tools.push(super::tool::prepare_tool_call(&tool_ctx, call).await?);
+            }
 
             unit_turns.push(UnitTurn {
                 message: turn.into_ingest_message(session_id.clone()),
                 attachments: prepared,
+                tools,
             });
         }
 
@@ -226,6 +240,7 @@ impl Session {
         self.notify_observations(&all_observations);
 
         let mut attachments = result.attachments;
+        let tool_calls = result.tool_calls;
         Ok(UnitResult {
             turns: result
                 .turns
@@ -234,6 +249,10 @@ impl Session {
                 .map(|(i, message)| ObserveResult {
                     message,
                     attachments: std::mem::take(attachments.get_mut(i).unwrap_or(&mut Vec::new())),
+                    tool_calls: tool_calls
+                        .get(i)
+                        .map(|calls| calls.iter().map(Into::into).collect())
+                        .unwrap_or_default(),
                 })
                 .collect(),
             was_replay: result.was_replay,
@@ -330,8 +349,9 @@ impl Session {
     /// and chunks it, then aggregates the session's observations into dense
     /// chunks wired `ABOUT` the entities and participants they mention.
     /// These are what session-scoped recall and the Phase 1 session boost
-    /// (`phase1_strategy = "boost"`, the default) retrieve — without them a
-    /// session contributes only its per-turn chunks.
+    /// (`phase1_strategy = "boost"`, the facade's default through
+    /// `UnikoConfig::default()`) retrieve — without them a session
+    /// contributes only its messages and the chunks of its long turns.
     ///
     /// Cheap and idempotent when the session has not grown since the last
     /// call: nothing is rewritten and nothing is re-embedded. Awaits
@@ -353,6 +373,48 @@ impl Session {
             self.flush().await?;
         }
         finalize_session(&self.kb, &self.ctx.session_id).await
+    }
+
+    /// Record a tool call on its own, apart from any turn.
+    ///
+    /// The call commits in one transaction: an `:Action` performed by this
+    /// session's agent, linked `IN_SESSION` (the session is created if this
+    /// is its first record) and `TRIGGERED_BY` the message named by
+    /// [`ToolCall::triggered_by`](super::tool::ToolCall::triggered_by), with
+    /// the result stored verbatim as a `tool_output` artifact. Prefer
+    /// [`Turn::tool_call`] when the turn that made the call is recorded too,
+    /// so the two commit together.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::IdConflict`](uniko_store::UnikoError::IdConflict)
+    /// when the call id was already recorded with a different result, or
+    /// [`UnikoError`] on any preparation or write failure.
+    pub async fn observe_tool(
+        &self,
+        call: super::tool::ToolCall,
+    ) -> Result<super::tool::ToolCallResult, UnikoError> {
+        crate::agent::ensure_agent_participant(&self.kb, &self.agent_id).await?;
+        let tool_ctx = super::tool::ToolPrepCtx {
+            kb: &self.kb,
+            extractors: &self.extractors,
+            session_id: &self.ctx.session_id,
+            turn_message_id: None,
+            inline_threshold: self.kb.config().action_output_artifact_threshold,
+        };
+        let prepared = super::tool::prepare_tool_call(&tool_ctx, call).await?;
+        let outcomes = uniko_extract::ingest::tool::ingest_tool_calls(
+            &self.kb,
+            std::slice::from_ref(&prepared),
+            Some(&self.ctx.session_id),
+            true,
+            &self.agent_id,
+        )
+        .await?;
+        outcomes
+            .first()
+            .map(Into::into)
+            .ok_or_else(|| UnikoError::Internal("observe_tool: no outcome".into()))
     }
 
     /// Record an action this session's agent took, attached to this
@@ -527,6 +589,8 @@ pub struct ObserveResult {
     /// One outcome per [`Turn`] attachment, in attachment order. Each
     /// attachment is linked `Artifact -ATTACHED_TO-> Message`.
     pub attachments: Vec<IngestOutcome>,
+    /// One result per [`Turn::tool_call`], in the order added.
+    pub tool_calls: Vec<super::tool::ToolCallResult>,
 }
 
 /// One conversation turn to feed into a [`Session`].
@@ -556,6 +620,7 @@ pub struct Turn {
     timestamp: DateTime<Utc>,
     metadata: HashMap<String, serde_json::Value>,
     attachments: Vec<IngestSource>,
+    tool_calls: Vec<super::tool::ToolCall>,
     category: Option<String>,
     source_id: Option<String>,
     revision_id: Option<String>,
@@ -574,6 +639,7 @@ impl Turn {
             timestamp: Utc::now(),
             metadata: HashMap::new(),
             attachments: Vec::new(),
+            tool_calls: Vec::new(),
             category: None,
             source_id: None,
             revision_id: None,
@@ -666,8 +732,11 @@ impl Turn {
     /// those (held apart from the public fact of the same triple). Scoped
     /// reads drop it for any viewer the visibility does not admit.
     ///
-    /// Attachments are not scoped by this; give an attachment's own
-    /// content no wider audience than the turn's when that matters.
+    /// A document attached to the turn is scoped the same way: its chunks
+    /// take this visibility when the attachment is new. An attachment that
+    /// deduplicates onto content ingested earlier keeps that ingest's
+    /// audience, so content first shared openly stays readable to the
+    /// viewers who could already read it.
     #[must_use]
     pub fn visibility(mut self, visibility: crate::Visibility) -> Self {
         self.visibility = Some(visibility);
@@ -689,6 +758,20 @@ impl Turn {
     #[must_use]
     pub fn attachments(mut self, sources: impl IntoIterator<Item = IngestSource>) -> Self {
         self.attachments.extend(sources);
+        self
+    }
+
+    /// Record a tool call this turn made.
+    ///
+    /// On [`observe`](Session::observe) the call commits in the same
+    /// transaction as the turn: an `:Action` linked `TRIGGERED_BY` this
+    /// turn's message and `PERFORMED_BY` its sender, with the result stored
+    /// verbatim as a `tool_output` artifact the Action `PRODUCED`. The call
+    /// takes the turn's [`visibility`](Turn::visibility) unless it sets its
+    /// own. Chainable; calls are recorded in the order added.
+    #[must_use]
+    pub fn tool_call(mut self, call: super::tool::ToolCall) -> Self {
+        self.tool_calls.push(call);
         self
     }
 

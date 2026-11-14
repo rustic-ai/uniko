@@ -200,9 +200,10 @@ pub fn visibility_admits(visibility: Option<&str>, viewer: &Viewer) -> bool {
 /// Filter a [`ContextBundle`] in-place to remove items the viewer
 /// cannot see.
 ///
-/// Only Fact and Observation items are policy-checked — other node
-/// types have no visibility scope in spec v6.  Items are looked up
-/// in batch (one Cypher query per call) so the filter stays O(items).
+/// Facts, Observations, Messages and Chunks are policy-checked (see
+/// `carries_visibility`); other kinds carry no visibility and pass.
+/// Items are looked up in batch (one Cypher query per call) so the filter
+/// stays O(items).
 ///
 /// # Errors
 ///
@@ -227,9 +228,7 @@ pub async fn filter_bundle(
         visibility_for(item, &visibilities)
             .is_none_or(|v| visibility_admits(Some(v.as_str()), viewer))
     });
-    // Recompute token count after filtering — same heuristic the
-    // recall cascade and working memory use.
-    bundle.total_tokens = bundle.items.len() * 50;
+    bundle.total_tokens = bundle.items.iter().map(|i| i.token_count).sum();
     Ok(())
 }
 
@@ -279,9 +278,67 @@ pub async fn filter_redacted(
         _ => true,
     });
     if bundle.items.len() != before {
-        bundle.total_tokens = bundle.items.len() * 50;
+        bundle.total_tokens = bundle.items.iter().map(|i| i.token_count).sum();
     }
     Ok(())
+}
+
+/// The subset of `nodes` that `viewer` may read: not forgotten, and, when
+/// a viewer is given, admitted by the node's visibility.
+///
+/// The by-id twin of [`filter_redacted`] plus [`filter_bundle`], for reads
+/// that return something other than a [`ContextBundle`]. With `viewer =
+/// None` (an unrestricted handle) only redaction is applied, matching
+/// unrestricted recall. Each node is paired with the [`RecallKind`] that
+/// decides how it is checked: Messages and Chunks carry a `redacted` flag,
+/// Facts and Observations a `redacted:` visibility, and those four carry a
+/// visibility; other kinds have neither and are always admitted.
+///
+/// # Errors
+///
+/// Returns [`UnikoError::Storage`] when a lookup fails.
+pub(crate) async fn admitted_nodes(
+    kb: &KnowledgeBase,
+    viewer: Option<&Viewer>,
+    nodes: &[(NodeId, RecallKind)],
+) -> Result<std::collections::HashSet<NodeId>, UnikoError> {
+    let flag_ids: Vec<NodeId> = nodes
+        .iter()
+        .filter(|(_, k)| matches!(k, RecallKind::Message | RecallKind::Chunk))
+        .map(|(n, _)| *n)
+        .collect();
+    let vis_ids: Vec<NodeId> = nodes
+        .iter()
+        .filter(|(_, k)| carries_visibility(*k))
+        .map(|(n, _)| *n)
+        .collect();
+    let redacted = if flag_ids.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        kb.fetch_redacted(&flag_ids).await?
+    };
+    let visibilities = if vis_ids.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        kb.fetch_visibilities(&vis_ids).await?
+    };
+    Ok(nodes
+        .iter()
+        .filter(|(n, k)| {
+            if redacted.contains(n) {
+                return false;
+            }
+            let vis = visibilities.get(n).map(String::as_str);
+            if vis.is_some_and(|v| v.starts_with("redacted:")) {
+                return false;
+            }
+            match viewer {
+                Some(v) if carries_visibility(*k) => visibility_admits(vis, v),
+                _ => true,
+            }
+        })
+        .map(|(n, _)| *n)
+        .collect())
 }
 
 fn visibility_for<'a>(

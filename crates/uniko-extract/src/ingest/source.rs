@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde_json::Value as JsonValue;
 use uniko_pipes::content::{Mime, Modality, modality_for_mime};
 use uniko_pipes::types::{IngestArtifact, IngestData, IngestSource};
-use uniko_store::{KnowledgeBase, UnikoError};
+use uniko_store::{KnowledgeBase, NodeId, UnikoError};
 
 use super::artifact::{ArtifactContextNids, ArtifactIngestResult, ArtifactPrep, UnitArtifactSeen};
 use super::modality::{ModalityExtractor, ModalityPrepared, ModalityRegistry};
@@ -23,6 +23,18 @@ pub enum IngestOutcome {
     Artifact(ArtifactIngestResult),
     /// A PDF (tiered or legacy extraction).
     Pdf(PdfIngestResult),
+}
+
+impl IngestOutcome {
+    /// The artifact's node id when this ingest created it, `None` when it
+    /// deduplicated onto an existing one (or onto one earlier in the unit).
+    #[must_use]
+    pub fn newly_created_artifact(&self) -> Option<NodeId> {
+        match self {
+            Self::Artifact(r) => (!r.was_deduplicated).then_some(r.artifact_node_id),
+            Self::Pdf(r) => (!r.was_deduplicated).then_some(r.artifact_node_id),
+        }
+    }
 }
 
 /// Resolve the effective MIME for a payload.
@@ -259,7 +271,7 @@ pub async fn prepare_source(
                 artifact_id: src.id.unwrap_or_else(uniko_store::id::new_id),
                 caller_supplied_id,
                 content,
-                kind: "document".to_string(),
+                kind: src.kind.clone().unwrap_or_else(|| "document".to_string()),
                 path: src.path,
                 metadata,
                 session_id: context.session_id.clone(),

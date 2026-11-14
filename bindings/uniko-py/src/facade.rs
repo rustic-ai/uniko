@@ -238,6 +238,19 @@ pymethods_with_sync! {
             }
         }
 
+        /// Fill search text for chunks from before the lexical channel
+        /// existed; returns how many were filled. Run once after upgrading.
+        fn backfill_search_text / backfill_search_text_sync(&self, py) -> usize {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                instance.backfill_search_text().await.map_err(to_pyerr)
+
+            }
+        }
+
         /// Erase the entire graph. Intended for dev/test reset.
         fn purge / purge_sync(&self, py) -> Py<PyDeletionReport> {
             prepare {

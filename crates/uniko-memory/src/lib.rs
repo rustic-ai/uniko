@@ -55,8 +55,10 @@ pub use episode::{RecordEpisodeParams, record_episode};
 #[doc(inline)]
 pub use facade::{
     ArtifactView, Data, FinalizeReport, GoalContext, GoalPhase, GoalView, Goals, LlmSpec,
-    MessageView, ObserveResult, RecallScope, Session, SummarizeReport, TaskPhase, TaskView, Turn,
-    TurnUnit, Uniko, UnikoBuilder, UnitResult,
+    MessageView, ObserveResult, Outline, OutlineEntry, ReadRange, ReadResult, RecallScope,
+    SearchHit, SearchOptions, Session, SourceRef, Sources, SummarizeReport, TaskPhase, TaskView,
+    ToolCall, ToolCallResult, ToolCallView, ToolOutput, Turn, TurnUnit, Uniko, UnikoBuilder,
+    UnitResult,
 };
 #[doc(inline)]
 pub use fact::{AssertFactParams, InvalidateFactParams, assert_fact, invalidate_fact};
