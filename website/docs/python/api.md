@@ -57,7 +57,7 @@ have a `_sync` twin in the **Sync** column; assume the async signature shown and
 the name for the blocking form.
 
 !!! tip "`__version__`"
-    `uniko.__version__` tracks the crate version (currently `0.4.0`), single-sourced from Cargo
+    `uniko.__version__` tracks the crate version (currently `0.5.0`), single-sourced from Cargo
     via `env!("CARGO_PKG_VERSION")` rather than hardcoded. It falls back to the deliberately
     invalid sentinel `"0+unknown"` if the native module fails to expose it.
 

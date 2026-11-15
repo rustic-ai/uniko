@@ -150,11 +150,11 @@ A representative subset of the 25 registered node types. Each is registered by a
 | `Task` | Goals/Tasks/Sessions | A unit of work toward a goal | `task_id`, `title`, `status`, `priority` |
 | `Session` | Goals/Tasks/Sessions | A bounded interaction | `session_id`, `topic`, `started_at`, `ended_at` |
 | `Message` | Episodic | Atomic unit of communication | `message_id`, `content`, `timestamp` |
-| `Action` | Episodic | Something a participant did beyond talking | `action_id`, `action_type`, `status` |
+| `Action` | Episodic | Something a participant did beyond talking, such as a tool call | `action_id`, `action_type`, `status`, `tool_name`, `payload_hash` |
 | `Episode` | Episodic | A structured learning experience | `episode_id`, `action_type`, `outcome`, `importance` |
-| `Artifact` | Artifacts | A file, document, URL, or other object | `artifact_id`, `kind`, `path` |
+| `Artifact` | Artifacts | A file, document, URL, tool result (`kind: "tool_output"`), or other object | `artifact_id`, `kind`, `path` |
 | `ArtifactContent` | Artifacts | Content-addressed blob metadata, deduped by hash | `content_id`, `mime`, `size` |
-| `Chunk` | Artifacts | A retrievable slice of an artifact or long message | `chunk_id`, `text`, `index`, `chunk_type` |
+| `Chunk` | Artifacts | A retrievable slice of an artifact or long message | `chunk_id`, `text`, `index`, `chunk_type`, `context`, `address`, `search_text` |
 | `Entity` | Semantic | A named thing mentioned anywhere | `entity_id`, `name`, `entity_type` |
 | `Observation` | Semantic | A direct claim grounded in a source | `observation_id`, `content`, `subject`, `predicate` |
 | `Fact` | Semantic | Knowledge consolidated from observations | `fact_id`, `subject`, `predicate`, `object`, `valid_at` |

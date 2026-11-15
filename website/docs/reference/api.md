@@ -57,6 +57,7 @@ and `shutdown` when done.
 | `builder` | `fn builder() -> UnikoBuilder` | Configure capabilities, then `build()`. |
 | `agent` | `fn agent(&self, agent_id: impl Into<String>) -> Agent` | Mint an agent identity (cheap). |
 | `config` | `fn config(&self) -> &UnikoConfig` | The resolved configuration. |
+| `backfill_search_text` | `async fn backfill_search_text(&self) -> Result<usize, UnikoError>` | Fill `Chunk.search_text` for chunks written before it existed, so lexical recall and `Sources::search` see them. Idempotent; returns how many it filled. |
 | `purge` | `async fn purge(&self) -> Result<DeletionReport, UnikoError>` | Wipe all data (dev/test). |
 | `shutdown` | `async fn shutdown(self) -> Result<(), UnikoError>` | Drain workers and close. Needs sole ownership — drop agents/sessions first. |
 
@@ -92,6 +93,7 @@ let answer = agent.answer("when is the deadline?").await?;   // needs .llm(...)
 | `query_in` | `async fn query_in(&self, cypher: &str, scope: &Scope) -> Result<Vec<Record>, UnikoError>` | Binds the scope's allow-set as `$allow`. |
 | `session` | `fn session(&self, session_id: impl Into<String>) -> Session` | Open a conversation thread. |
 | `data` | `fn data(&self) -> Data<'_>` | Addressed retrieval — see [Data](#data-retrieval). |
+| `sources` | `fn sources(&self) -> Sources<'_>` | Deterministic search, outline and read — see [Sources](#sources-reading-around-a-hit). |
 | `goals` | `fn goals(&self) -> Goals<'_>` | Goal/task lifecycle — see [Goals](#goals-tasks). |
 | `delete_session` | `async fn delete_session(&self, session_id: &str) -> Result<DeletionReport, UnikoError>` | Delete a whole conversation. |
 | `forget_participant` | `async fn forget_participant(&self, participant_id: &str) -> Result<DeletionReport, UnikoError>` | GDPR erasure of a person's data. |
@@ -118,7 +120,8 @@ session.ingest(IngestSource::path("handbook.md")).await?;   // standalone docume
 
 | Method | Signature | Description |
 | --- | --- | --- |
-| `observe` | `async fn observe(&mut self, turn: Turn) -> Result<ObserveResult, UnikoError>` | Ingest a conversational turn (+ attachments); read-after-write. |
+| `observe` | `async fn observe(&mut self, turn: Turn) -> Result<ObserveResult, UnikoError>` | Ingest a conversational turn (+ attachments and tool calls) in one transaction; read-after-write. |
+| `observe_tool` | `async fn observe_tool(&self, call: ToolCall) -> Result<ToolCallResult, UnikoError>` | Record one tool call apart from any turn. `IdConflict` when its call id was recorded with a different result. |
 | `submit` | `async fn submit(&self, turn: Turn) -> Result<(), UnikoError>` | Streaming fire-and-forget turn. |
 | `submit_source` | `async fn submit_source(&self, source: IngestSource) -> Result<(), UnikoError>` | Streaming blob. |
 | `flush` | `async fn flush(&self) -> Result<(), UnikoError>` | Barrier: drain the streaming pipeline. |
@@ -130,10 +133,20 @@ session.ingest(IngestSource::path("handbook.md")).await?;   // standalone docume
 
 **`Turn`** (builder): `Turn::new(sender, content)` · `.id(message_id)` (idempotency) ·
 `.content_type(s)` · `.at(DateTime<Utc>)` · `.addressed_to(Vec<String>)` ·
-`.metadata(k, serde_json::Value)` · `.attach(IngestSource)` · `.attachments(iter)`.
+`.metadata(k, serde_json::Value)` · `.attach(IngestSource)` · `.attachments(iter)` ·
+`.tool_call(ToolCall)`.
 
-**`ObserveResult`** `{ message: AtomicIngestResult, attachments: Vec<IngestOutcome> }` — each
-attachment's `IngestOutcome::Artifact(_).artifact_id` is the handle for later retrieval.
+**`ToolCall`** (builder): `ToolCall::new(tool_name)` · `.call_id(id)` (becomes the Action's
+`action_id`; derived from the call when omitted) · `.arguments(serde_json::Value)` ·
+`.json_output(Value)` · `.text_output(s)` · `.output(ToolOutput)` · `.status(s)` · `.error(s)` ·
+`.started_at(t)` · `.ended_at(t)` · `.triggered_by(message_id)` · `.after(call_id)` ·
+`.visibility(Visibility)` · `.category(s)` · `.source(id)` · `.revision(id)`. **`ToolOutput`**
+`Json(Value)` · `Text(String)` · `Bytes { bytes, mime }`.
+
+**`ObserveResult`** `{ message: AtomicIngestResult, attachments: Vec<IngestOutcome>,
+tool_calls: Vec<ToolCallResult> }` — each attachment's `IngestOutcome::Artifact(_).artifact_id` is
+the handle for later retrieval. **`ToolCallResult`** `{ call_id, action_node, artifact_id,
+artifact_node, was_replay }`.
 
 ---
 
@@ -145,16 +158,16 @@ and **where** it came from (`sources`).
 ```rust
 for item in &bundle.items {
     println!("[{:?}] {}", item.kind, item.content);
-    for src in &item.sources { /* RecallSource::Message | Attachment | Document */ }
+    for src in &item.sources { /* RecallSource::Message | Attachment | Document | Session | Tool */ }
 }
 ```
 
 | Type | Shape | Description |
 | --- | --- | --- |
 | `ContextBundle` | `{ items: Vec<RecallItem>, total_tokens, coverage, phase1_only, phase2_only }` | Ranked result set + accounting. |
-| `RecallItem` | `{ node_id: NodeId, kind: RecallKind, score: f64, content: String, sources: Vec<RecallSource> }` | One recalled node. `primary_source()` returns the first. |
+| `RecallItem` | `{ node_id: NodeId, kind: RecallKind, score: f64, content: String, sources: Vec<RecallSource>, category, source_id, revision_id, token_count: usize, context: Option<String>, address: Option<String> }` | One recalled node. `primary_source()` returns the first. `token_count` is its real size; `context` and `address` are set on a structured chunk (see [Tool Output](../guides/tool-output.md)). |
 | `RecallKind` | `Chunk · Observation · Fact · Procedure · Topic · Episode · Message · Other` | What it is. `is_derived()` ⇒ true for Fact/Procedure/Topic/Observation; `tier()` ⇒ its `RecallTier`. |
-| `RecallSource` | `Message { message_id, chunk_id? }` · `Attachment { message_id, artifact_id, chunk_id? }` · `Document { artifact_id, chunk_id? }` | Lineage — 1 for a chunk, many for a Fact. |
+| `RecallSource` | `Message { message_id, chunk_id? }` · `Attachment { message_id, artifact_id, chunk_id? }` · `Document { artifact_id, chunk_id? }` · `Session { session_id, chunk_id? }` · `Tool { call_id, tool_name?, artifact_id, chunk_id? }` | Lineage — 1 for a chunk, many for a Fact. `Session` is a chunk of a session transcript; `Tool` a chunk of a tool call's result. |
 | `RecallTier` | `Semantic · Procedural · Episodic · KnowledgeBase · Provenance` | Scoring weight band. |
 
 **Scoping (`Scope`)** — chainable, passed to the `_in` variants: `.sessions([...])` ·
@@ -245,9 +258,48 @@ let msg = agent.data().message("m-12").await?;              // Option<MessageVie
 | `artifact` | `async fn artifact(&self, artifact_id: &str) -> Result<Option<ArtifactView>, UnikoError>` | Metadata + reassembled text + the message it was attached to. |
 | `artifact_bytes` | `async fn artifact_bytes(&self, artifact_id: &str) -> Result<Option<Vec<u8>>, UnikoError>` | The original blob. |
 
-**`MessageView`** `{ message_id, sender_id, content, timestamp, session_id, addressed_to: Vec<String>,
-attachments: Vec<String> }` · **`ArtifactView`** `{ artifact_id, kind, mime: Option<String>,
+Each returns `None` for forgotten content and, on an agent scoped to a viewer, for content that
+viewer may not read — the same policy as recall. `artifact_bytes` is also `None` when any of the
+artifact's chunks is forgotten or hidden, since the bytes would reveal it.
+
+**`MessageView`** `{ message_id, sender_id, content, content_type, timestamp, session_id,
+addressed_to: Vec<String>, attachments: Vec<String>, category: Option<String>,
+visibility: Option<String> }` · **`ArtifactView`** `{ artifact_id, kind, mime: Option<String>,
 path: Option<String>, text: String, attached_to_message: Option<String> }`.
+
+---
+
+## Sources — reading around a hit
+
+`agent.sources()` searches, outlines and reads stored content deterministically: the same store and
+arguments give the same answer. Visibility is the same as recall's. See
+[Tool Output](../guides/tool-output.md#reading-around-a-hit).
+
+```rust
+let sources = agent.sources();
+let hits = sources.search("status of ORD-48213", &SearchOptions::default().limit(5)).await?;
+let read = sources.read(&hits[0].source, &ReadRange::Address("/data/items/17".into()), 2_000).await?;
+```
+
+| Method | Signature | Description |
+| --- | --- | --- |
+| `search` | `async fn search(&self, query: &str, options: &SearchOptions) -> Result<Vec<SearchHit>, UnikoError>` | Lexical search over chunks; the query's literals when it has any, its words otherwise. Ordered by score, then chunk id. |
+| `outline` | `async fn outline(&self, source: &SourceRef, depth: usize, max_entries: usize) -> Result<Option<Outline>, UnikoError>` | A JSON source's objects and arrays down to `depth`; otherwise its chunks. `max_entries` 0 means 200. |
+| `read` | `async fn read(&self, source: &SourceRef, range: &ReadRange, max_tokens: usize) -> Result<Option<ReadResult>, UnikoError>` | Verbatim text, cut at `max_tokens` (0 means 2,000) on a line break; the rest of the range is in `next`. |
+| `tool_call` | `async fn tool_call(&self, call_id: &str) -> Result<Option<ToolCallView>, UnikoError>` | One recorded call. |
+| `tool_calls` | `async fn tool_calls(&self, session_id: Option<&str>, tool_name: Option<&str>, limit: usize) -> Result<Vec<ToolCallView>, UnikoError>` | Recorded calls, filtered by session and tool. `limit` 0 means 50. |
+
+**`SourceRef`** `Artifact(id)` · `Message(id)` · `Session(id)` · **`SearchOptions`** `{ limit, session_id,
+tool_name }` with `.limit(n)` · `.session(id)` · `.tool(name)` · **`ReadRange`** `Address(String)` (a JSON
+pointer such as `/data/items[3-9]`, or `rows a-b`, `lines a-b`, `records a-b`) · `Bytes(start, end)` ·
+`Lines(first, last)` · `Chunks(first, last)`.
+
+**`SearchHit`** `{ source, chunk_id, chunk_index, address, start, end, text, context, score,
+session_id, call_id, tool_name }` · **`Outline`** `{ source, format, total_bytes, total_lines,
+entries: Vec<OutlineEntry>, truncated }` · **`OutlineEntry`** `{ address, kind, summary, start, end,
+depth }` · **`ReadResult`** `{ source, text, start, end, first_line, last_line, truncated, next }` ·
+**`ToolCallView`** `{ call_id, tool_name, action_type, arguments, status, error, started_at,
+ended_at, triggered_by, session_id, artifact_id }`.
 
 ---
 
@@ -313,7 +365,7 @@ crate root for fine-grained recording. Each takes `(&kb, agent_id, params)` (exc
 | `invalidate_fact` | `()` | Close a Fact's bitemporal validity interval. |
 | `add_observation` | `NodeId` | An explicit Observation anchored to a Message. |
 | `record_episode` | `NodeId` | An Episode (action + outcome + state). |
-| `record_action` | `RecordActionResult` | An Action node; large output overflows to an Artifact. |
+| `record_action` | `RecordActionResult` | An Action node, in one transaction. Output over the overflow threshold is stored verbatim as a `tool_output` Artifact, linked `PRODUCED` and chunked by its structure; smaller output stays on the Action. Same id and output is a no-op; a different output is `IdConflict`. |
 
 See [Agent Tools](../guides/agent-tools.md) for the parameter structs and edge wiring.
 

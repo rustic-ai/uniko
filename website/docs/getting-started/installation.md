@@ -279,7 +279,10 @@ dimensions. Other presets ship in `EmbeddingConfig` (e.g. `bge_large_en_v15()` a
 
 NER and observation extraction route through the `nlp/default` alias: a multi-task **kniv-deberta**
 cascade running through uni-xervo's `local/onnx` provider. The default artifact is INT8-quantized
-(`onnx/cascade-int8.onnx`) for CPU-feasible inference. SRL (semantic role labelling) is gated by
+(`onnx/cascade-int8.onnx`) for CPU-feasible inference. Every size of **kniv v7** is available
+as an alternative — `UnikoBuilder::nlp(NlpConfig::preset("v7-small").unwrap())`, or
+`UnikoBuilder.nlp("v7-small")` in Python; see [The NLP model](../guides/configuration.md#the-nlp-model)
+for the sizes and how they compare. SRL (semantic role labelling) is gated by
 `UnikoConfig.nlp_srl_enabled`; the remaining tasks (POS, NER, DEP, CLS) always run. Extraction
 adapts gracefully: if the runtime or alias is unavailable, a rule-based path keeps extraction
 working end-to-end instead of failing.

@@ -10535,7 +10535,7 @@ checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 
 [[package]]
 name = "uniko-api"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "uniko-cortex",
  "uniko-memory",
@@ -10543,7 +10543,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-bench"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10569,7 +10569,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-cortex"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "serde",
@@ -10583,7 +10583,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-cuda"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -10596,7 +10596,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-extract"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10633,7 +10633,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-memory"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10656,7 +10656,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-metal"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -10669,7 +10669,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-pipes"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10689,7 +10689,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-py"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -10702,7 +10702,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
