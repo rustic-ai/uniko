@@ -204,6 +204,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and imports every wheel, the CUDA and Metal variants included, before it
   publishes any of them.
 
+### Changed
+
+- **uni-db 5.2 and uni-xervo 0.19.2.** uni-xervo 0.19.2 keeps titles and
+  initials inside one kniv v7 sentence ("Sen. Robert F. Kennedy spoke
+  today." was three sentences and two entities), and detects a kniv
+  model's generation from the contents of `onnx/onnx_meta.json` rather
+  than its presence; uniko still names the generation explicitly. uni-db
+  5.2 moves to Lance 14, whose English stop-word list no longer drops
+  negations (`no`, `not`, `don't`, …). A full-text index built by an
+  earlier release has no postings for them, so content written before the
+  upgrade is not found by those words until the index is rebuilt; uni-db
+  names the stale indexes in a warning when the store opens.
+
 ### Fixed
 
 - **Chunks of a long turn are searched.** Recall's Phase 3 searched session,

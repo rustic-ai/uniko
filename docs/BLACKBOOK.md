@@ -345,7 +345,7 @@ Everything uniko does rests on `uni-db` (5.1 from crates.io, tracked as `^5.1`, 
 - **A native bitemporal type, `DataType::Btic`.** A `Fact`'s `valid_at` is one half-open interval `[lo, hi)` with per-bound granularity and certainty — *not* a `valid_from`/`valid_until` pair. Certainty upgrades `Approximate → Definite` once cumulative observation count crosses `CERTAINTY_THRESHOLD = 10`. Recall matches validity via the `btic_overlaps(f.valid_at, $window)` scalar Cypher function (Allen algebra: `a.lo < b.hi && b.lo < a.hi`).
 - **Serializable Snapshot Isolation (SSI) transactions** with retriable conflict classification, plus `bulk_insert_vertices`/`bulk_insert_edges` fast paths that bypass the Cypher executor. The bulk path is measured ~980× faster per row than Cypher (bulk ~150µs/edge vs Cypher ~147ms/edge at sess=24) because the VIDs are already known — but it doesn't return EIDs and doesn't re-validate property names, so ingest hot paths validate keys up front.
 
-Above uni-db sits **`uni-xervo`** (0.19.1), the model runtime: ONNX embedding/NLP/rerank/OCR plus remote providers (`openai`, `gemini`, `vertexai`, `mistral`, `anthropic`, `voyageai`, `cohere`, `azure-openai`, and `llamacpp` — an HTTP client for a `llama-server` the operator runs) and the in-process `candle` provider. uni-xervo 0.19 removed `mistralrs` entirely and uni-db 5.1 no longer declares the feature; `provider-candle` is also off in this workspace (dropped with `default-features = false`) and returns only via the `candle` passthrough feature. Store reaches it internally via `db.xervo()` and exposes it through the `model.rs` seam (`embed`, `embed_multivector`, `generate`, `rerank`, `model_runtime`). The default stack: BGE-small-en-v1.5 (384d) embedder, `ms-marco-MiniLM-L-6-v2` cross-encoder reranker (enabled by default), and `kniv-deberta-xsmall` INT8 for the NLP cascade.
+Above uni-db sits **`uni-xervo`** (0.19.2), the model runtime: ONNX embedding/NLP/rerank/OCR plus remote providers (`openai`, `gemini`, `vertexai`, `mistral`, `anthropic`, `voyageai`, `cohere`, `azure-openai`, and `llamacpp` — an HTTP client for a `llama-server` the operator runs) and the in-process `candle` provider. uni-xervo 0.19 removed `mistralrs` entirely and uni-db 5.1+ no longer declares the feature; `provider-candle` is also off in this workspace (dropped with `default-features = false`) and returns only via the `candle` passthrough feature. Store reaches it internally via `db.xervo()` and exposes it through the `model.rs` seam (`embed`, `embed_multivector`, `generate`, `rerank`, `model_runtime`). The default stack: BGE-small-en-v1.5 (384d) embedder, `ms-marco-MiniLM-L-6-v2` cross-encoder reranker (enabled by default), and `kniv-deberta-xsmall` INT8 for the NLP cascade.
 
 #### Concurrency: why SSI alone isn't enough
 
@@ -3018,7 +3018,7 @@ The `RECALL_PROF` `eprintln!` lines in `recall/mod.rs` and `recall.rs` are uncon
 - **`mold`** on Linux — `.cargo/config.toml` unconditionally sets `-C link-arg=-fuse-ld=mold`, so it is a hard build dependency, not an optimization.
 - **`uv`** for the Python bindings and the docs site.
 
-Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 5.1` and `uni-xervo 0.19.1`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
+Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 5.2` and `uni-xervo 0.19.2`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
 
 > **The first build is slow.** `ort`, `tokenizers`, and `half` compile at `opt-level=3` even in the dev profile.
 
@@ -3277,7 +3277,7 @@ Rules of the gate:
 
 #### Invariant 2 — never edit `../uni/`
 
-uni-db lives at `../uni/` (or `../uni-db/`) as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 5.1 and uni-xervo 0.19.1 from crates.io. When you hit a uni-db bug, the discipline is:
+uni-db lives at `../uni/` (or `../uni-db/`) as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 5.2 and uni-xervo 0.19.2 from crates.io. When you hit a uni-db bug, the discipline is:
 
 1. Build a **minimal, isolated reproduction test** in `uniko-store` (the canonical pattern is `crates/uniko-store/tests/unidb_bytes_return_repro.rs`).
 2. File it upstream against `rustic-ai/uni-db`.

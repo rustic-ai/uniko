@@ -323,9 +323,10 @@ impl EmbeddingConfig {
 
 /// Which generation of the kniv NLP family [`NlpConfig::model_id`] holds.
 ///
-/// The two generations take different loader options, so the catalog has
-/// to be told which one it is loading: uni-xervo's own probe cannot tell
-/// them apart, because the v1 repo also ships `onnx/onnx_meta.json`.
+/// The two generations take different loader options, and the catalog
+/// always names the one it is loading rather than leaving uni-xervo to
+/// detect it, so an unexpected repo fails as a config error, not a
+/// misloaded model.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NlpGeneration {

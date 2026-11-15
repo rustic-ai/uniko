@@ -661,10 +661,11 @@ async fn apply_schema(db: &Uni, config: &UnikoConfig) -> Result<()> {
 /// The `local/onnx` loader options for the `nlp/default` alias.
 ///
 /// `generation` is always pinned. uni-xervo >= 0.19 serves two kniv
-/// generations and, absent this key, infers one by probing the repo for
-/// `onnx/onnx_meta.json`, which the v1 cascade repo also ships, so the probe
-/// reads it as v7 and then rejects every v1 option key. Naming the generation
-/// outranks the probe (uni-xervo `detect_generation`).
+/// generations and, absent this key, detects one from the repo. Before
+/// 0.19.2 that probe read the v1 cascade repo as v7, because it also ships
+/// `onnx/onnx_meta.json`; 0.19.2 reads the file's contents instead. Naming
+/// the generation still outranks detection (uni-xervo `detect_generation`),
+/// and keeps the loader options below matched to the model the config names.
 ///
 /// The two generations take disjoint keys, and uni-xervo rejects a mix:
 /// v1 names its one graph, tokenizer, label maps and 128-subword cap; v7

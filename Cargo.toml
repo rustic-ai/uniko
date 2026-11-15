@@ -56,11 +56,10 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.4.0" }
 # provider-onnx (embeddings + NLP + reranker), and every remote provider.
 # GPU accelerators (gpu-cuda / gpu-metal) are opt-in via uniko-store /
 # uniko-bench passthrough features.
-# Tracks the latest 5.x release (^5.1 = >=5.1.0, <6.0.0); `cargo update -p uni-db`
-# refreshes the lockfile to the newest compatible version. The 5.1 floor is
-# required, not cosmetic: 5.0 declared `provider-mistralrs`, which uni-xervo
-# 0.19 removed, so uni-db 5.0 cannot resolve against the uni-xervo this
-# workspace now needs.
+# Tracks the latest 5.x release (^5.2 = >=5.2.0, <6.0.0); `cargo update -p uni-db`
+# refreshes the lockfile to the newest compatible version. The 5.2 floor is
+# required, not cosmetic: 5.2 is the first release built on uni-xervo 0.19.2,
+# and 5.0 declared `provider-mistralrs`, which uni-xervo 0.19 removed.
 #
 # NOTE (2026-06-28): default-features disabled to drop `provider-candle`.
 # It pulls candle-cuda kernels that nvcc (CUDA 13) cannot compile against this
@@ -77,7 +76,7 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.4.0" }
 # unconditionally rather than behind a uniko passthrough feature because it
 # costs nothing to compile: uni-xervo gates it on `reqwest` + `base64`, which
 # every other remote provider here already pulls in.
-uni-db = { version = "5.1", default-features = false, features = [
+uni-db = { version = "5.2", default-features = false, features = [
     "mimalloc",
     "lance-backend",
     "apoc-core",
@@ -98,15 +97,16 @@ uni-db = { version = "5.1", default-features = false, features = [
 # uses uni-xervo internally but does not re-export the type. This MUST
 # resolve to the same version uni-db picks, or `ModelRuntime` is two
 # distinct types and `open_with_runtime` stops type-checking.
-# uni-db 5.1.0 depends on uni-xervo >=0.19.1, <1.0.0 — the floor excludes
-# 0.19.0, whose ort 2.0.0-rc.15 auto-device policy let CoreML claim nodes on
-# CPU-only macOS builds.
-uni-xervo = { version = "0.19.1", default-features = false }
+# The 0.19.2 floor matches uni-db 5.2.0 and brings the kniv v7 fix that keeps
+# titles and initials ("Sen. Robert F. Kennedy") inside one sentence; 0.19.0
+# is excluded anyway, since its ort auto-device policy let CoreML claim nodes
+# on CPU-only macOS builds.
+uni-xervo = { version = "0.19.2", default-features = false }
 # Tiered PDF extraction (native text -> OCR -> doc-VLM). Pulls only traits +
 # the pure-Rust native (lopdf) + rasterizer (hayro) tiers; the inference
 # providers ride on `uni-xervo` itself. Built against the same crates.io
-# uni-xervo 0.19.1, so the `OcrModel` / `ModelRuntime` types unify.
-uni-xervo-pdf = { version = "0.19.1", default-features = false, features = [
+# uni-xervo 0.19.2, so the `OcrModel` / `ModelRuntime` types unify.
+uni-xervo-pdf = { version = "0.19.2", default-features = false, features = [
     "pdf-input",
     "hayro",
 ] }

@@ -19,7 +19,7 @@ cargo build
 
 - **Rust:** stable channel (pinned in `rust-toolchain.toml`), **edition 2024**,
   **MSRV `1.91`** (`rust-version` in the workspace `Cargo.toml`).
-- `cargo build` pulls `uni-db` (`^4` — the latest 4.x) and `uni-xervo` (`0.18.1`)
+- `cargo build` pulls `uni-db` (`^5.2` — the latest 5.x) and `uni-xervo` (`0.19.2`)
   straight from crates.io — **no token, private repo, or credentials required.**
   Those are the requirements in the workspace `Cargo.toml`; `Cargo.lock` has the
   exact resolved versions.
@@ -155,7 +155,7 @@ Plus `uniko-bench` (`publish = false`) and `bindings/uniko-py`.
 
 ### 3. uni-db is a SEPARATE project — never edit it
 
-uni-db is consumed from crates.io (`uni-db = "4"`). A local checkout may exist
+uni-db is consumed from crates.io (`uni-db = "5.2"`). A local checkout may exist
 at `../uni/` or `../uni-db/` for reference only — **never edit it directly**, and
 never leave a `[patch.crates-io]` pointing at it in a commit. When you hit a
 uni-db bug: build a *minimal isolated repro* (see
