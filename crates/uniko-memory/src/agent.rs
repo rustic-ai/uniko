@@ -101,9 +101,9 @@ impl Agent {
         }
     }
 
-    /// The underlying knowledge base. Test-only seam for graph-assertion
-    /// fixtures; the facade never exposes `KnowledgeBase` publicly.
-    #[cfg(test)]
+    /// The underlying knowledge base, for crate-internal facades such as
+    /// [`Data`](crate::facade::Data) and for graph-assertion fixtures; the
+    /// facade never exposes `KnowledgeBase` publicly.
     pub(crate) fn kb(&self) -> &KnowledgeBase {
         &self.kb
     }
@@ -123,7 +123,15 @@ impl Agent {
     /// [`artifact_bytes`](crate::facade::Data::artifact_bytes).
     #[must_use]
     pub fn data(&self) -> crate::facade::Data<'_> {
-        crate::facade::Data::new(&self.kb)
+        crate::facade::Data::new(self)
+    }
+
+    /// Deterministic read tools: lexical search, outlines, verbatim reads
+    /// by address or range, and tool-call lookups — see
+    /// [`Sources`](crate::facade::Sources).
+    #[must_use]
+    pub fn sources(&self) -> crate::facade::Sources<'_> {
+        crate::facade::Sources::new(self)
     }
 
     /// The agent's goal/task lifecycle surface.
@@ -565,7 +573,7 @@ impl Agent {
     ///
     /// For [`RecallScope::AsAgent`] the [`Viewer`] is resolved against the
     /// store once and cached for the lifetime of this `Agent` handle.
-    async fn resolve_viewer_scope(&self) -> Result<ViewerScope, UnikoError> {
+    pub(crate) async fn resolve_viewer_scope(&self) -> Result<ViewerScope, UnikoError> {
         match &self.scope {
             RecallScope::Unrestricted => Ok(ViewerScope::Unrestricted),
             RecallScope::As(viewer) => Ok(ViewerScope::As(viewer.clone())),

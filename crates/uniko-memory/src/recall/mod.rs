@@ -157,6 +157,28 @@ pub enum RecallSource {
         /// The specific evidence chunk, when content-bearing.
         chunk_id: Option<String>,
     },
+    /// The content is a chunk of a session's transcript or of its
+    /// aggregated observations, built by
+    /// [`Session::finalize`](crate::Session::finalize). It spans several
+    /// turns, so it traces to the session rather than to one message.
+    Session {
+        /// The session it traces to.
+        session_id: String,
+        /// The specific chunk.
+        chunk_id: Option<String>,
+    },
+    /// The content is from a tool call's result: an artifact an Action
+    /// `PRODUCED`.
+    Tool {
+        /// The call's id (its `action_id`).
+        call_id: String,
+        /// The tool, for a call recorded as a tool call.
+        tool_name: Option<String>,
+        /// The result artifact.
+        artifact_id: String,
+        /// The specific evidence chunk, when content-bearing.
+        chunk_id: Option<String>,
+    },
 }
 
 /// A single recalled item.
@@ -190,6 +212,17 @@ pub struct RecallItem {
     /// historical result stays attributable to the revision that actually
     /// grounded it.
     pub revision_id: Option<String>,
+    /// Tokens in [`content`](Self::content), counted the way the token
+    /// budget is spent. Set when the bundle is finalised; `0` before.
+    pub token_count: usize,
+    /// For a structure-aware chunk (tool output): the header of what the
+    /// chunk inherits from outside itself — the tool and its arguments, its
+    /// address, enclosing values such as a currency or a table's columns.
+    /// `content` is the verbatim slice; read the two together.
+    pub context: Option<String>,
+    /// Where the chunk sits in its source (`/data/items[3-9]`, `rows
+    /// 10-19`, `lines 120-180`), for reading around it.
+    pub address: Option<String>,
 }
 
 impl RecallItem {
@@ -223,14 +256,16 @@ pub struct ContextBundle {
 /// How Phase 1 (Compact) results contribute to the final bundle.
 ///
 /// Tested on conv-26/conv-30 ablations and documented in the
-/// `rfe-p4-recall-evolution` RFE.  `Merge` is the legacy default
-/// (cap=3 interleave by score); `Boost` is the architectural v2 where
-/// Facts/Observations only influence chunk ranking and never occupy
-/// bundle slots; `Off` disables Phase 1 contributions entirely.
+/// `rfe-p4-recall-evolution` RFE.  `Merge` (cap=3 interleave by score) is
+/// this enum's [`Default`] and what [`RecallConfig::default`] uses; `Boost`
+/// is the architectural v2 where Facts/Observations only influence chunk
+/// ranking and never occupy bundle slots, and is what the facade runs,
+/// because `UnikoConfig::default()` sets `phase1_strategy = "boost"`;
+/// `Off` disables Phase 1 contributions entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Phase1Strategy {
     /// Merge top-N Phase 1 Facts into the Phase 3 bundle by score
-    /// (default — current best-known stack: conv-26 → 0.750).
+    /// (this enum's default; conv-26 → 0.750 on the ablation).
     #[default]
     Merge,
     /// Use Phase 1 Facts (and top Observation hits) as a session-level
@@ -456,6 +491,15 @@ pub struct RecallConfig {
     pub vector_weight: f64,
     /// BM25 fulltext weight in hybrid fusion.
     pub bm25_weight: f64,
+    /// Fuse BM25 over `Fact.object` into Phase 1's Fact search
+    /// (`UnikoConfig::recall_fact_hybrid`).
+    pub fact_hybrid: bool,
+    /// Phase 3 lexical channel over `Chunk.search_text`
+    /// (`UnikoConfig::recall_lexical_enabled`).
+    pub lexical_enabled: bool,
+    /// RRF weight of the lexical channel when the query names literals;
+    /// `1.0` otherwise.
+    pub lexical_literal_weight: f64,
     /// When true, re-score the top `reranker_top_n` RRF candidates with
     /// the cross-encoder registered at `rerank/default`.
     pub reranker_enabled: bool,
@@ -580,6 +624,9 @@ impl Default for RecallConfig {
             min_score: 0.001,
             vector_weight: 0.5,
             bm25_weight: 0.5,
+            fact_hybrid: true,
+            lexical_enabled: true,
+            lexical_literal_weight: 2.0,
             reranker_enabled: false,
             reranker_top_n: 50,
             reranker_apply_sigmoid: true,
@@ -677,6 +724,9 @@ impl RecallConfig {
             min_score: cfg.recall_min_score,
             vector_weight: cfg.recall_vector_weight,
             bm25_weight: cfg.recall_bm25_weight,
+            fact_hybrid: cfg.recall_fact_hybrid,
+            lexical_enabled: cfg.recall_lexical_enabled,
+            lexical_literal_weight: 2.0,
             reranker_enabled: cfg.reranker.enabled,
             reranker_top_n: cfg.reranker.top_n,
             reranker_apply_sigmoid: cfg.reranker.apply_sigmoid,
@@ -740,15 +790,8 @@ fn parse_phase1_strategy(s: &str) -> Phase1Strategy {
     }
 }
 
-// ── RRF constant ────────────────────────────────────────────────────
+// ── Bundle finalisation ─────────────────────────────────────────────
 
-/// Estimated tokens per recall item.
-const TOKENS_PER_ITEM: usize = 50;
-
-/// Sort `items` by score descending, truncate to `limit`, then walk in
-/// rank order summing [`TOKENS_PER_ITEM`] until the budget would be
-/// exceeded.  Returns `(kept_items, total_tokens)` for the caller to
-/// wrap in a [`ContextBundle`] with phase-specific flags.
 /// Populate each item's `category` / `source_id` from the graph.
 ///
 /// One batched read for the whole result set. Derived items (Observation,
@@ -781,6 +824,12 @@ async fn attach_provenance(kb: &KnowledgeBase, items: &mut [RecallItem]) {
     }
 }
 
+/// Sort `items` by score descending, truncate to `limit`, count each
+/// item's real tokens, then keep items in rank order while they fit
+/// `token_budget`. An item too large for what is left is skipped rather
+/// than ending the walk, so one oversized hit cannot crowd out the rest.
+/// Returns `(kept_items, total_tokens)` for the caller to wrap in a
+/// [`ContextBundle`] with phase-specific flags.
 fn finalize_bundle(
     mut items: Vec<RecallItem>,
     limit: usize,
@@ -790,11 +839,12 @@ fn finalize_bundle(
     items.truncate(limit);
     let mut total_tokens = 0usize;
     let mut final_items = Vec::with_capacity(items.len());
-    for item in items {
-        total_tokens += TOKENS_PER_ITEM;
-        if total_tokens > token_budget {
-            break;
+    for mut item in items {
+        item.token_count = uniko_extract::ingest::chunking::count_tokens(&item.content);
+        if total_tokens + item.token_count > token_budget {
+            continue;
         }
+        total_tokens += item.token_count;
         final_items.push(item);
     }
     (final_items, total_tokens)
@@ -913,6 +963,26 @@ async fn populate_sources(
                 &ids_param(&chunk_ids),
             )
             .await?;
+        let session_rows = kb
+            .query_cypher(
+                "MATCH (s:Session)-[:HAS_CHUNK]->(c:Chunk) WHERE id(c) IN $ids \
+                 RETURN id(c) AS cid, s.session_id AS sid, c.chunk_id AS chid",
+                &ids_param(&chunk_ids),
+            )
+            .await?;
+        for r in &session_rows {
+            let (Some(cid), Some(session_id)) = (row_int(r, "cid"), row_str(r, "sid")) else {
+                continue;
+            };
+            let src = RecallSource::Session {
+                session_id,
+                chunk_id: row_str(r, "chid"),
+            };
+            let entry = sources.entry(cid).or_default();
+            if !entry.contains(&src) {
+                entry.push(src);
+            }
+        }
         artifact_rows.extend(
             kb.query_cypher(
                 "MATCH (a:Artifact)-[:HAS_PAGE]->(:Page)-[:CONTAINS]->(:Block)-[:HAS_CHUNK]->(c:Chunk) \
@@ -942,21 +1012,31 @@ async fn populate_sources(
             .filter_map(|r| row_str(r, "aid"))
             .collect();
         let attached = attachment_messages(kb, &artifact_ids).await?;
+        let produced = producing_calls(kb, &artifact_ids).await?;
         for r in &artifact_rows {
             let (Some(cid), Some(artifact_id)) = (row_int(r, "cid"), row_str(r, "aid")) else {
                 continue;
             };
             let chunk_id = row_str(r, "chid");
-            let src = match attached.get(&artifact_id) {
-                Some(message_id) => RecallSource::Attachment {
-                    message_id: message_id.clone(),
+            let src = if let Some((call_id, tool_name)) = produced.get(&artifact_id) {
+                RecallSource::Tool {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
                     artifact_id,
                     chunk_id,
-                },
-                None => RecallSource::Document {
-                    artifact_id,
-                    chunk_id,
-                },
+                }
+            } else {
+                match attached.get(&artifact_id) {
+                    Some(message_id) => RecallSource::Attachment {
+                        message_id: message_id.clone(),
+                        artifact_id,
+                        chunk_id,
+                    },
+                    None => RecallSource::Document {
+                        artifact_id,
+                        chunk_id,
+                    },
+                }
             };
             let entry = sources.entry(cid).or_default();
             if !entry.contains(&src) {
@@ -1000,12 +1080,67 @@ async fn populate_sources(
         collect_message_sources(&rows, &mut sources);
     }
 
+    // Structure-aware chunks carry a context header and an address.
+    let mut located: HashMap<NodeId, (Option<String>, Option<String>)> = HashMap::new();
+    if !chunk_ids.is_empty() {
+        let rows = kb
+            .query_cypher(
+                "MATCH (c:Chunk) WHERE id(c) IN $ids AND c.context IS NOT NULL \
+                 RETURN id(c) AS cid, c.context AS ctx, c.address AS addr",
+                &ids_param(&chunk_ids),
+            )
+            .await?;
+        for r in &rows {
+            if let Some(cid) = row_int(r, "cid") {
+                located.insert(cid, (row_str(r, "ctx"), row_str(r, "addr")));
+            }
+        }
+    }
+
     for item in &mut bundle.items {
         if let Some(s) = sources.remove(&item.node_id) {
             item.sources = s;
         }
+        if let Some((ctx, addr)) = located.remove(&item.node_id) {
+            item.context = ctx;
+            item.address = addr;
+        }
     }
     Ok(())
+}
+
+/// Map `artifact_id` → `(call_id, tool_name)` for artifacts an Action
+/// `PRODUCED`: tool-call results and `record_action` overflow.
+async fn producing_calls(
+    kb: &KnowledgeBase,
+    artifact_ids: &[String],
+) -> Result<HashMap<String, (String, Option<String>)>, UnikoError> {
+    if artifact_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let params = HashMap::from([(
+        "aids".to_string(),
+        Value::List(
+            artifact_ids
+                .iter()
+                .map(|a| Value::String(a.clone()))
+                .collect(),
+        ),
+    )]);
+    let rows = kb
+        .query_cypher(
+            "MATCH (a:Action)-[:PRODUCED]->(art:Artifact) WHERE art.artifact_id IN $aids \
+             RETURN art.artifact_id AS aid, a.action_id AS cid, a.tool_name AS tool",
+            &params,
+        )
+        .await?;
+    let mut out = HashMap::new();
+    for r in &rows {
+        if let (Some(aid), Some(cid)) = (row_str(r, "aid"), row_str(r, "cid")) {
+            out.insert(aid, (cid, row_str(r, "tool")));
+        }
+    }
+    Ok(out)
 }
 
 /// Push a `Message` source per `(nid, mid)` row into `sources`.
@@ -1275,13 +1410,23 @@ async fn recall_unfiltered(
         Vec::new()
     };
 
-    // RRF fusion across variants (+ sparse channels). Pure function so it
-    // can be unit tested with synthetic ranked lists.
-    let scored = rrf_fuse(
+    // Lexical chunk channel: the query's literals (or, without any, its
+    // keywords) normalised and matched whole against `Chunk.search_text`,
+    // so an order number or request id finds the one record that names it.
+    let (lexical, lexical_weight) = if config.lexical_enabled {
+        run_lexical_source(kb, &intent, config).await
+    } else {
+        (Vec::new(), 1.0)
+    };
+
+    // RRF fusion across variants (+ sparse and lexical channels). Pure
+    // function so it can be unit tested with synthetic ranked lists.
+    let scored = rrf_fuse_weighted(
         variant_results
             .iter()
-            .map(|(_, hits)| hits.as_slice())
-            .chain(sparse_results.iter().map(Vec::as_slice)),
+            .map(|(_, hits)| (hits.as_slice(), 1.0))
+            .chain(sparse_results.iter().map(|h| (h.as_slice(), 1.0)))
+            .chain(std::iter::once((lexical.as_slice(), lexical_weight))),
         config.rrf_k,
     );
 
@@ -1324,6 +1469,9 @@ async fn recall_unfiltered(
                 category: None,
                 source_id: None,
                 revision_id: None,
+                token_count: 0,
+                context: None,
+                address: None,
                 kind,
                 score: score * kind.tier().weight(),
                 content,
@@ -1591,19 +1739,34 @@ async fn phase1_compact(
         ("Topic", "embedding", "name", 5),
     ];
 
+    let qtxt = intent
+        .variants
+        .iter()
+        .find(|v| v.label == "keywords")
+        .map(|v| v.text.as_str())
+        .unwrap_or("");
     let mut out: HashMap<NodeId, RecallItem> = HashMap::new();
     for &(label, embed_field, content_field, top_k) in targets {
-        let rows = match kb
-            .recall_vector_search(
+        let allow = config.dimensions_allow.as_deref();
+        let rows = if label == "Fact" && config.fact_hybrid && !qtxt.is_empty() {
+            kb.recall_hybrid_search(
                 label,
                 embed_field,
                 content_field,
+                content_field,
                 qvec,
+                qtxt,
                 top_k,
-                config.dimensions_allow.as_deref(),
+                config.vector_weight,
+                config.bm25_weight,
+                allow,
             )
             .await
-        {
+        } else {
+            kb.recall_vector_search(label, embed_field, content_field, qvec, top_k, allow)
+                .await
+        };
+        let rows = match rows {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(label, error = %e, "phase1 compact query failed");
@@ -1630,6 +1793,9 @@ async fn phase1_compact(
                     category: None,
                     source_id: None,
                     revision_id: None,
+                    token_count: 0,
+                    context: None,
+                    address: None,
                     kind,
                     score: weighted,
                     content: row.content,
@@ -1711,9 +1877,9 @@ pub async fn phase2_expand(
     }
     // Learned-sparse Observation channel, fused into the same Phase 2 RRF
     // pool. Gated on a hybrid embedder; auto-embeds the query text.
-    eprintln!(
-        "RECALL_PROF gate recall_sparse_enabled={}",
-        config.recall_sparse_enabled
+    tracing::debug!(
+        recall_sparse_enabled = config.recall_sparse_enabled,
+        "recall phase 2 sparse gate"
     );
     if config.recall_sparse_enabled {
         futs.push(Box::pin(run_sparse_source(
@@ -1889,6 +2055,9 @@ fn fuse_and_score_phase2(
                 category: None,
                 source_id: None,
                 revision_id: None,
+                token_count: 0,
+                context: None,
+                address: None,
                 kind,
                 score: score * kind.tier().weight(),
                 content,
@@ -1934,10 +2103,11 @@ async fn run_sparse_source(
             return Vec::new();
         }
     };
-    eprintln!(
-        "RECALL_PROF sparse_source label={label} rows={} elapsed_ms={}",
-        rows.len(),
-        start.elapsed().as_millis() as u64
+    tracing::debug!(
+        label,
+        rows = rows.len(),
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "recall sparse source"
     );
     let mut hits: Vec<RankedHit> = rows
         .into_iter()
@@ -1955,6 +2125,67 @@ async fn run_sparse_source(
         .collect();
     crate::sort_by_score_desc(&mut hits, |x| x.raw_score);
     hits
+}
+
+/// The lexical chunk channel's ranked hits and its RRF weight.
+///
+/// With literals in the query they alone are searched, at
+/// [`RecallConfig::lexical_literal_weight`]; without, the keyword variant's
+/// text is, at weight 1.
+async fn run_lexical_source(
+    kb: &KnowledgeBase,
+    intent: &IntentProfile,
+    config: &RecallConfig,
+) -> (Vec<RankedHit>, f64) {
+    use uniko_extract::ingest::structure::normalize::normalize_for_search;
+    let (text, weight) = if intent.literals.is_empty() {
+        let keywords = intent
+            .variants
+            .iter()
+            .find(|v| v.label == "keywords")
+            .or_else(|| intent.variants.first())
+            .map(|v| v.text.as_str())
+            .unwrap_or("");
+        (normalize_for_search(keywords), 1.0)
+    } else {
+        (
+            normalize_for_search(&intent.literals.join(" ")),
+            config.lexical_literal_weight,
+        )
+    };
+    if text.is_empty() {
+        return (Vec::new(), weight);
+    }
+    let rows = match kb
+        .recall_lexical_chunks(
+            &text,
+            config.per_variant_limit as i64,
+            config.dimensions_allow.as_deref(),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(error = %e, "lexical chunk query failed");
+            return (Vec::new(), weight);
+        }
+    };
+    let mut hits: Vec<RankedHit> = rows
+        .into_iter()
+        .filter(|r| !r.content.is_empty() && r.score > 0.0)
+        .map(|r| RankedHit {
+            node_id: r.node_id,
+            label: if r.label.is_empty() {
+                "Chunk".to_string()
+            } else {
+                r.label
+            },
+            content: r.content,
+            raw_score: r.score,
+        })
+        .collect();
+    crate::sort_by_score_desc(&mut hits, |x| x.raw_score);
+    (hits, weight)
 }
 
 /// Run a single Phase 2 vector-or-fulltext source.
@@ -2017,10 +2248,12 @@ async fn run_phase2_source(
         });
     }
     normalize_scores_in_place(&mut ranked);
-    eprintln!(
-        "RECALL_PROF phase2_source label={label} mode={mode} hits={} elapsed_ms={}",
-        ranked.len(),
-        start.elapsed().as_millis() as u64
+    tracing::debug!(
+        label,
+        mode,
+        hits = ranked.len(),
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        "recall phase 2 source"
     );
     ranked
 }
@@ -2383,10 +2616,19 @@ fn rrf_fuse<'a, I>(per_variant: I, k: f64) -> HashMap<NodeId, (String, String, f
 where
     I: IntoIterator<Item = &'a [RankedHit]>,
 {
+    rrf_fuse_weighted(per_variant.into_iter().map(|r| (r, 1.0)), k)
+}
+
+/// RRF over ranked lists, each scaled by its weight: a hit at rank `r` in
+/// a list of weight `w` contributes `w / (k + r)`.
+fn rrf_fuse_weighted<'a, I>(per_list: I, k: f64) -> HashMap<NodeId, (String, String, f64)>
+where
+    I: IntoIterator<Item = (&'a [RankedHit], f64)>,
+{
     let mut fused: HashMap<NodeId, (String, String, f64)> = HashMap::new();
-    for ranked in per_variant {
+    for (ranked, weight) in per_list {
         for (rank, hit) in ranked.iter().enumerate() {
-            let contribution = 1.0 / (k + rank as f64);
+            let contribution = weight / (k + rank as f64);
             fused
                 .entry(hit.node_id)
                 .and_modify(|(_, _, s)| *s += contribution)
@@ -2477,5 +2719,53 @@ mod rrf_tests {
         let empty: Vec<Vec<RankedHit>> = vec![];
         let pairs = fused_sorted(empty, 60.0);
         assert!(pairs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    fn item(id: i64, content: String, score: f64) -> RecallItem {
+        RecallItem {
+            node_id: id,
+            kind: RecallKind::Chunk,
+            score,
+            content,
+            sources: Vec::new(),
+            category: None,
+            source_id: None,
+            revision_id: None,
+            token_count: 0,
+            context: None,
+            address: None,
+        }
+    }
+
+    #[test]
+    fn budget_counts_real_tokens_and_skips_what_does_not_fit() {
+        let small = "one two three".to_string();
+        let big = "word ".repeat(400);
+        let items = vec![
+            item(1, small.clone(), 0.9),
+            item(2, big, 0.8),
+            item(3, small.clone(), 0.7),
+        ];
+        let (kept, total) = finalize_bundle(items, 10, 100);
+        let ids: Vec<i64> = kept.iter().map(|i| i.node_id).collect();
+        assert_eq!(ids, vec![1, 3], "the oversized item is skipped, not fatal");
+        let each = uniko_extract::ingest::chunking::count_tokens(&small);
+        assert_eq!(total, 2 * each);
+        assert!(kept.iter().all(|i| i.token_count == each));
+    }
+
+    #[test]
+    fn budget_reports_exactly_what_was_kept() {
+        let items = (0..5)
+            .map(|i| item(i, "alpha beta".into(), 1.0 - i as f64 / 10.0))
+            .collect();
+        let (kept, total) = finalize_bundle(items, 3, 10_000);
+        assert_eq!(kept.len(), 3);
+        assert_eq!(total, kept.iter().map(|i| i.token_count).sum::<usize>());
     }
 }

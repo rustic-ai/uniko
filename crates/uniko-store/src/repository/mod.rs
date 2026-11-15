@@ -21,5 +21,6 @@ pub mod procedures;
 pub mod recall;
 pub mod rules;
 pub mod session;
+pub mod sources;
 pub mod topics;
 pub mod working_memory;

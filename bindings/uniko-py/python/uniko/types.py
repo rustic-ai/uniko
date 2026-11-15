@@ -26,7 +26,7 @@ RecallKind = Literal[
 ]
 
 #: Where a recalled item's content came from (``RecallSource.kind``).
-RecallSourceKind = Literal["message", "attachment", "document"]
+RecallSourceKind = Literal["message", "attachment", "document", "session", "tool"]
 
 #: What ``Session.ingest`` produced (``IngestOutcome.kind``).
 IngestKind = Literal["artifact", "pdf"]

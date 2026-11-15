@@ -271,6 +271,44 @@ impl KnowledgeBase {
         Ok(true)
     }
 
+    /// Scope every chunk an artifact owns to `visibility`, inside `tx`.
+    ///
+    /// An attachment's chunks take the visibility of the turn it was shared
+    /// in, so a private turn's document is no wider-read than the turn.
+    /// Covers direct `HAS_CHUNK` chunks, which includes a tiered PDF's block
+    /// chunks (each is also linked from its Artifact). Returns how many
+    /// chunks were scoped.
+    ///
+    /// Call this only for an artifact this transaction created: a
+    /// deduplicated artifact's chunks already carry the audience of their
+    /// first ingest, and widening or narrowing them here would change what
+    /// other viewers can read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`] when the update fails.
+    pub async fn set_owned_chunks_visibility_in_tx(
+        &self,
+        tx: &uni_db::Transaction,
+        artifact_nid: NodeId,
+        visibility: &str,
+    ) -> Result<u64> {
+        let rows = tx
+            .query_with(
+                "MATCH (a:Artifact)-[:HAS_CHUNK]->(c:Chunk) WHERE id(a) = $aid \
+                 SET c.visibility = $vis RETURN count(c) AS n",
+            )
+            .param("aid", Value::Int(artifact_nid))
+            .param("vis", Value::String(visibility.to_string()))
+            .fetch_all()
+            .await?;
+        Ok(rows
+            .rows()
+            .first()
+            .and_then(|r| r.get::<i64>("n").ok())
+            .map_or(0, |n| n.max(0) as u64))
+    }
+
     /// The node with `id_field = id` under `label`, created when absent.
     async fn ensure_group_node(&self, label: &str, id_field: &str, id: &str) -> Result<NodeId> {
         if id.trim().is_empty() {

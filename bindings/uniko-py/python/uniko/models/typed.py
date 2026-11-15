@@ -47,7 +47,12 @@ from .outputs import (
     RuleView,
     SummarizeReport,
     TaskView,
+    ToolCallResult,
+    ToolCallView,
     UnitResult,
+    SearchHit,
+    Outline,
+    ReadResult,
 )
 
 
@@ -87,6 +92,68 @@ class TypedData:
 
     def artifact_bytes_sync(self, artifact_id: str) -> Optional[bytes]:
         return self._inner.artifact_bytes_sync(artifact_id)
+
+
+# ── Sources ────────────────────────────────────────────────────────────────
+
+
+class TypedSources:
+    """Typed wrapper over the native ``Sources`` handle."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def search(self, query: str, **kwargs: Any) -> list[SearchHit]:
+        return [
+            SearchHit.from_native(h) for h in await self._inner.search(query, **kwargs)
+        ]
+
+    def search_sync(self, query: str, **kwargs: Any) -> list[SearchHit]:
+        return [
+            SearchHit.from_native(h) for h in self._inner.search_sync(query, **kwargs)
+        ]
+
+    async def outline(
+        self, source_kind: str, source_id: str, **kwargs: Any
+    ) -> Optional[Outline]:
+        o = await self._inner.outline(source_kind, source_id, **kwargs)
+        return Outline.from_native(o) if o is not None else None
+
+    def outline_sync(
+        self, source_kind: str, source_id: str, **kwargs: Any
+    ) -> Optional[Outline]:
+        o = self._inner.outline_sync(source_kind, source_id, **kwargs)
+        return Outline.from_native(o) if o is not None else None
+
+    async def read(
+        self, source_kind: str, source_id: str, **kwargs: Any
+    ) -> Optional[ReadResult]:
+        r = await self._inner.read(source_kind, source_id, **kwargs)
+        return ReadResult.from_native(r) if r is not None else None
+
+    def read_sync(
+        self, source_kind: str, source_id: str, **kwargs: Any
+    ) -> Optional[ReadResult]:
+        r = self._inner.read_sync(source_kind, source_id, **kwargs)
+        return ReadResult.from_native(r) if r is not None else None
+
+    async def tool_call(self, call_id: str) -> Optional[ToolCallView]:
+        v = await self._inner.tool_call(call_id)
+        return ToolCallView.from_native(v) if v is not None else None
+
+    def tool_call_sync(self, call_id: str) -> Optional[ToolCallView]:
+        v = self._inner.tool_call_sync(call_id)
+        return ToolCallView.from_native(v) if v is not None else None
+
+    async def tool_calls(self, **kwargs: Any) -> list[ToolCallView]:
+        return [
+            ToolCallView.from_native(v) for v in await self._inner.tool_calls(**kwargs)
+        ]
+
+    def tool_calls_sync(self, **kwargs: Any) -> list[ToolCallView]:
+        return [
+            ToolCallView.from_native(v) for v in self._inner.tool_calls_sync(**kwargs)
+        ]
 
 
 # ── Goals ──────────────────────────────────────────────────────────────────
@@ -297,6 +364,16 @@ class TypedSession:
         native = [_native_arg(t) for t in turns]
         return UnitResult.from_native(self._inner.commit_unit_sync(native))
 
+    async def observe_tool(self, call: Any) -> ToolCallResult:
+        return ToolCallResult.from_native(
+            await self._inner.observe_tool(_native_arg(call))
+        )
+
+    def observe_tool_sync(self, call: Any) -> ToolCallResult:
+        return ToolCallResult.from_native(
+            self._inner.observe_tool_sync(_native_arg(call))
+        )
+
     async def record_action(self, action_type: str, **kwargs: Any) -> ActionResult:
         return ActionResult.from_native(
             await self._inner.record_action(action_type, **kwargs)
@@ -350,6 +427,10 @@ class TypedAgent:
     @property
     def data(self) -> TypedData:
         return TypedData(self._inner.data)
+
+    @property
+    def sources(self) -> TypedSources:
+        return TypedSources(self._inner.sources)
 
     @property
     def goals(self) -> TypedGoals:
@@ -654,6 +735,14 @@ class TypedUnikoBuilder:
         self._inner = self._inner.reranker(reranker)
         return self
 
+    def nlp(self, nlp: Any) -> "TypedUnikoBuilder":
+        """A preset name (``"v1"``, ``"v7-small"``, ...), a dict, or an
+        ``NlpConfigModel``."""
+        if hasattr(nlp, "model_dump"):
+            nlp = nlp.model_dump(exclude_unset=True)
+        self._inner = self._inner.nlp(nlp)
+        return self
+
     def llm(self, spec: Any) -> "TypedUnikoBuilder":
         self._inner = self._inner.llm(_native_arg(spec))
         return self
@@ -765,6 +854,12 @@ class TypedUniko:
 
     def remove_team_from_org_sync(self, team_id: str, org_id: str) -> bool:
         return self._inner.remove_team_from_org_sync(team_id, org_id)
+
+    async def backfill_search_text(self) -> int:
+        return await self._inner.backfill_search_text()
+
+    def backfill_search_text_sync(self) -> int:
+        return self._inner.backfill_search_text_sync()
 
     async def purge(self) -> DeletionReport:
         return DeletionReport.from_native(await self._inner.purge())

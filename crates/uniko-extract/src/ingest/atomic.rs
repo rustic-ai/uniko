@@ -391,6 +391,19 @@ pub(super) async fn extract_for_unit(
     #[cfg_attr(not(feature = "onnx"), allow(unused_variables))] kb: &KnowledgeBase,
     msg: &IngestMessage,
 ) -> EntityExtractionOutput {
+    // Structured data (JSON, a table, a log, a diff) is not prose: sentence
+    // NLP and NER over JSON keys, CSV cells and log fields produce noise
+    // entities and nonsense dialogue acts. Its records are found through
+    // their structure-aware chunks instead. A prose tool result (a build
+    // summary) is still analysed.
+    if super::message::structured_format(msg).is_some_and(|f| f != super::structure::Format::Text) {
+        return EntityExtractionOutput {
+            deduped: Vec::new(),
+            #[cfg(feature = "onnx")]
+            nlp_results: None,
+            nlp_ms: 0,
+        };
+    }
     let mut all_raw: Vec<RawEntity> = Vec::new();
 
     // 1. Rule-based (always).

@@ -209,9 +209,24 @@ pub async fn prepare_artifact(
         .and_then(|v| v.as_str());
     let content_type =
         hinted_content_type.unwrap_or(if language.is_some() { "code" } else { "text" });
-    let chunker = select_chunker(content_type, language.as_deref());
     let chunk_cfg = ChunkConfig::from_uniko_config(kb.config());
-    let chunks = chunker.chunk(&artifact.content, &chunk_cfg);
+    // A tool's result is chunked along its own structure, each chunk a
+    // verbatim slice with a header of the tool, its arguments and what the
+    // slice inherits. Other artifacts keep their content-type chunker.
+    let chunks = if artifact.kind == super::tool::TOOL_OUTPUT_KIND {
+        let format = super::structure::detect_format(&artifact.content, Some(content_type));
+        super::structure::chunk_structured(
+            &artifact.content,
+            format,
+            &super::structure::PayloadContext::from_metadata(
+                &artifact.metadata,
+                kb.config().chunk_context_max_tokens,
+            ),
+            &chunk_cfg,
+        )
+    } else {
+        select_chunker(content_type, language.as_deref()).chunk(&artifact.content, &chunk_cfg)
+    };
 
     Ok(ArtifactPrep {
         artifact_id: artifact.artifact_id.clone(),

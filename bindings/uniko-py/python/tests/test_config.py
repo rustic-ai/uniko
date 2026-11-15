@@ -87,6 +87,23 @@ def test_embedding_preset_and_dict() -> None:
         uniko.Uniko.builder().embedding("word2vec")
 
 
+def test_nlp_setter_takes_a_dict_and_checks_presets() -> None:
+    # A v7 preset is not built here: building loads the model, and the v7
+    # path is covered by the Rust tests against a real one.
+    cfg = build(uniko.Uniko.builder().nlp({"max_batch_size": 8})).config()
+    assert cfg["nlp"]["max_batch_size"] == 8
+    assert cfg["nlp"]["generation"] == "v1"
+    assert cfg["nlp"]["variant"] == "int8"
+
+    uniko.Uniko.builder().nlp("v7-xlarge-d")
+    with pytest.raises(uniko.ConfigError, match="unknown NLP preset.*v7-small"):
+        uniko.Uniko.builder().nlp("v7-huge")
+    with pytest.raises(uniko.ConfigError, match="nlp.generation"):
+        uniko.Uniko.builder().nlp({"generation": "v9"})
+    with pytest.raises(ValueError):
+        UnikoConfigModel(nlp={"generation": "v9"})  # ty: ignore[invalid-argument-type]
+
+
 @pytest.mark.parametrize("reranker_first", [True, False])
 def test_reranker_override_wins_in_either_order(reranker_first: bool) -> None:
     builder = uniko.Uniko.builder()

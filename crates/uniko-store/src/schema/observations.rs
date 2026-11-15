@@ -81,9 +81,9 @@ pub(crate) fn register_labels<'a>(
     let dense_idx = if config.embedding.sparse_dimensions.is_some()
         || config.embedding.multivector_dimensions.is_some()
     {
-        super::auto_embed_hybrid_vector_index("content", config)
+        super::auto_embed_hybrid_vector_index(&["content"], config)
     } else {
-        super::auto_embed_vector_index("content", config)
+        super::auto_embed_vector_index(&["content"], config)
     };
     b = b
         .index("observation_id", IndexType::Scalar(ScalarType::Hash))
@@ -98,13 +98,13 @@ pub(crate) fn register_labels<'a>(
     if config.embedding.sparse_dimensions.is_some() {
         b = b.index(
             "sparse_embedding",
-            super::auto_embed_sparse_index("content", config),
+            super::auto_embed_sparse_index(&["content"], config),
         );
     }
     if config.embedding.multivector_dimensions.is_some() {
         b = b.index(
             "colbert_embedding",
-            IndexType::Vector(super::auto_embed_multivector_index("content", config)),
+            IndexType::Vector(super::auto_embed_multivector_index(&["content"], config)),
         );
     }
     b.done()

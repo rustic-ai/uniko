@@ -20,6 +20,12 @@ pub(crate) fn register_labels<'a>(
         .property_nullable("ended_at", DataType::DateTime)
         .property_nullable("duration_ms", DataType::Int64)
         .property_nullable("error", DataType::String)
+        // The tool that was called, for a call recorded as a tool call
+        // (`action_type = "tool_call"`); a plain action leaves it unset.
+        .property_nullable("tool_name", DataType::String)
+        // SHA-256 of the result payload, so a replayed call with the same
+        // id is recognised and one with different output is refused.
+        .property_nullable("payload_hash", DataType::String)
         .property_nullable(
             "embedding",
             DataType::Vector {
@@ -28,6 +34,7 @@ pub(crate) fn register_labels<'a>(
         )
         .index("action_id", IndexType::Scalar(ScalarType::Hash))
         .index("action_type", IndexType::Scalar(ScalarType::Hash))
+        .index("tool_name", IndexType::Scalar(ScalarType::Hash))
         .index("status", IndexType::Scalar(ScalarType::Hash))
         .index("started_at", IndexType::Scalar(ScalarType::BTree))
         .index("embedding", IndexType::Vector(super::vector_index(config)))

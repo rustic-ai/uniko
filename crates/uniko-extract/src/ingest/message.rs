@@ -141,13 +141,31 @@ pub(crate) async fn apply_message_writes_in_tx(
     .await?;
     let edges_ms = edges_start.elapsed().as_millis();
 
-    // Chunk long messages — in the same tx.
+    // Chunk long messages — in the same tx. Structured content (a tool
+    // result, JSON, a table) is chunked along its structure, and as soon as
+    // it exceeds one chunk: a record buried in a 900-token result is
+    // otherwise only findable through the whole message.
     let chunk_start = std::time::Instant::now();
-    let chunk_threshold = kb.config().message_chunk_threshold;
+    let chunk_cfg = ChunkConfig::from_uniko_config(kb.config());
+    let structured = structured_format(msg);
+    let chunk_threshold = if structured.is_some() {
+        chunk_cfg.max_chunk_tokens
+    } else {
+        kb.config().message_chunk_threshold
+    };
     let chunk_node_ids = if count_tokens(&msg.content) > chunk_threshold {
-        let chunk_cfg = ChunkConfig::from_uniko_config(kb.config());
-        let chunker = select_chunker(&msg.content_type, None);
-        let chunks = chunker.chunk(&msg.content, &chunk_cfg);
+        let chunks = match structured {
+            Some(format) => super::structure::chunk_structured(
+                &msg.content,
+                format,
+                &super::structure::PayloadContext::from_metadata(
+                    &msg.metadata,
+                    kb.config().chunk_context_max_tokens,
+                ),
+                &chunk_cfg,
+            ),
+            None => select_chunker(&msg.content_type, None).chunk(&msg.content, &chunk_cfg),
+        };
         create_chunks_in_tx(
             kb,
             tx,
@@ -349,6 +367,38 @@ pub struct ChunkProvenance<'a> {
     pub visibility: Option<&'a str>,
 }
 
+/// The structure of a message's content when it is a tool's output or
+/// structured data, `None` for a conversational turn.
+///
+/// A `tool_result` turn is always treated as tool output, even when its
+/// content is plain lines; a `json` / `csv` / `structured` turn, or one
+/// whose content type is a JSON or CSV MIME, only when its content parses
+/// as structure.
+#[must_use]
+pub fn structured_format(msg: &IngestMessage) -> Option<super::structure::Format> {
+    structured_content_format(&msg.content_type, &msg.content)
+}
+
+/// [`structured_format`] over a content type and content.
+#[must_use]
+pub fn structured_content_format(
+    content_type: &str,
+    content: &str,
+) -> Option<super::structure::Format> {
+    use super::structure::{Format, detect_format};
+    let ct = content_type.to_ascii_lowercase();
+    let tool = ct == "tool_result" || ct == "tool_output";
+    let declared = tool
+        || matches!(ct.as_str(), "json" | "csv" | "structured")
+        || ct.contains("json")
+        || ct.contains("csv");
+    if !declared {
+        return None;
+    }
+    let format = detect_format(content, Some(&ct));
+    (tool || format != Format::Text).then_some(format)
+}
+
 pub async fn create_chunks_in_tx(
     kb: &KnowledgeBase,
     tx: &uniko_store::Transaction,
@@ -398,6 +448,35 @@ pub async fn create_chunks_in_tx(
             if let Some(ref meta) = c.metadata {
                 props.insert("metadata".into(), json_to_uni_value(meta));
             }
+            // A structure-aware chunk's header and address are stored as
+            // their own columns: the header is embedded with the text and
+            // both are searchable, while `text` stays the verbatim slice.
+            let context = c
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("context"))
+                .and_then(serde_json::Value::as_str);
+            if let Some(ctx) = context {
+                props.insert("context".into(), Value::String(ctx.to_string()));
+            }
+            if let Some(addr) = c
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("address"))
+                .and_then(serde_json::Value::as_str)
+            {
+                props.insert("address".into(), Value::String(addr.to_string()));
+            }
+            let searchable = match context {
+                Some(ctx) => format!("{ctx}\n{}", c.text),
+                None => c.text.clone(),
+            };
+            props.insert(
+                "search_text".into(),
+                Value::String(super::structure::normalize::normalize_for_search(
+                    &searchable,
+                )),
+            );
             props
         })
         .collect();

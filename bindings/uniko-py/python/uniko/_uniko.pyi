@@ -53,6 +53,9 @@ class UnsupportedError(UnikoError): ...
 class RecallSource:
     kind: RecallSourceKind
     message_id: str | None
+    session_id: str | None
+    call_id: str | None
+    tool_name: str | None
     artifact_id: str | None
     chunk_id: str | None
     def __repr__(self) -> str: ...
@@ -70,6 +73,9 @@ class RecallItem:
     score: float
     content: str
     sources: list[RecallSource]
+    token_count: int
+    context: str | None
+    address: str | None
     def __repr__(self) -> str: ...
 
 @final
@@ -103,6 +109,16 @@ class ObserveResult:
     extracted_entities: list[tuple[int, str]]
     extracted_observations: list[int]
     attachments: list[IngestOutcome]
+    tool_calls: list[ToolCallResult]
+    def __repr__(self) -> str: ...
+
+@final
+class ToolCallResult:
+    call_id: str
+    action_node: int
+    artifact_id: str | None
+    artifact_node: int | None
+    was_replay: bool
     def __repr__(self) -> str: ...
 
 @final
@@ -137,6 +153,9 @@ class MessageView:
     message_id: str
     sender_id: str
     content: str
+    content_type: str
+    category: str | None
+    visibility: str | None
     timestamp: datetime.datetime
     session_id: str
     addressed_to: list[str]
@@ -375,11 +394,32 @@ class Turn:
     def metadata(self, key: str, value: Any) -> Turn: ...
     def attach(self, source: IngestSource) -> Turn: ...
     def attachments(self, sources: list[IngestSource]) -> Turn: ...
+    def tool_call(self, call: ToolCall) -> Turn: ...
     def __repr__(self) -> str: ...
     def category(self, category: str) -> Turn: ...
     def source(self, source_id: str) -> Turn: ...
     def revision(self, revision_id: str) -> Turn: ...
     def visibility(self, visibility: str) -> Turn: ...
+
+@final
+class ToolCall:
+    def __new__(cls, tool_name: str) -> ToolCall: ...
+    def call_id(self, call_id: str) -> ToolCall: ...
+    def arguments(self, arguments: Any) -> ToolCall: ...
+    def json_output(self, value: Any) -> ToolCall: ...
+    def text_output(self, text: str) -> ToolCall: ...
+    def bytes_output(self, data: bytes, mime: str) -> ToolCall: ...
+    def status(self, status: str) -> ToolCall: ...
+    def error(self, error: str) -> ToolCall: ...
+    def started_at(self, at: datetime.datetime) -> ToolCall: ...
+    def ended_at(self, at: datetime.datetime) -> ToolCall: ...
+    def triggered_by(self, message_id: str) -> ToolCall: ...
+    def after(self, call_id: str) -> ToolCall: ...
+    def visibility(self, visibility: str) -> ToolCall: ...
+    def category(self, category: str) -> ToolCall: ...
+    def source(self, source_id: str) -> ToolCall: ...
+    def revision(self, revision_id: str) -> ToolCall: ...
+    def __repr__(self) -> str: ...
 
 @final
 class AssumeBuilder:
@@ -390,6 +430,146 @@ class AssumeBuilder:
     def __repr__(self) -> str: ...
 
 # ── Handles ────────────────────────────────────────────────────────────────
+
+@final
+class Sources:
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = ...,
+        session_id: str | None = ...,
+        tool_name: str | None = ...,
+    ) -> Awaitable[list[SearchHit]]: ...
+    def search_sync(
+        self,
+        query: str,
+        *,
+        limit: int = ...,
+        session_id: str | None = ...,
+        tool_name: str | None = ...,
+    ) -> list[SearchHit]: ...
+    def outline(
+        self,
+        source_kind: str,
+        source_id: str,
+        *,
+        depth: int = ...,
+        max_entries: int = ...,
+    ) -> Awaitable[Outline | None]: ...
+    def outline_sync(
+        self,
+        source_kind: str,
+        source_id: str,
+        *,
+        depth: int = ...,
+        max_entries: int = ...,
+    ) -> Outline | None: ...
+    def read(
+        self,
+        source_kind: str,
+        source_id: str,
+        *,
+        address: str | None = ...,
+        bytes: tuple[int, int] | None = ...,
+        lines: tuple[int, int] | None = ...,
+        chunks: tuple[int, int] | None = ...,
+        max_tokens: int = ...,
+    ) -> Awaitable[ReadResult | None]: ...
+    def read_sync(
+        self,
+        source_kind: str,
+        source_id: str,
+        *,
+        address: str | None = ...,
+        bytes: tuple[int, int] | None = ...,
+        lines: tuple[int, int] | None = ...,
+        chunks: tuple[int, int] | None = ...,
+        max_tokens: int = ...,
+    ) -> ReadResult | None: ...
+    def tool_call(self, call_id: str) -> Awaitable[ToolCallView | None]: ...
+    def tool_call_sync(self, call_id: str) -> ToolCallView | None: ...
+    def tool_calls(
+        self,
+        *,
+        session_id: str | None = ...,
+        tool_name: str | None = ...,
+        limit: int = ...,
+    ) -> Awaitable[list[ToolCallView]]: ...
+    def tool_calls_sync(
+        self,
+        *,
+        session_id: str | None = ...,
+        tool_name: str | None = ...,
+        limit: int = ...,
+    ) -> list[ToolCallView]: ...
+    def __repr__(self) -> str: ...
+
+@final
+class SearchHit:
+    source_kind: str
+    source_id: str
+    chunk_id: str
+    chunk_index: int
+    address: str | None
+    start: int
+    end: int
+    text: str
+    context: str | None
+    score: float
+    session_id: str | None
+    call_id: str | None
+    tool_name: str | None
+    def __repr__(self) -> str: ...
+
+@final
+class OutlineEntry:
+    address: str
+    kind: str
+    summary: str
+    start: int
+    end: int
+    depth: int
+    def __repr__(self) -> str: ...
+
+@final
+class Outline:
+    source_kind: str
+    source_id: str
+    format: str
+    total_bytes: int
+    total_lines: int
+    entries: list[OutlineEntry]
+    truncated: bool
+    def __repr__(self) -> str: ...
+
+@final
+class ReadResult:
+    source_kind: str
+    source_id: str
+    text: str
+    start: int
+    end: int
+    first_line: int
+    last_line: int
+    truncated: bool
+    next_bytes: tuple[int, int] | None
+    def __repr__(self) -> str: ...
+
+@final
+class ToolCallView:
+    call_id: str
+    tool_name: str | None
+    action_type: str
+    arguments: Any
+    status: str | None
+    error: str | None
+    started_at: datetime.datetime | None
+    ended_at: datetime.datetime | None
+    triggered_by: str | None
+    session_id: str | None
+    artifact_id: str | None
+    def __repr__(self) -> str: ...
 
 @final
 class Data:
@@ -518,6 +698,8 @@ class Session:
     ) -> bool: ...
     def commit_unit(self, turns: Sequence[Turn]) -> Awaitable[UnitResult]: ...
     def commit_unit_sync(self, turns: Sequence[Turn]) -> UnitResult: ...
+    def observe_tool(self, call: ToolCall) -> Awaitable[ToolCallResult]: ...
+    def observe_tool_sync(self, call: ToolCall) -> ToolCallResult: ...
     def record_action(
         self,
         action_type: str,
@@ -616,6 +798,8 @@ class Agent:
     def session(self, session_id: str) -> Session: ...
     @property
     def data(self) -> Data: ...
+    @property
+    def sources(self) -> Sources: ...
     @property
     def goals(self) -> Goals: ...
     def delete_session(self, session_id: str) -> Awaitable[DeletionReport]: ...
@@ -777,6 +961,7 @@ class UnikoBuilder:
     def config(self, config: Mapping[str, Any] | UnikoConfigModel) -> UnikoBuilder: ...
     def embedding(self, embedding: str | Mapping[str, Any]) -> UnikoBuilder: ...
     def reranker(self, reranker: str | Mapping[str, Any] | None) -> UnikoBuilder: ...
+    def nlp(self, nlp: str | Mapping[str, Any]) -> UnikoBuilder: ...
     def llm(self, spec: LlmSpec) -> UnikoBuilder: ...
     def streaming(self, on: bool) -> UnikoBuilder: ...
     def scope_to_agent(self) -> UnikoBuilder: ...
@@ -819,6 +1004,8 @@ class Uniko:
     def add_team_to_org_sync(self, team_id: str, org_id: str) -> bool: ...
     def remove_team_from_org(self, team_id: str, org_id: str) -> Awaitable[bool]: ...
     def remove_team_from_org_sync(self, team_id: str, org_id: str) -> bool: ...
+    def backfill_search_text(self) -> Awaitable[int]: ...
+    def backfill_search_text_sync(self) -> int: ...
     def purge(self) -> Awaitable[DeletionReport]: ...
     def purge_sync(self) -> DeletionReport: ...
     def shutdown(self) -> Awaitable[None]: ...
@@ -832,7 +1019,14 @@ __all__ = [
     "Agent",
     "Session",
     "Turn",
+    "ToolCall",
     "Data",
+    "Sources",
+    "SearchHit",
+    "Outline",
+    "OutlineEntry",
+    "ReadResult",
+    "ToolCallView",
     "Goals",
     "IngestSource",
     "Scope",
@@ -842,6 +1036,7 @@ __all__ = [
     "ContextBundle",
     "Answer",
     "ObserveResult",
+    "ToolCallResult",
     "DeletionReport",
     "FinalizeReport",
     "CycleStats",

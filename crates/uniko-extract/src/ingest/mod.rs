@@ -15,7 +15,9 @@ pub mod pdf;
 pub mod session;
 pub mod session_chunk;
 pub mod source;
+pub mod structure;
 pub mod text_extractor;
+pub mod tool;
 mod unit;
 
 pub use artifact::ArtifactIngestResult;

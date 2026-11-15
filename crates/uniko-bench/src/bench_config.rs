@@ -177,6 +177,9 @@ pub struct RecallSettings {
     /// Requires a hybrid embedder (e.g. the `bge-m3` preset). Default off.
     #[serde(default)]
     pub sparse_enabled: bool,
+    /// Fuse BM25 over `Fact.object` into Phase 1's Fact search. Default on.
+    #[serde(default = "default_fact_hybrid")]
+    pub fact_hybrid: bool,
     #[serde(default = "default_phase1_strategy")]
     pub phase1_strategy: String,
     #[serde(default = "default_phase1_boost_alpha")]
@@ -202,6 +205,7 @@ impl Default for RecallSettings {
             vector_weight: None,
             bm25_weight: None,
             sparse_enabled: false,
+            fact_hybrid: true,
             phase1_strategy: default_phase1_strategy(),
             phase1_boost_alpha: default_phase1_boost_alpha(),
             phase2_graph_enabled: true,
@@ -284,6 +288,10 @@ fn default_lme_token_budget() -> usize {
 }
 
 fn default_true() -> bool {
+    true
+}
+
+fn default_fact_hybrid() -> bool {
     true
 }
 
@@ -374,6 +382,7 @@ impl BenchConfig {
             config.recall_bm25_weight = w;
         }
         config.recall_sparse_enabled = self.recall.sparse_enabled;
+        config.recall_fact_hybrid = self.recall.fact_hybrid;
         config.phase1_strategy = self.recall.phase1_strategy.clone();
         config.phase1_boost_alpha = self.recall.phase1_boost_alpha;
         config.phase2_graph_enabled = self.recall.phase2_graph_enabled;

@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 # Reject unknown keys on every input spec — catches typo'd kwargs at the edge.
 _IN = ConfigDict(extra="forbid")
@@ -178,6 +178,59 @@ class IngestSourceSpec(BaseModel):
 # ── Turn (builder chain + nested attachments) ──────────────────────────────
 
 
+class ToolCallSpec(BaseModel):
+    """Validated payload for a ``ToolCall``.
+
+    Give at most one of ``json_output`` / ``text_output``. ``visibility`` is
+    ``"public"``, ``"private:<id>"``, ``"team:<id>"`` or ``"org:<id>"``.
+    """
+
+    model_config = _IN
+
+    tool_name: str = Field(min_length=1)
+    call_id: Optional[str] = None
+    arguments: Optional[Any] = None
+    json_output: Optional[Any] = None
+    text_output: Optional[str] = None
+    status: Optional[str] = None
+    error: Optional[str] = None
+    started_at: Optional[datetime.datetime] = None
+    ended_at: Optional[datetime.datetime] = None
+    triggered_by: Optional[str] = None
+    after: Optional[str] = None
+    visibility: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_output(self) -> "ToolCallSpec":
+        if self.json_output is not None and self.text_output is not None:
+            raise ValueError("give json_output or text_output, not both")
+        return self
+
+    def to_native(self) -> Any:
+        call = _native().ToolCall(self.tool_name)
+        if self.call_id is not None:
+            call = call.call_id(self.call_id)
+        if self.arguments is not None:
+            call = call.arguments(self.arguments)
+        if self.json_output is not None:
+            call = call.json_output(self.json_output)
+        if self.text_output is not None:
+            call = call.text_output(self.text_output)
+        for name in (
+            "status",
+            "error",
+            "started_at",
+            "ended_at",
+            "triggered_by",
+            "after",
+            "visibility",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                call = getattr(call, name)(value)
+        return call
+
+
 class TurnSpec(BaseModel):
     """Validated payload for a conversational ``Turn``."""
 
@@ -191,6 +244,7 @@ class TurnSpec(BaseModel):
     addressed_to: Optional[list[str]] = None
     metadata: Optional[dict[str, Any]] = None
     attachments: Optional[list[IngestSourceSpec]] = None
+    tool_calls: Optional[list[ToolCallSpec]] = None
 
     def to_native(self) -> Any:
         turn = _native().Turn(self.sender_id, self.content)
@@ -207,6 +261,8 @@ class TurnSpec(BaseModel):
                 turn = turn.metadata(key, value)
         if self.attachments:
             turn = turn.attachments([a.to_native() for a in self.attachments])
+        for call in self.tool_calls or []:
+            turn = turn.tool_call(call.to_native())
         return turn
 
 

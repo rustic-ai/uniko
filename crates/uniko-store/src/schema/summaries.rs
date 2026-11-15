@@ -29,7 +29,7 @@ pub(crate) fn register_labels<'a>(
         .index("text", IndexType::FullText)
         .index(
             "embedding",
-            IndexType::Vector(super::auto_embed_vector_index("text", config)),
+            IndexType::Vector(super::auto_embed_vector_index(&["text"], config)),
         )
         .done()
 }

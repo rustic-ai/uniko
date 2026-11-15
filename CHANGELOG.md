@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`Data` reads now apply the same policy as recall.** `message`,
+  `artifact` and `artifact_bytes` return `None` for forgotten content, and,
+  on an agent scoped to a viewer, for content that viewer may not read —
+  they used to return anything by id. `artifact_bytes` also returns `None`
+  when any of the artifact's chunks is forgotten or hidden, since the
+  original bytes would reveal them. `MessageView` gains `content_type`,
+  `category` and `visibility`.
+- **`RecallSource` has two new variants,** `Session` (a chunk of a session
+  transcript, which used to come back with no source) and `Tool` (a chunk of
+  a tool call's result), so an exhaustive `match` needs arms for them. In
+  Python, `RecallSource.kind` can be `"session"` or `"tool"`, with new
+  `session_id`, `call_id` and `tool_name` attributes. `RecallItem` gains
+  `token_count`, `context` and `address`.
+- **Recall's token budget counts real tokens.** Every item used to count as
+  50 tokens, so a bundle of long chunks could run far past
+  `recall_token_budget`; items are now counted with the same tokenizer as
+  chunking, an item too big for what is left is skipped, and
+  `ContextBundle.total_tokens` is what the bundle holds. Expect fewer, or
+  shorter, items from recall over long content.
+- **Text chunks are verbatim slices of their source.** The text chunker
+  used to cut after every `.`, `!` or `?` (so `3.14` and `src/foo.rs` were
+  split) and re-join the pieces with spaces, and its overlap was copied
+  text. A chunk's `text` is now exactly `content[start..end]`: sentences end
+  only at `.`, `!` or `?` followed by whitespace, lines are a boundary
+  before sentences, an oversized run is split at words then characters, and
+  overlap moves `start` back. New ingests chunk differently; existing chunks
+  are untouched.
+- **`record_action` writes its overflowed output through the artifact
+  path.** Output over `action_output_artifact_threshold` used to go to an
+  `Artifact {kind: "action_output"}` holding the text in a `content`
+  property, with no chunks; it is now an `Artifact {kind: "tool_output"}`
+  whose bytes are stored as `ArtifactContent`, chunked and searchable, and
+  structured (JSON) output overflows too. The Action and the artifact commit
+  in one transaction, and recording an `action_id` again with the same
+  output is a no-op while a different output is refused with
+  `IdConflict` — it used to update the Action in place.
+- **Tool-output turns are no longer analysed as sentences.** A turn with
+  `content_type` `tool_result`, `json`, `csv` or a JSON/CSV MIME whose
+  content is structured data (JSON, a table, a log, a diff) gets no NER, no
+  dialogue acts and no observations; it is chunked along its structure as
+  soon as it exceeds one chunk instead.
+
+- **`NlpConfig` has two new fields,** `generation` and `variant`, so a
+  struct literal needs them or `..NlpConfig::default()`. Serialized configs
+  without them still read as the v1 cascade.
 - **Python results that were tuples or counts are now classes.**
   `Session.commit_unit` returns a `UnitResult` (`turns`, `was_replay`)
   instead of a `(results, was_replay)` tuple, and `Session.summarize`
@@ -52,6 +97,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tool calls as first-class memory.** `ToolCall` records one call of one
+  tool — its name, call id, arguments, status, timing and result — with
+  `Turn::tool_call` (committed in the same transaction as the turn that
+  made it) or `Session::observe_tool` (committed on its own). Each becomes an
+  `:Action` (`action_type = "tool_call"`, new `tool_name` and
+  `payload_hash` properties) linked `TRIGGERED_BY` its turn, `IN_SESSION`,
+  `PERFORMED_BY` and `NEXT_ACTION`, and its result is stored verbatim as an
+  `Artifact {kind: "tool_output"}` it `PRODUCED`. Replaying a call id with
+  the same result is a no-op; a different result is refused. In Python:
+  `uniko.ToolCall`, `Turn.tool_call`, `Session.observe_tool`,
+  `ObserveResult.tool_calls` and `ToolCallResult`.
+- **Structure-aware chunking for tool output.** A tool's result is chunked
+  along its own structure — JSON values by pointer, CSV and Markdown table
+  rows, NDJSON records, log and output lines, diff hunks — and every chunk
+  is a verbatim slice with an `address` (`/data/items[3-9]`, `rows 10-19`)
+  and a `context` header: the tool and its arguments, the address, and the
+  values it inherits from outside itself (an enclosing object's scalars
+  such as `meta.currency=EUR`, a table's columns), capped at the new
+  `chunk_context_max_tokens` (default 64). A chunk is embedded from its
+  header and text together.
+- **A lexical recall channel that matches identifiers and figures whole.**
+  Every new chunk carries a normalised `search_text` (thousands separators
+  removed, identifiers kept whole and split into parts) indexed with a
+  whitespace analyzer, and Phase 3 searches it with the query's literals —
+  quoted phrases, identifiers, figures, paths, acronyms — counting double in
+  fusion when the query has any. `recall_lexical_enabled` (default on)
+  turns it off. `Uniko::backfill_search_text` (`backfill_search_text` in
+  Python) fills `search_text` for chunks from before the upgrade.
+- **Read tools.** `Agent::sources()` (`agent.sources` in Python) gives
+  deterministic `search` (lexical, every hit citing its source, address and
+  producing call), `outline` (a JSON payload's objects and arrays, or a
+  source's chunks), `read` (verbatim text by address, byte or line range,
+  or chunk range, cut at a token limit with the range to read next), and
+  `tool_call` / `tool_calls`. Every read applies recall's policy.
+- **Phase 1 finds Facts by their words as well as their embedding.**
+  `recall_fact_hybrid` (default on) fuses BM25 over a new full-text index on
+  `Fact.object` with the Fact vector search. On the LongMemEval oracle split
+  (100 questions, retrieval only) it raised R@5 from 0.847 to 0.934 and
+  NDCG@5 from 0.888 to 0.954; set it to `false` for the old behaviour.
+- **`tool-recall` bench.** A seeded generator of agent sessions whose
+  answers live in tool output (nested JSON, CSV, logs, test output), scored
+  with no LLM: evidence recall at rank and within a 2k-token budget,
+  inherited-context completeness, stale-record ranking, and a scripted
+  reader over the read tools.
+
+- **kniv v7 as the NLP model.** `NlpConfig` gains `generation` (`v1`, the
+  default, or `v7`) and a v7 precision `variant`, and `NlpConfig::preset`
+  names every published size: `v7-tiny`, `v7-small`, `v7-medium`,
+  `v7-large`, `v7-xlarge` and `v7-xlarge-d` (and `v1`). Pick one with
+  `UnikoBuilder::nlp` or, in Python, `UnikoBuilder.nlp("v7-small")`. Under
+  v7 a message is analysed in one pass and split by sentence; its word
+  tokens map one to one, and its six dialogue acts are projected onto the
+  v1 sentence classes the observation gate reads.
 - **Configure an instance from Python** (#45). `UnikoBuilder.config()` takes
   a dict or a `UnikoConfigModel` with any subset of the fields, nested
   sections included, and rejects unknown keys with a suggestion for near
@@ -106,8 +204,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and imports every wheel, the CUDA and Metal variants included, before it
   publishes any of them.
 
+### Changed
+
+- **uni-db 5.2 and uni-xervo 0.19.2.** uni-xervo 0.19.2 keeps titles and
+  initials inside one kniv v7 sentence ("Sen. Robert F. Kennedy spoke
+  today." was three sentences and two entities), and detects a kniv
+  model's generation from the contents of `onnx/onnx_meta.json` rather
+  than its presence; uniko still names the generation explicitly. uni-db
+  5.2 moves to Lance 14, whose English stop-word list no longer drops
+  negations (`no`, `not`, `don't`, …). A full-text index built by an
+  earlier release has no postings for them, so content written before the
+  upgrade is not found by those words until the index is rebuilt; uni-db
+  names the stale indexes in a warning when the store opens.
+
 ### Fixed
 
+- **Chunks of a long turn are searched.** Recall's Phase 3 searched session,
+  observation and artifact chunks but never the chunks of a long message,
+  which were reachable only through graph expansion.
+- **An attachment to a scoped turn is scoped with it.** Its chunks used to
+  stay public whatever the turn's visibility; a new attachment's chunks now
+  take the turn's visibility (one that deduplicates onto earlier content
+  keeps that content's audience).
+- **Recall no longer prints to stderr.** Leftover `RECALL_PROF` lines in
+  recall's hot path are `tracing` debug events, and a Python session's
+  failed finalize on context-manager exit is a `RuntimeWarning`.
+- Doc fixes: `Phase1Strategy`'s default, the facade's `phase1_strategy`,
+  which recall kinds the visibility filter checks, misplaced doc comments in
+  the recall repository, and schema counts that still read 24/53 or 25/54
+  node and edge types (it is 26 and 55; `config/schema.json` regenerated).
+
+- **Sentence splitting no longer cuts at titles, initials, months or
+  dotted acronyms.** The v1 path split at every period, so "Sen. Robert F.
+  Kennedy was shot." became three pieces, and the two under four words were
+  dropped unanalysed. It now follows kniv v7's reference rule: a sentence
+  ends at `.`, `!` or `?` before a capital, digit or quote, but not after
+  "Dr.", "F.", "Dec." or "U.S.". On the `nlp-compare` bench, v1's NER on
+  whole messages rises from 0.708 to 0.750 F1 on CoNLL04 and from 0.737 to
+  0.750 on the kniv corpus. The v7 path splits inside uni-xervo, which needs
+  the same fix.
 - **The streaming pipeline honours `UnikoConfig`.** It was always built from
   `PipelineConfig::default()`, so `ingest_queue_capacity`,
   `consolidation_queue_capacity`, `consolidation_threshold`,

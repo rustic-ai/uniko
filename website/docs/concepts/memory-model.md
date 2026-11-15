@@ -23,7 +23,7 @@ see the [Data Model](data-model.md).
 
 uniko implements five memory types from cognitive science, plus a band of
 connective and infrastructure nodes that hold the others together. Every one of
-the schema's **25 node types** appears in exactly one family below:
+the schema's **26 node types** appears in exactly one family below:
 
 | Memory family | What it holds | Node types |
 |---|---|---|
@@ -32,7 +32,7 @@ the schema's **25 node types** appears in exactly one family below:
 | Semantic | What we know — extracted and consolidated knowledge | `Entity`, `Observation`, `Fact`, `Topic`, `Summary` |
 | Procedural | What works — proven patterns and formal logic | `Procedure`, `Rule` |
 | Meta | How knowledge is managed — consolidation and operational tracking | `ConsolidationCycle`, `KnowledgeBaseStats`, `DeadLetter`[^infra] |
-| Support | The connective tissue everything hangs from | `Participant`, `Session`, `Artifact`, `ArtifactContent`, `Chunk`, `Page`, `Block`, `Organization`, `Team` |
+| Support | The connective tissue everything hangs from | `Participant`, `Session`, `Source`, `Artifact`, `ArtifactContent`, `Chunk`, `Page`, `Block`, `Organization`, `Team` |
 
 [^infra]: A few nodes are included here for completeness but are bookkeeping
     rather than cognitive families in their own right: `DeadLetter` captures

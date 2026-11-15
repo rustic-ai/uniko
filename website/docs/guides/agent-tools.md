@@ -155,8 +155,15 @@ pub struct RecordActionResult {
 ```
 
 When `output` exceeds `UnikoConfig::action_output_artifact_threshold` (default **256** tokens), the
-full payload overflows into an `Artifact` linked by `PRODUCED` and the Action keeps a short stub —
-`overflow_artifact` carries that node's id.
+full payload is stored verbatim as an `Artifact` of kind `tool_output` linked by `PRODUCED` — chunked
+along its structure and searchable by recall — and the Action keeps a short stub; `overflow_artifact`
+carries that node's id. The Action and the artifact commit in one transaction. Recording the same
+`action_id` again with the same output is a no-op; with a different output it fails with
+`UnikoError::IdConflict`.
+
+!!! tip "Recording tool calls"
+    For an agent's tool calls, prefer [`ToolCall`](tool-output.md) on the turn that made them: the
+    call commits with the turn, and its result is always stored and searchable, however small.
 
 ```rust
 use serde_json::json;

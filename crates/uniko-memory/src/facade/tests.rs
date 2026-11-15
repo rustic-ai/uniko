@@ -3667,3 +3667,589 @@ async fn text_extractor_indexes_images_as_extracted_text() {
     assert!(view.text.contains("red zeppelin"), "{}", view.text);
     assert_eq!(view.kind, "image");
 }
+
+/// `Data` reads apply the same policy as recall: a scoped agent cannot read
+/// another participant's private turn or its attachment by id, and nobody
+/// reads a forgotten turn.
+#[tokio::test]
+async fn data_reads_respect_visibility_and_forgetting() {
+    use crate::{IngestSource, Visibility};
+
+    let memory = match Uniko::builder().in_memory().scope_to_agent().build().await {
+        Ok(memory) => memory,
+        Err(e) => {
+            eprintln!("skipping: in-memory instance unavailable: {e}");
+            return;
+        }
+    };
+    let alice = memory.agent("alice");
+    let bob = memory.agent("bob");
+    let mut session = alice.session("s-data-policy");
+    let doc = IngestSource::text("The vault code is 4471 and lives in the blue binder.")
+        .with_id("doc-private");
+    if let Err(e) = session
+        .observe(
+            Turn::new("alice", "Only I should read this note.")
+                .id("m-private")
+                .visibility(Visibility::Private("alice".into()))
+                .attach(doc),
+        )
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: models unavailable");
+            return;
+        }
+        panic!("observe failed: {e}");
+    }
+    session
+        .observe(Turn::new("alice", "This one is for everybody.").id("m-public"))
+        .await
+        .expect("observe public");
+
+    // The owner reads both, and the attachment with its bytes.
+    let own = alice.data().message("m-private").await.expect("read");
+    let own = own.expect("alice reads her private turn");
+    assert_eq!(own.visibility.as_deref(), Some("private:alice"));
+    assert_eq!(own.content_type, "text");
+    assert!(
+        alice
+            .data()
+            .artifact("doc-private")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        alice
+            .data()
+            .artifact_bytes("doc-private")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Bob reads the public turn but not the private one or its attachment.
+    assert!(bob.data().message("m-public").await.unwrap().is_some());
+    assert!(bob.data().message("m-private").await.unwrap().is_none());
+    assert!(bob.data().artifact("doc-private").await.unwrap().is_none());
+    assert!(
+        bob.data()
+            .artifact_bytes("doc-private")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Once forgotten, not even the owner reads the turn.
+    session.forget_turn("m-public").await.expect("forget");
+    assert!(alice.data().message("m-public").await.unwrap().is_none());
+
+    drop((alice, bob, session));
+    memory.shutdown().await.expect("shutdown");
+}
+
+// ── Tool calls ─────────────────────────────────────────────────────────
+
+fn orders_payload() -> serde_json::Value {
+    let items: Vec<serde_json::Value> = (0..30)
+        .map(|i| {
+            serde_json::json!({
+                "order_id": format!("ORD-{}", 50_000 + i),
+                "status": if i == 17 { "refunded" } else { "shipped" },
+                "amount": 1_000 + i * 37,
+            })
+        })
+        .collect();
+    serde_json::json!({"meta": {"currency": "EUR", "amount_unit": "cents"}, "data": {"items": items}})
+}
+
+/// A turn and the tool call it made commit together: the Action is linked
+/// to the turn and session, and its result is a verbatim `tool_output`
+/// artifact the Action produced.
+#[tokio::test]
+async fn tool_call_commits_with_its_turn() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("tools-1");
+    let payload = orders_payload();
+    let call = crate::ToolCall::new("list_orders")
+        .call_id("call-orders-1")
+        .arguments(serde_json::json!({"customer_id": "C-1042"}))
+        .json_output(payload.clone())
+        .status("ok");
+    let result = match session
+        .observe(
+            Turn::new("assistant", "Checking the orders API.")
+                .id("m-tool-1")
+                .tool_call(call),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: models unavailable");
+            return;
+        }
+        Err(e) => panic!("observe failed: {e}"),
+    };
+    let [tc] = result.tool_calls.as_slice() else {
+        panic!(
+            "one tool call result expected, got {}",
+            result.tool_calls.len()
+        );
+    };
+    assert_eq!(tc.call_id, "call-orders-1");
+    assert!(!tc.was_replay);
+    let artifact_id = tc.artifact_id.clone().expect("result artifact");
+
+    let kb = agent.kb();
+    assert_eq!(
+        count_query(
+            kb,
+            "MATCH (a:Action {action_id: 'call-orders-1'})-[:TRIGGERED_BY]->(:Message {message_id: 'm-tool-1'}) \
+             MATCH (a)-[:IN_SESSION]->(:Session {session_id: 'tools-1'}) \
+             MATCH (a)-[:PERFORMED_BY]->(:Participant {participant_id: 'assistant'}) \
+             MATCH (a)-[:PRODUCED]->(art:Artifact {kind: 'tool_output'}) \
+             WHERE a.tool_name = 'list_orders' AND a.action_type = 'tool_call' \
+             RETURN count(art) AS c"
+        )
+        .await,
+        1,
+        "the Action is wired to its turn, session, performer and result"
+    );
+    let bytes = agent
+        .data()
+        .artifact_bytes(&artifact_id)
+        .await
+        .unwrap()
+        .expect("result bytes");
+    let stored: serde_json::Value = serde_json::from_slice(&bytes).expect("stored JSON");
+    assert_eq!(stored, payload, "the result is stored verbatim");
+
+    drop((agent, session));
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Recording the same call again with the same result is a no-op; with a
+/// different result it is refused.
+#[tokio::test]
+async fn tool_call_replay_is_idempotent_and_conflicts_are_refused() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let session = agent.session("tools-2");
+    let call = || {
+        crate::ToolCall::new("run_tests")
+            .call_id("call-tests-1")
+            .arguments(serde_json::json!({"commit": "4f2a9c1"}))
+            .text_output("tests/test_pay.py::test_refund FAILED\n1 failed, 39 passed")
+    };
+    let first = match session.observe_tool(call()).await {
+        Ok(r) => r,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: models unavailable");
+            return;
+        }
+        Err(e) => panic!("observe_tool failed: {e}"),
+    };
+    assert!(!first.was_replay);
+    let again = session.observe_tool(call()).await.expect("replay");
+    assert!(again.was_replay, "same id and result is a replay");
+    assert_eq!(again.action_node, first.action_node);
+    assert_eq!(
+        count_query(
+            agent.kb(),
+            "MATCH (a:Action {action_id: 'call-tests-1'}) RETURN count(a) AS c"
+        )
+        .await,
+        1
+    );
+    let conflict = session
+        .observe_tool(call().text_output("all 40 passed"))
+        .await
+        .expect_err("a different result under the same id must be refused");
+    assert!(
+        matches!(conflict, UnikoError::IdConflict { .. }),
+        "expected IdConflict, got {conflict:?}"
+    );
+
+    drop((agent, session));
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A unit that fails after its tool calls are written leaves neither the
+/// Action nor its result artifact behind.
+#[tokio::test]
+async fn tool_call_rolls_back_with_its_unit() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("tools-3");
+    // SAFETY: nextest runs each test in its own process.
+    unsafe { std::env::set_var("UNIKO_TEST_FAIL_AFTER_TOOLS", "1") };
+    let result = session
+        .observe(
+            Turn::new("assistant", "Fetching the logs.")
+                .id("m-tool-rb")
+                .tool_call(
+                    crate::ToolCall::new("fetch_logs")
+                        .call_id("call-logs-rb")
+                        .text_output("12:00:01 ERROR payments request_id=r1 error=timeout"),
+                ),
+        )
+        .await;
+    unsafe { std::env::remove_var("UNIKO_TEST_FAIL_AFTER_TOOLS") };
+    let Err(err) = result else {
+        panic!("the injected failure must fail the unit");
+    };
+    if is_model_unavailable(&err) {
+        eprintln!("skipping: models unavailable");
+        return;
+    }
+    for (what, q) in [
+        ("message", "MATCH (m:Message) RETURN count(m) AS c"),
+        ("action", "MATCH (a:Action) RETURN count(a) AS c"),
+        ("artifact", "MATCH (a:Artifact) RETURN count(a) AS c"),
+        ("chunk", "MATCH (c:Chunk) RETURN count(c) AS c"),
+    ] {
+        assert_eq!(
+            count_query(agent.kb(), q).await,
+            0,
+            "{what} must have rolled back"
+        );
+    }
+    drop((agent, session));
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A tool call's result is found by recall through its chunks.
+#[tokio::test]
+async fn tool_call_result_is_recalled() {
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("tools-4");
+    if let Err(e) = session
+        .observe(
+            Turn::new("assistant", "Looking up the orders.")
+                .id("m-tool-4")
+                .tool_call(
+                    crate::ToolCall::new("list_orders")
+                        .call_id("call-orders-4")
+                        .json_output(orders_payload()),
+                ),
+        )
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: models unavailable");
+            return;
+        }
+        panic!("observe failed: {e}");
+    }
+    let bundle = match agent.recall("What is the status of order ORD-50017?").await {
+        Ok(b) => b,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("recall failed: {e}"),
+    };
+    assert!(
+        bundle.items.iter().any(|i| i.content.contains("ORD-50017")),
+        "the order record should be recalled; got {:?}",
+        bundle.items.iter().map(|i| &i.content).collect::<Vec<_>>()
+    );
+    drop((agent, session));
+    memory.shutdown().await.expect("shutdown");
+}
+
+// ── Read tools ─────────────────────────────────────────────────────────
+
+/// search → outline → read round trip over a tool call's JSON result.
+#[tokio::test]
+async fn sources_search_outline_and_read_a_tool_result() {
+    use crate::facade::{ReadRange, SearchOptions, SourceRef};
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("src-1");
+    if let Err(e) = session
+        .observe(
+            Turn::new("assistant", "Pulling the order list.")
+                .id("m-src-1")
+                .tool_call(
+                    crate::ToolCall::new("list_orders")
+                        .call_id("call-src-1")
+                        .arguments(serde_json::json!({"customer_id": "C-1042"}))
+                        .json_output(orders_payload()),
+                ),
+        )
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: models unavailable");
+            return;
+        }
+        panic!("observe failed: {e}");
+    }
+    let sources = agent.sources();
+
+    let hits = sources
+        .search(
+            "which status does ORD-50017 have",
+            &SearchOptions::default(),
+        )
+        .await
+        .expect("search");
+    let hit = hits
+        .iter()
+        .find(|h| h.text.contains("ORD-50017"))
+        .unwrap_or_else(|| panic!("the record should be found: {hits:?}"));
+    assert_eq!(hit.call_id.as_deref(), Some("call-src-1"));
+    assert_eq!(hit.tool_name.as_deref(), Some("list_orders"));
+    assert!(
+        hit.context
+            .as_deref()
+            .is_some_and(|c| c.contains("meta.currency=EUR"))
+    );
+    let SourceRef::Artifact(artifact_id) = &hit.source else {
+        panic!("a tool result is an artifact: {:?}", hit.source);
+    };
+
+    let outline = sources
+        .outline(&hit.source, 3, 0)
+        .await
+        .expect("outline")
+        .expect("visible");
+    assert_eq!(outline.format, "json");
+    assert!(
+        outline
+            .entries
+            .iter()
+            .any(|e| e.address == "/data/items" && e.summary.starts_with("30 objects"))
+    );
+
+    let read = sources
+        .read(&hit.source, &ReadRange::Address("/data/items/17".into()), 0)
+        .await
+        .expect("read")
+        .expect("readable");
+    let record: serde_json::Value = serde_json::from_str(&read.text).expect("an exact JSON value");
+    assert_eq!(record["order_id"], "ORD-50017");
+    assert_eq!(record["status"], "refunded");
+
+    let small = sources
+        .read(
+            &SourceRef::Artifact(artifact_id.clone()),
+            &ReadRange::Lines(1, 400),
+            30,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(small.truncated);
+    let Some(ReadRange::Bytes(from, _)) = small.next else {
+        panic!("a cut read reports the rest");
+    };
+    assert_eq!(from, small.end);
+
+    let call = sources
+        .tool_call("call-src-1")
+        .await
+        .unwrap()
+        .expect("call");
+    assert_eq!(call.tool_name.as_deref(), Some("list_orders"));
+    assert_eq!(call.triggered_by.as_deref(), Some("m-src-1"));
+    assert_eq!(
+        call.arguments,
+        Some(serde_json::json!({"customer_id": "C-1042"}))
+    );
+    assert_eq!(call.artifact_id.as_deref(), Some(artifact_id.as_str()));
+    assert_eq!(
+        sources
+            .tool_calls(Some("src-1"), None, 0)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    drop(sources);
+    drop((agent, session));
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A private tool call is invisible to another viewer through every read
+/// tool, and visible to its owner.
+#[tokio::test]
+async fn sources_hide_a_private_tool_call_from_other_viewers() {
+    use crate::Visibility;
+    use crate::facade::{ReadRange, SearchOptions, SourceRef};
+    let memory = match Uniko::builder().in_memory().scope_to_agent().build().await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("skipping: in-memory instance unavailable: {e}");
+            return;
+        }
+    };
+    let alice = memory.agent("alice");
+    let bob = memory.agent("bob");
+    let mut session = alice.session("src-2");
+    if let Err(e) = session
+        .observe(
+            Turn::new("alice", "Checking my payroll export.")
+                .id("m-src-2")
+                .visibility(Visibility::Private("alice".into()))
+                .tool_call(
+                    crate::ToolCall::new("export_payroll")
+                        .call_id("call-src-2")
+                        .text_output("employee_id=E-7731 salary=91000 bank=XX-0042"),
+                ),
+        )
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: models unavailable");
+            return;
+        }
+        panic!("observe failed: {e}");
+    }
+    let artifact = SourceRef::Artifact("call-src-2:output".into());
+    let q = "salary of E-7731";
+
+    let mine = alice
+        .sources()
+        .search(q, &SearchOptions::default())
+        .await
+        .unwrap();
+    assert!(
+        mine.iter().any(|h| h.text.contains("E-7731")),
+        "the owner finds it"
+    );
+    assert!(
+        alice
+            .sources()
+            .tool_call("call-src-2")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let theirs = bob
+        .sources()
+        .search(q, &SearchOptions::default())
+        .await
+        .unwrap();
+    assert!(theirs.is_empty(), "bob must not find it: {theirs:?}");
+    assert!(
+        bob.sources()
+            .tool_call("call-src-2")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        bob.sources()
+            .outline(&artifact, 2, 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        bob.sources()
+            .read(&artifact, &ReadRange::Bytes(0, 100), 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    drop((alice, bob, session));
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// Chunks without `search_text` (a store from before it existed) are not
+/// seen by lexical search until `backfill_search_text` fills them.
+#[tokio::test]
+async fn backfill_search_text_restores_lexical_search() {
+    use crate::facade::SearchOptions;
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("assistant");
+    let mut session = agent.session("backfill-1");
+    if let Err(e) = session
+        .observe(
+            Turn::new("assistant", "Fetching orders.")
+                .id("m-bf-1")
+                .tool_call(
+                    crate::ToolCall::new("list_orders")
+                        .call_id("call-bf-1")
+                        .json_output(orders_payload()),
+                ),
+        )
+        .await
+    {
+        if is_model_unavailable(&e) {
+            eprintln!("skipping: models unavailable");
+            return;
+        }
+        panic!("observe failed: {e}");
+    }
+    let q = "ORD-50023";
+    let found = |hits: &[crate::facade::SearchHit]| hits.iter().any(|h| h.text.contains(q));
+    assert!(found(
+        &agent
+            .sources()
+            .search(q, &SearchOptions::default())
+            .await
+            .unwrap()
+    ));
+
+    // Simulate an upgraded store: chunks written before `search_text`.
+    let session_db = agent.kb().db().session(); // ALLOW: test-only fixture write; the seal governs product code.
+    let tx = session_db.tx().await.unwrap();
+    tx.query_with("MATCH (c:Chunk) SET c.search_text = NULL")
+        .fetch_all()
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(!found(
+        &agent
+            .sources()
+            .search(q, &SearchOptions::default())
+            .await
+            .unwrap()
+    ));
+
+    let filled = memory.backfill_search_text().await.expect("backfill");
+    assert!(filled > 0, "chunks should have been filled");
+    assert_eq!(
+        memory.backfill_search_text().await.unwrap(),
+        0,
+        "idempotent"
+    );
+    assert!(found(
+        &agent
+            .sources()
+            .search(q, &SearchOptions::default())
+            .await
+            .unwrap()
+    ));
+
+    drop((agent, session));
+    memory.shutdown().await.expect("shutdown");
+}

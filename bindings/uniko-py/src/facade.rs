@@ -18,7 +18,9 @@ use uniko_api::tools::{
 };
 
 use crate::agent::PyAgent;
-use crate::config::{config_from_py, config_to_py, embedding_from_py, reranker_from_py};
+use crate::config::{
+    config_from_py, config_to_py, embedding_from_py, nlp_from_py, reranker_from_py,
+};
 use crate::errors::to_pyerr;
 use crate::macros::{bridge, bridge_sync, pymethods_with_sync};
 use crate::outputs::{PyDeletionReport, PyPipelineHealth};
@@ -236,6 +238,19 @@ pymethods_with_sync! {
             }
         }
 
+        /// Fill search text for chunks from before the lexical channel
+        /// existed; returns how many were filled. Run once after upgrading.
+        fn backfill_search_text / backfill_search_text_sync(&self, py) -> usize {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                instance.backfill_search_text().await.map_err(to_pyerr)
+
+            }
+        }
+
         /// Erase the entire graph. Intended for dev/test reset.
         fn purge / purge_sync(&self, py) -> Py<PyDeletionReport> {
             prepare {
@@ -346,6 +361,16 @@ pymethods_with_sync! {
         ) -> PyResult<PyRef<'py, Self>> {
             let reranker = reranker_from_py(reranker)?;
             slf.map(|b| b.reranker(reranker))?;
+            Ok(slf)
+        }
+
+        /// Choose the NLP model behind entity and observation extraction: a
+        /// preset (`"v1"`, the default cascade, or a kniv v7 size: `"v7-tiny"`,
+        /// `"v7-small"`, `"v7-medium"`, `"v7-large"`, `"v7-xlarge"`,
+        /// `"v7-xlarge-d"`) or a dict merged onto the default `nlp` section.
+        fn nlp<'py>(slf: PyRef<'py, Self>, nlp: &Bound<'_, PyAny>) -> PyResult<PyRef<'py, Self>> {
+            let nlp = nlp_from_py(nlp)?;
+            slf.map(|b| b.nlp(nlp))?;
             Ok(slf)
         }
 

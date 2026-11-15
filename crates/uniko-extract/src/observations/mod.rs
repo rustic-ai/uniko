@@ -252,6 +252,16 @@ pub async fn prepare_observations(
 ) -> Result<ObservationPrepOutcome, UnikoError> {
     let step_start = std::time::Instant::now();
 
+    // Structured data (JSON, a table, a log, a diff) yields no
+    // conversational observations; see `extract_for_unit`.
+    if crate::ingest::message::structured_content_format(input.content_type, input.content)
+        .is_some_and(|f| f != crate::ingest::structure::Format::Text)
+    {
+        return Ok(ObservationPrepOutcome::Skip(
+            "structured content is not observed".into(),
+        ));
+    }
+
     // Slow-path sender resolution: only when caller didn't already
     // resolve it (e.g. legacy path through ObservationExtractionStep
     // without ctx.sender populated). The atomic orchestrator always

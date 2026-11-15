@@ -49,6 +49,10 @@ pub(crate) fn register_labels<'a>(
         .index("fact_id", IndexType::Scalar(ScalarType::Hash))
         .index("subject", IndexType::Scalar(ScalarType::Hash))
         .index("subject", IndexType::FullText)
+        // Phase 1's hybrid Fact channel (`recall_fact_hybrid`) matches the
+        // query's words against what a Fact asserts, which lives in
+        // `object` (the content recall projects for a Fact).
+        .index("object", IndexType::FullText)
         .index("predicate", IndexType::Scalar(ScalarType::Hash))
         .index("confidence", IndexType::Scalar(ScalarType::BTree))
         .index("embedding", IndexType::Vector(super::vector_index(config)))

@@ -73,6 +73,7 @@ async fn image_channel_fires_when_all_preconditions_met() {
             image_vec: Some(one_hot(0)),
             audio_vec: None,
         },
+        literals: Vec::new(),
     };
 
     let cfg = RecallConfig {
@@ -126,6 +127,7 @@ async fn image_channel_dormant_when_toggle_off() {
             image_vec: Some(one_hot(0)),
             audio_vec: None,
         },
+        literals: Vec::new(),
     };
 
     let cfg = RecallConfig::default(); // toggle off
@@ -157,6 +159,7 @@ async fn image_channel_dormant_when_no_query_vec() {
         // image_vec = None — the channel must NOT fire even with both
         // corpus-side and config-side gates open.
         query_modalities: QueryModalities::default(),
+        literals: Vec::new(),
     };
 
     let cfg = RecallConfig {

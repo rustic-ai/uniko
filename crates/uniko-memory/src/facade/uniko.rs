@@ -7,7 +7,7 @@ use std::sync::Arc;
 use uniko_extract::ingest::{ModalityExtractor, ModalityRegistry};
 use uniko_pipes::config::PipelineConfig;
 use uniko_pipes::health::PipelineHealth;
-use uniko_store::config::{EmbeddingConfig, RerankerConfig, UnikoConfig};
+use uniko_store::config::{EmbeddingConfig, NlpConfig, RerankerConfig, UnikoConfig};
 use uniko_store::repository::policy::Membership;
 use uniko_store::xervo::{ModelAliasSpec, ModelTask, WarmupPolicy};
 use uniko_store::{DeletionReport, KnowledgeBase, UnikoError};
@@ -234,6 +234,18 @@ impl Uniko {
         self.streaming.as_ref().map(|pipeline| pipeline.health())
     }
 
+    /// Fill `Chunk.search_text` for chunks written before it existed, so
+    /// the lexical recall channel and [`Sources::search`](crate::Sources::search)
+    /// see them. Run it once after opening a store from an earlier release;
+    /// idempotent, and returns how many chunks it filled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a read or write failure.
+    pub async fn backfill_search_text(&self) -> Result<usize, UnikoError> {
+        uniko_extract::ingest::structure::backfill_chunk_search_text(&self.kb, 0).await
+    }
+
     /// Erase the entire graph. Intended for dev/test reset.
     ///
     /// # Errors
@@ -333,6 +345,7 @@ pub struct UnikoBuilder {
     config: Option<UnikoConfig>,
     embedding: Option<EmbeddingConfig>,
     reranker: Option<RerankerConfig>,
+    nlp: Option<NlpConfig>,
     llm: Option<LlmSpec>,
     streaming: bool,
     scope: RecallScope,
@@ -370,6 +383,18 @@ impl UnikoBuilder {
     #[must_use]
     pub fn reranker(mut self, reranker: RerankerConfig) -> Self {
         self.reranker = Some(reranker);
+        self
+    }
+
+    /// Override the NLP model behind NER and observation extraction
+    /// (defaults to the kniv v1 cascade). [`NlpConfig::preset`] names the
+    /// published ones, every kniv v7 size included. Like
+    /// [`embedding`](UnikoBuilder::embedding), this wins over the `nlp`
+    /// section of [`raw_config`](UnikoBuilder::raw_config) whichever is
+    /// called first.
+    #[must_use]
+    pub fn nlp(mut self, nlp: NlpConfig) -> Self {
+        self.nlp = Some(nlp);
         self
     }
 
@@ -444,6 +469,9 @@ impl UnikoBuilder {
         }
         if let Some(reranker) = self.reranker {
             config.reranker = reranker;
+        }
+        if let Some(nlp) = self.nlp {
+            config.nlp = nlp;
         }
         let pipeline_config = PipelineConfig::from_uniko_config(&config);
 

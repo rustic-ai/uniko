@@ -138,6 +138,7 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `config` | `config(config: dict \| UnikoConfigModel) -> UnikoBuilder` | — (sync) | Base configuration, merged onto the defaults. |
 | `embedding` | `embedding(embedding: str \| dict) -> UnikoBuilder` | — (sync) | Embedding model: a preset name or an `embedding` section. |
 | `reranker` | `reranker(reranker: str \| dict \| None) -> UnikoBuilder` | — (sync) | Reranker: `"bge-base"`, `"minilm"`, a `reranker` section, or `None` for off. |
+| `nlp` | `nlp(nlp: str \| dict) -> UnikoBuilder` | — (sync) | NLP model for entity and observation extraction: `"v1"` (default), a kniv v7 size (`"v7-tiny"`, `"v7-small"`, `"v7-medium"`, `"v7-large"`, `"v7-xlarge"`, `"v7-xlarge-d"`), or an `nlp` section. Wins over `config()` in either order. |
 | `llm` | `llm(spec: LlmSpec) -> UnikoBuilder` | — (sync) | Generation model — **required for `answer()`**. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
@@ -226,6 +227,7 @@ answer = await agent.answer("when is the deadline?")   # needs .llm(...)
 | --- | --- | --- |
 | `agent_id` | `str` | The agent's identity. |
 | `data` | `Data` | By-id retrieval surface. |
+| `sources` | `Sources` | Deterministic read tools: search, outline, read, tool calls. |
 | `goals` | `Goals` | Goals & tasks surface. |
 
 ### Recall, answer, query
@@ -364,6 +366,7 @@ assert result.message_node_id > 0
 | `finalize` | `finalize() -> Awaitable[FinalizeReport]` | `finalize_sync` | Build/refresh the session-level retrieval surfaces. |
 | `commit_unit` | `commit_unit(turns: Sequence[Turn]) -> Awaitable[UnitResult]` | `commit_unit_sync` | Several turns as one atomic, idempotent write. |
 | `summarize` | `summarize() -> Awaitable[SummarizeReport]` | `summarize_sync` | Finalize, then write a summary of anything new. |
+| `observe_tool` | `observe_tool(call: ToolCall) -> Awaitable[ToolCallResult]` | `observe_tool_sync` | Record a tool call on its own, apart from any turn. |
 | `record_action` | `record_action(action_type, *, ...) -> Awaitable[ActionResult]` | `record_action_sync` | `Agent.record_action`, linked to this session. |
 
 !!! note "Streaming lane requires `streaming(True)`"
@@ -406,7 +409,9 @@ assert result.message_node_id > 0
 ## `Data`
 
 By-id retrieval, reached via `agent.data`. An unknown id returns `None` — these methods never raise
-for a missing id.
+for a missing id. They apply recall's policy: forgotten content, and on an agent scoped to a viewer
+anything that viewer may not read, also returns `None`; `artifact_bytes` returns `None` when any of
+the artifact's chunks is forgotten or hidden.
 
 | Method | Signature | Sync | Description |
 | --- | --- | --- | --- |
@@ -417,6 +422,22 @@ for a missing id.
 !!! warning "Binary payloads: use `artifact_bytes`"
     Raw bytes cannot be read back through a Cypher `RETURN`. `artifact_bytes` is the supported path
     for binary payloads — reach for it instead of `query`/`query_in` when you need the bytes.
+
+---
+
+## `Sources`
+
+Deterministic read tools, reached via `agent.sources`; see the [Tool Output guide](../guides/tool-output.md).
+A source is named by `source_kind` (`"artifact"`, `"message"` or `"session"`) and `source_id`. An
+unknown or invisible source returns `None`.
+
+| Method | Signature | Sync | Description |
+| --- | --- | --- | --- |
+| `search` | `search(query, *, limit=10, session_id=None, tool_name=None) -> Awaitable[list[SearchHit]]` | `search_sync` | Lexical search; identifiers and figures match whole. |
+| `outline` | `outline(source_kind, source_id, *, depth=3, max_entries=200) -> Awaitable[Outline \| None]` | `outline_sync` | A JSON payload's objects and arrays, or a source's chunks. |
+| `read` | `read(source_kind, source_id, *, address=None, bytes=None, lines=None, chunks=None, max_tokens=2000) -> Awaitable[ReadResult \| None]` | `read_sync` | Verbatim text; give exactly one range. |
+| `tool_call` | `tool_call(call_id) -> Awaitable[ToolCallView \| None]` | `tool_call_sync` | A recorded call. |
+| `tool_calls` | `tool_calls(*, session_id=None, tool_name=None, limit=50) -> Awaitable[list[ToolCallView]]` | `tool_calls_sync` | Recorded calls, newest first. |
 
 ---
 
@@ -542,6 +563,7 @@ A `Turn` is reusable — feeding it to `observe`/`submit` does not consume it.
 | `.metadata` | `.metadata(key: str, value: Any)` | Add one metadata entry. |
 | `.attach` | `.attach(source: IngestSource)` | Attach one source. |
 | `.attachments` | `.attachments(sources: list[IngestSource])` | Attach many. |
+| `.tool_call` | `.tool_call(call: ToolCall)` | Record a tool call this turn made; it commits with the turn. |
 | `.visibility` | `.visibility(visibility: str)` | Scope the turn and what derives from it; see [Visibility](#visibility). |
 
 ```python
@@ -550,6 +572,26 @@ turn = (uniko.Turn("alice", "see the attached report")
         .metadata("channel", "email")
         .attach(uniko.IngestSource.from_path("report.pdf")))
 ```
+
+### `ToolCall`
+
+```python
+ToolCall(tool_name: str)
+```
+
+One call of one tool. Reusable, like `Turn`.
+
+| Setter | Signature | Default / Notes |
+| --- | --- | --- |
+| `.call_id` | `.call_id(call_id: str)` | Derived from the session, turn, tool, arguments and result if unset. |
+| `.arguments` | `.arguments(arguments: Any)` | Any JSON-shaped value. |
+| `.json_output` / `.text_output` / `.bytes_output` | `.json_output(value)`, `.text_output(text)`, `.bytes_output(data, mime)` | The result, stored verbatim. |
+| `.status` / `.error` | `.status(status: str)`, `.error(error: str)` | — |
+| `.started_at` / `.ended_at` | `.started_at(at: datetime)` | now / the start time |
+| `.triggered_by` | `.triggered_by(message_id: str)` | Only for `Session.observe_tool`. |
+| `.after` | `.after(call_id: str)` | The session's previous call. |
+| `.visibility` | `.visibility(visibility: str)` | The turn's visibility. |
+| `.category` / `.source` / `.revision` | — | Provenance of the result. |
 
 ### `IngestSource`
 
@@ -605,8 +647,11 @@ The provenance of a recalled item.
 
 | Field | Type |
 | --- | --- |
-| `kind` | `str` |
+| `kind` | `"message"`, `"attachment"`, `"document"`, `"session"` or `"tool"` |
 | `message_id` | `str \| None` |
+| `session_id` | `str \| None` — for a session transcript chunk |
+| `call_id` | `str \| None` — for a tool call's result |
+| `tool_name` | `str \| None` |
 | `artifact_id` | `str \| None` |
 | `chunk_id` | `str \| None` |
 
@@ -621,6 +666,9 @@ One ranked piece of context.
 | `score` | `float` |
 | `content` | `str` |
 | `sources` | `list[RecallSource]` |
+| `token_count` | `int` — tokens in `content`, as the budget counts them |
+| `context` | `str \| None` — for a tool-output chunk, the header of what it inherits |
+| `address` | `str \| None` — where the chunk sits in its source |
 
 ### `ContextBundle`
 
@@ -665,6 +713,30 @@ The result of `observe`.
 | `extracted_entities` | `list[tuple[int, str]]` |
 | `extracted_observations` | `list[int]` |
 | `attachments` | `list[IngestOutcome]` — one per attachment, in order |
+| `tool_calls` | `list[ToolCallResult]` — one per `Turn.tool_call`, in order |
+
+### `ToolCallResult`
+
+The result of recording one tool call.
+
+| Field | Type |
+| --- | --- |
+| `call_id` | `str` |
+| `action_node` | `int` |
+| `artifact_id` | `str \| None` |
+| `artifact_node` | `int \| None` |
+| `was_replay` | `bool` |
+
+### `SearchHit`, `Outline`, `OutlineEntry`, `ReadResult`, `ToolCallView`
+
+Returned by `Sources`. A `SearchHit` has `source_kind`, `source_id`, `chunk_id`, `chunk_index`,
+`address`, `start`, `end`, `text`, `context`, `score`, `session_id`, `call_id` and `tool_name`. An
+`Outline` has `format`, `total_bytes`, `total_lines`, `truncated` and `entries`, each an
+`OutlineEntry` with `address`, `kind`, `summary`, `start`, `end` and `depth`. A `ReadResult` has the
+verbatim `text`, its byte span `start`/`end`, `first_line`/`last_line`, `truncated`, and
+`next_bytes` — the `(start, end)` still to read when it was cut. A `ToolCallView` has `call_id`,
+`tool_name`, `action_type`, `arguments`, `status`, `error`, `started_at`, `ended_at`,
+`triggered_by`, `session_id` and `artifact_id`.
 
 ### `UnitResult`
 
@@ -749,6 +821,9 @@ Returned by `Data.message`.
 | `message_id` | `str` |
 | `sender_id` | `str` |
 | `content` | `str` |
+| `content_type` | `str` |
+| `category` | `str \| None` |
+| `visibility` | `str \| None` — `None` is public |
 | `timestamp` | `datetime` (tz-aware) |
 | `session_id` | `str` |
 | `addressed_to` | `list[str]` |

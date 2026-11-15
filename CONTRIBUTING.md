@@ -149,7 +149,7 @@ or update tests alongside any behavioral change.
 
 `KnowledgeBase::in_memory()` is not really in memory — uni-db materializes it
 as a store directory under `TMPDIR`, and creating one writes the full schema
-(24 node types, 53 edge types, plus indexes) as many small files. That is one
+(26 node types, 55 edge types, plus indexes) as many small files. That is one
 store per test, with tests running in parallel.
 
 On macOS `TMPDIR` lives on the APFS Data volume, where small-file writes slow
