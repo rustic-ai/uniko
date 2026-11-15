@@ -83,6 +83,11 @@ top-20 on `Fact.embedding`, top-10 on `Procedure.embedding`, top-5 on `Topic.emb
 all keyed on the intent's primary embedding. Hits below `RecallConfig.min_score` are dropped;
 survivors are weighted by their tier (`Semantic` = 1.0, `Procedural` = 0.9).
 
+The Fact search is hybrid by default: vector search on `Fact.embedding` is fused with BM25 over
+`Fact.object`, keyed on the intent's keyword variant, so a Fact whose object names the query's
+words is found even when its embedding ranks it low. On LongMemEval this raised R@5 from 0.847 to
+0.934. `recall_fact_hybrid: false` restores vector-only Fact search.
+
 !!! note "Phase 1 spans Facts, Procedures, and Topics"
     Phase 1 issues vector queries over all three compiled tiers on every recall. Each returns
     results as consolidation populates its tier — a pure data-side effect, with no recall-code
@@ -194,8 +199,17 @@ let cfg = RecallConfig {
 If neither gate clears, the cascade broadens to the full **KnowledgeBase** tier — Chunks and
 Artifacts. This is where the multi-variant machinery does its work: each query variant runs
 the full hybrid + entity-scoped pipeline (`recall_chunk_and_entity_scoped`, vector + BM25 over
-session/observation chunks, weighted by `vector_weight` / `bm25_weight`) concurrently, and the
-per-variant ranked lists are RRF-fused.
+the chunks of sessions, observations, artifacts and long messages, weighted by `vector_weight` /
+`bm25_weight`) concurrently, and the per-variant ranked lists are RRF-fused.
+
+A **lexical channel** joins the same fusion. It searches each chunk's normalised `search_text`, an
+index with no stemming or stop words in which thousands separators are removed and identifiers are
+kept whole as well as split into parts, so `ORD-48213`, `1,234.50` and `src/pay.rs` match as
+written. When the query names **literals** — quoted phrases, and tokens that are evidently not
+words: anything with a digit, parts joined by `_ - . / : @ #`, camelCase, acronyms — only they are
+searched, and the channel counts double (`RecallConfig.lexical_literal_weight`, 2.0); otherwise the
+keyword variant is searched at weight 1. `recall_lexical_enabled: false` turns it off. See
+[Tool Output](../guides/tool-output.md) for the structured chunks it was built for.
 
 With a hybrid embedder and `recall_sparse_enabled`, a **learned-sparse channel** joins this
 fusion: one `uni.sparse.query` per variant over `Chunk.sparse_embedding`, contributed as extra
@@ -253,8 +267,9 @@ Phase 1 Facts can still influence the Phase 3 result, via one of three strategie
 ### Bundle assembly and visibility filter
 
 `finalize_bundle` sorts the items by score, truncates to `RecallConfig.limit` (default 15),
-then walks them in rank order summing an estimated `TOKENS_PER_ITEM` (50) until
-`token_budget` (default 8192) would be exceeded. The result is a `ContextBundle`:
+then walks them in rank order counting each item's real tokens (`RecallItem.token_count`, the
+same tokenizer as chunking) against `token_budget` (default 8192). An item too large for what is
+left is skipped rather than ending the walk, so one oversized hit cannot crowd out the rest. The result is a `ContextBundle`:
 
 ```rust
 pub struct ContextBundle {
@@ -269,10 +284,10 @@ pub struct ContextBundle {
 Finally, access control. `recall` wraps the cascade and applies `RecallConfig.viewer`:
 
 - `ViewerScope::As(viewer)` filters the bundle through `policy::filter_bundle` so the viewer
-  only sees Facts/Observations their visibility (private/team/org) admits.
+  only sees the Facts, Observations, Messages and Chunks their visibility (private/team/org) admits.
 - `ViewerScope::Unrestricted` (default) does no filtering — a *named, greppable* fail-open
   choice for trusted internal/bench callers. It logs a warning if the unfiltered bundle
-  contains policy-scoped `Fact`/`Observation` items, so production callers serving a specific
+  contains policy-scoped items, so production callers serving a specific
   participant are nudged to set a viewer.
 
 !!! warning "Set a viewer when serving a participant"

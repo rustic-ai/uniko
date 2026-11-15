@@ -178,9 +178,22 @@ fn tasks(&self) -> NlpTasks {
 }
 ```
 
-`analyze_sentences` first splits the message into sentences (dropping fragments under four
-words), then analyzes each as a separate request so per-sentence token indexing for NER,
-DEP, and SRL stays local to its sentence. SRL is gated by `UnikoConfig.nlp_srl_enabled`,
+How `analyze_sentences` treats a message depends on the model's generation
+(`NlpConfig.generation`):
+
+- **v1** (the default `kniv-deberta` cascade, 128 subwords per request) splits the message into
+  sentences first, then analyzes each as a separate request so per-sentence token indexing for
+  NER, DEP, and SRL stays local to its sentence. The splitter does not end a sentence after a
+  title, an initial or a dotted acronym ("Sen. Robert F. Kennedy", "U.S."), or before a
+  lowercase word.
+- **v7** (`kniv-v7-*`, windows of up to 1,024 subwords) analyzes the whole message in one
+  request, so each sentence is read with its neighbours in view, then splits the result by
+  sentence, re-indexed from 0 as a per-sentence request would have returned it. uni-xervo does
+  the sentence splitting, with the same title and initial guard.
+
+Either way, sentences under four words are dropped (when none is long enough, the whole message
+is analysed as one, provided it has four words). A structured payload — a tool result, JSON, a
+table — gets no sentence NLP at all. SRL is gated by `UnikoConfig.nlp_srl_enabled`,
 mirrored onto the pipeline as `srl_enabled`. If the runtime or the `nlp/default` alias is
 unavailable, `NlpPipeline::try_new` returns `None` and callers fall back to rule-based
 extraction.
@@ -234,43 +247,44 @@ edges back to the Message and `ABOUT` edges to the mentioned entities.
 ## Recursive chunking
 
 For vector search, large content is split into Chunk nodes. In `apply_message_writes_in_tx`,
-chunking runs only when the content is big enough — token count exceeds
-`UnikoConfig.message_chunk_threshold` (default `1024`):
+a conversational message is chunked only when its token count exceeds
+`UnikoConfig.message_chunk_threshold` (default `1024`). Structured content — a `tool_result`
+turn, or a `json` / `csv` / `structured` turn (or a JSON or CSV MIME) whose content parses as
+structure — is chunked as soon as it exceeds one chunk (`max_chunk_tokens`), since a record
+buried in a 900-token result would otherwise be findable only through the whole message.
 
-```rust
-let chunk_threshold = kb.config().message_chunk_threshold;
-let chunk_node_ids = if count_tokens(&msg.content) > chunk_threshold {
-    let chunk_cfg = ChunkConfig::from_uniko_config(kb.config());
-    let chunker = select_chunker(&msg.content_type, None);
-    let chunks = chunker.chunk(&msg.content, &chunk_cfg);
-    create_chunks_in_tx(kb, tx, &msg.message_id, message_nid, &chunks, "Message").await?
-} else {
-    Vec::new()
-};
-```
+Structured content goes to the structure-aware chunker (`ingest::structure::chunk_structured`),
+which detects JSON, NDJSON, CSV/TSV, Markdown tables, diffs and logs and splits each along its own
+structure. Every chunk keeps a verbatim slice of the payload, an `address`
+(`/data/items[3-9]`, `rows 10-19`, `lines 120-180`) and a `context` header of what it inherits from
+outside itself, capped at `chunk_context_max_tokens` (default 64). See
+[Tool Output](../guides/tool-output.md#how-a-result-is-chunked).
 
-`select_chunker` picks a strategy by `content_type`, each one splitting along the natural
-structure of its modality:
+Other content goes to `select_chunker`, which picks a strategy by `content_type`:
 
 | content_type                          | Chunker             | Split hierarchy |
 | ------------------------------------- | ------------------- | --------------- |
 | `code` (with `code-parse` + supported lang) | `CodeChunker`  | tree-sitter AST boundaries |
 | `html`                                | `HtmlChunker`       | DOM structure |
-| `csv` / `json` / `structured`         | `StructuredChunker` | record/field structure |
-| `text`, `tool_result`, `error`, `system`, unknown | `TextChunker` | paragraphs → sentences → words |
+| `csv` / `json` / `structured` that does not parse as structure | `StructuredChunker` | record/field structure |
+| `text`, `error`, `system`, unknown    | `TextChunker`       | paragraphs → lines → sentences → words → characters |
 
-The default `TextChunker` is recursive and sentence-aware: it splits on paragraphs
-(`\n\n`), then sentences, then words, targeting `max_chunk_tokens` (256 on the ingest path)
-and never breaking mid-sentence. Chunk sizing comes from `ChunkConfig::from_uniko_config`,
+The default `TextChunker` is span-based: every chunk's text is an exact slice of the source
+(`text == content[start..end]`). A span over `max_chunk_tokens` (256 on the ingest path) is split
+at the strongest boundary it contains — blank lines, then line breaks, then sentence ends, then
+whitespace, then characters — and the pieces are packed back into chunks. A sentence ends at `.`,
+`!` or `?` only when whitespace follows, so `3.14`, `foo.rs` and `v1.2.3` are never cut, and
+overlap starts a chunk a little before the previous one ends rather than copying text. Chunk sizing comes from `ChunkConfig::from_uniko_config`,
 so the effective ingest-path values are the `UnikoConfig` defaults: `max_chunk_tokens` 256,
 `min_chunk_tokens` 32, and `chunk_overlap_tokens` 0 (0 means auto: ~10 % of max ≈ 25 tokens,
 capped at 50). The standalone `ChunkConfig::default()` (512 / 64 / 50) is *not* the ingest
 path. Token counts use the `cl100k_base` tokenizer via `count_tokens`, falling back to a
 words × 1.3 approximation if the tokenizer cannot load.
 
-Each `ChunkData` carries its text, index, byte offsets, token count, a `chunk_type`, and
-modality-specific extras (language and `symbol_name` for code chunks, the nearest `heading`
-for markdown/HTML). `create_chunks_in_tx` writes deterministic `chunk_id`s
+Each `ChunkData` carries its text, index, byte offsets, token count, a `chunk_type`, a
+normalised `search_text` for the lexical index, and modality-specific extras (`context` and
+`address` for a structured chunk, language and `symbol_name` for code chunks, the nearest
+`heading` for markdown/HTML). `create_chunks_in_tx` writes deterministic `chunk_id`s
 (`uniko_store::id::chunk_id(parent_ext_id, index)`), so a retry recreates the same chunks
 without duplication.
 

@@ -187,3 +187,13 @@ let filled = memory.backfill_search_text().await?;   // `memory.backfill_search_
 ```
 
 Existing chunk embeddings are kept; only new chunks are embedded with their context header.
+
+!!! warning "Full-text indexes from before uni-db 5.2"
+    uni-db 5.2 moves to Lance 14, whose English stop-word list no longer drops negations and
+    contractions (`no`, `not`, `nor`, `don't`, …). A full-text index built by an earlier release has
+    no postings for them, so content indexed before the upgrade is not found by those words, while
+    content added since is. Nothing errors: uni-db names the stale indexes in a warning when the
+    store opens. uniko does not rebuild them yet, nor expose uni-db's switch for it; until it does,
+    open the store once directly with uni-db and run `db.indexes().rebuild(label)` for each label
+    named, or open it with `index_rebuild.auto_rebuild_enabled`. `Chunk.search_text` keeps stop
+    words, so the lexical index described here is unaffected.
