@@ -215,6 +215,30 @@ jobs:
             unzip -o /tmp/protoc.zip -d /usr/local
             protoc --version
 
+      # The extension imports the MSVC C++ runtime (MSVCP140.dll, MSVCP140_1.dll,
+      # VCRUNTIME140_1.dll) through ONNX Runtime. Python ships only
+      # VCRUNTIME140.dll, and a clean Windows install has none of the others, so
+      # `import uniko` failed there with "DLL load failed" (0.4.0 and 0.5.0).
+      # GitHub's runners have the Visual C++ runtime preinstalled, which is why
+      # the smoke test never saw it. delvewheel is the Windows counterpart of
+      # auditwheel: it copies those DLLs into the wheel and points the
+      # extension at them.
+      - name: Vendor the MSVC runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install delvewheel
+          mkdir dist-repaired
+          # D3D12, DirectML and msvcp_win are parts of Windows itself (ONNX
+          # Runtime's DirectML provider loads the first two); vendoring the
+          # runner's copies would pin a user to them, so leave them out.
+          python -m delvewheel repair --wheel-dir dist-repaired \
+            --no-dll "d3d12.dll;directml.dll;msvcp_win.dll" dist/*.whl
+          python -m delvewheel show dist-repaired/*.whl
+          rm dist/*.whl
+          mv dist-repaired/*.whl dist/
+
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
@@ -513,8 +537,21 @@ jobs:
           python3 -m venv /tmp/venv
           /tmp/venv/bin/python -m pip install dist/*.whl
 
+      # The extension links libcuda.so.1, the driver library, which the NVIDIA
+      # container toolkit mounts from the host on a GPU machine and which this
+      # image does not have. Without it `import uniko` fails before anything
+      # runs. Put CUDA's link stub in its place: it loads, and every driver
+      # call returns "no device", which is enough to import and open a store.
+      - name: Provide a libcuda stub
+        run: |
+          apt-get install -y --no-install-recommends cuda-driver-dev-13-0
+          mkdir -p /tmp/cudastub
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /tmp/cudastub/libcuda.so.1
+
       - name: Import and open a store
-        run: /tmp/venv/bin/python -I scripts/ci/smoke_wheel.py --open-only
+        run: |
+          export LD_LIBRARY_PATH="/tmp/cudastub:${LD_LIBRARY_PATH:-}"
+          /tmp/venv/bin/python -I scripts/ci/smoke_wheel.py --open-only
 
   # ── GATED: publish crates to crates.io (OIDC, dependency order) ────────────
   publish-crates:
@@ -541,6 +578,17 @@ jobs:
           # `.cargo/config.toml` forces `-fuse-ld=mold` on Linux.
           sudo apt-get install -y protobuf-compiler mold
 
+      # Each `cargo publish` runs a full verification build (ONNX Runtime,
+      # Lance), and three of them back to back outgrow the runner's free disk.
+      # 0.5.0's uniko-extract publish died at that point with exit 101. Drop the
+      # preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
+          df -h /
+
       - name: Authenticate to crates.io (Trusted Publishing)
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
@@ -555,8 +603,17 @@ jobs:
         #   - other errors -> retry a few times, then fail.
         # A 30s settle between crates lets the index update before the next
         # (dependent) crate resolves.
+        #
+        # The step runs under `bash -e`, so cargo's exit status must be taken
+        # inside an `if`: a bare `out="$(cargo publish ...)"` exits the step on
+        # the first failure, before the output is printed or any of the above
+        # handling runs.
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          # The verification builds use the dev profile. Debug info is most of
+          # their size on disk and nothing reads it here; it is not part of the
+          # published crate.
+          CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           set -uo pipefail
           publish_crate() {
@@ -564,8 +621,9 @@ jobs:
             while :; do
               attempt=$((attempt + 1))
               echo "::group::cargo publish -p $crate (attempt $attempt/$max)"
-              out="$(cargo publish -p "$crate" --locked 2>&1)"; rc=$?
+              if out="$(cargo publish -p "$crate" --locked 2>&1)"; then rc=0; else rc=$?; fi
               echo "$out"; echo "::endgroup::"
+              df -h / | tail -1
               [ "$rc" -eq 0 ] && return 0
               if echo "$out" | grep -qiE 'already (exists|uploaded)'; then
                 echo "  -> $crate already on crates.io; skipping."; return 0
@@ -590,7 +648,7 @@ jobs:
             done
           }
           for crate in $PUBLISH_ORDER; do
-            publish_crate "$crate"
+            publish_crate "$crate" || exit 1
             sleep 30
           done
 
