@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-15
+
+### Fixed
+
+- **The Windows wheel imports on a clean Windows install.** The extension
+  needs the MSVC C++ runtime (`MSVCP140.dll`, `MSVCP140_1.dll`) through ONNX
+  Runtime, and a fresh Windows has neither, so `import uniko` failed with
+  "DLL load failed" in 0.4.0 and 0.5.0. The wheel now carries both, vendored
+  with delvewheel.
+- **The release workflow resumes a partial publish.** Its crates.io loop ran
+  under `bash -e`, so the first failed `cargo publish` ended the step without
+  printing cargo's output, and the retry and "already published" handling
+  never ran. The publish job also frees disk and drops debug info from its
+  verification builds, which outgrew the runner in 0.5.0.
+- The CUDA wheel's smoke test loads CUDA's `libcuda` stub, so it can import
+  the wheel on a runner without a GPU driver.
+
+- **On Windows, the first write to a store no longer fails** with `Access is
+  denied. (os error 5)`. uni-db opened each file it synced read-only, and
+  Windows refuses to flush a read-only handle. uniko now requires uni-db
+  5.2.1, which carries the fix (rustic-ai/uni-db#338).
+
 ## [0.5.0] - 2026-11-15
 
 ### Breaking
@@ -926,6 +948,7 @@ pip install uniko-cuda    # NVIDIA CUDA, Linux x86_64
 pip install uniko-metal   # Apple Silicon, macOS arm64
 ```
 
+[0.5.1]: https://github.com/rustic-ai/uniko/releases/tag/v0.5.1
 [0.5.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.5.0
 [0.4.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.4.0
 [0.3.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.3.0

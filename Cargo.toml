@@ -31,7 +31,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
@@ -44,22 +44,23 @@ categories = ["database", "text-processing"]
 
 [workspace.dependencies]
 # Internal crates (version required so `cargo publish` accepts the path deps)
-uniko-store = { path = "crates/uniko-store", version = "0.5.0" }
-uniko-pipes = { path = "crates/uniko-pipes", version = "0.5.0" }
-uniko-extract = { path = "crates/uniko-extract", version = "0.5.0" }
-uniko-memory = { path = "crates/uniko-memory", version = "0.5.0" }
-uniko-cortex = { path = "crates/uniko-cortex", version = "0.5.0" }
-uniko-api = { path = "crates/uniko-api", version = "0.5.0" }
-uniko-bench = { path = "crates/uniko-bench", version = "0.5.0" }
+uniko-store = { path = "crates/uniko-store", version = "0.5.1" }
+uniko-pipes = { path = "crates/uniko-pipes", version = "0.5.1" }
+uniko-extract = { path = "crates/uniko-extract", version = "0.5.1" }
+uniko-memory = { path = "crates/uniko-memory", version = "0.5.1" }
+uniko-cortex = { path = "crates/uniko-cortex", version = "0.5.1" }
+uniko-api = { path = "crates/uniko-api", version = "0.5.1" }
+uniko-bench = { path = "crates/uniko-bench", version = "0.5.1" }
 
 # Database — uni-db default features already include lance-backend,
 # provider-onnx (embeddings + NLP + reranker), and every remote provider.
 # GPU accelerators (gpu-cuda / gpu-metal) are opt-in via uniko-store /
 # uniko-bench passthrough features.
-# Tracks the latest 5.x release (^5.2 = >=5.2.0, <6.0.0); `cargo update -p uni-db`
-# refreshes the lockfile to the newest compatible version. The 5.2 floor is
+# Tracks the latest 5.x release (^5.2.1 = >=5.2.1, <6.0.0); `cargo update -p uni-db`
+# refreshes the lockfile to the newest compatible version. The floor is
 # required, not cosmetic: 5.2 is the first release built on uni-xervo 0.19.2,
-# and 5.0 declared `provider-mistralrs`, which uni-xervo 0.19 removed.
+# 5.0 declared `provider-mistralrs`, which uni-xervo 0.19 removed, and 5.2.1
+# fixes the first store write failing on Windows (uni-db#338).
 #
 # NOTE (2026-06-28): default-features disabled to drop `provider-candle`.
 # It pulls candle-cuda kernels that nvcc (CUDA 13) cannot compile against this
@@ -76,7 +77,7 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.5.0" }
 # unconditionally rather than behind a uniko passthrough feature because it
 # costs nothing to compile: uni-xervo gates it on `reqwest` + `base64`, which
 # every other remote provider here already pulls in.
-uni-db = { version = "5.2", default-features = false, features = [
+uni-db = { version = "5.2.1", default-features = false, features = [
     "mimalloc",
     "lance-backend",
     "apoc-core",
