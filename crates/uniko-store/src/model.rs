@@ -20,7 +20,67 @@ use crate::storage::KnowledgeBase;
 
 pub use uni_db::xervo::{GenerationOptions, Message};
 
+use uni_db::{ModelAliasSpec, ModelTask};
+
+/// One model alias in this store's catalog, without its provider options.
+///
+/// `options` is left out on purpose: it is free-form provider JSON and may
+/// carry endpoints or credentials. Everything here is safe to log or show.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelEntry {
+    /// The alias callers pass to [`KnowledgeBase::embed`],
+    /// [`KnowledgeBase::generate`] and friends.
+    pub alias: String,
+    /// What the alias serves (embedding, generation, NLP, ...).
+    pub task: ModelTask,
+    /// The uni-xervo provider id, e.g. `local/onnx` or `remote/openai`.
+    pub provider_id: String,
+    /// The provider's model identifier.
+    pub model_id: String,
+    /// Pinned model revision, if the catalog names one.
+    pub revision: Option<String>,
+}
+
+impl From<&ModelAliasSpec> for ModelEntry {
+    fn from(spec: &ModelAliasSpec) -> Self {
+        Self {
+            alias: spec.alias.clone(),
+            task: spec.task,
+            provider_id: spec.provider_id.clone(),
+            model_id: spec.model_id.clone(),
+            revision: spec.revision.clone(),
+        }
+    }
+}
+
 impl KnowledgeBase {
+    /// The model aliases this store registered, in catalog order.
+    ///
+    /// Reflects the catalog the store built at open: the built-in aliases
+    /// for its config (or the `catalog_path` file) plus any extra specs.
+    /// It says nothing about whether a model has loaded.
+    ///
+    /// Returns `None` for a store opened with
+    /// [`open_with_runtime`](Self::open_with_runtime): that runtime was
+    /// built elsewhere, and uni-xervo offers no way to read its catalog
+    /// back.
+    #[must_use]
+    pub fn model_entries(&self) -> Option<Vec<ModelEntry>> {
+        self.catalog
+            .as_deref()
+            .map(|specs| specs.iter().map(ModelEntry::from).collect())
+    }
+
+    /// The catalog spec for `alias`, when this store knows its catalog.
+    ///
+    /// Outer `None`: catalog unknown. Inner `None`: alias not in it.
+    pub(crate) fn catalog_spec(&self, alias: &str) -> Option<Option<&ModelAliasSpec>> {
+        self.catalog
+            .as_deref()
+            .map(|specs| specs.iter().find(|s| s.alias == alias))
+    }
+
     /// True if the Xervo embedding/generation runtime is loaded.
     ///
     /// Callers that want a graceful fallback (rule-based extraction,
@@ -170,6 +230,16 @@ impl KnowledgeBase {
         if !runtime.contains_alias(alias).await {
             return Err(UnikoError::Config(format!(
                 "generation alias '{alias}' is not registered in the model catalog"
+            )));
+        }
+        // When the catalog is known, a wrong task fails here without
+        // loading the model (which may mean a large download).
+        if let Some(Some(spec)) = self.catalog_spec(alias)
+            && spec.task != ModelTask::Generate
+        {
+            return Err(UnikoError::Config(format!(
+                "alias '{alias}' is a {:?} model, not a generation model",
+                spec.task
             )));
         }
         runtime

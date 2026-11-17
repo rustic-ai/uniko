@@ -107,6 +107,12 @@ pub struct KnowledgeBase {
     /// holds (issue #36). Distinct tables make the nested acquisition
     /// structurally independent of the outer one.
     pub(crate) setup_locks: Arc<crate::locks::StripedLocks>,
+    /// The model catalog this store handed to uni-db, kept because the
+    /// runtime does not expose it (uni-xervo `ModelRuntime::catalog` is
+    /// private). `None` when the store was opened over a runtime built
+    /// elsewhere ([`KnowledgeBase::open_with_runtime`]), whose catalog
+    /// this store never saw.
+    pub(crate) catalog: Option<Arc<[ModelAliasSpec]>>,
 }
 
 impl KnowledgeBase {
@@ -139,6 +145,7 @@ impl KnowledgeBase {
     ) -> Result<Self> {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
+        let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
         let db = Uni::in_memory().xervo_catalog(catalog).build().await?;
         apply_schema(&db, &config).await?;
         prefetch_models(&db).await;
@@ -148,6 +155,7 @@ impl KnowledgeBase {
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
+            catalog: Some(kept),
         }
         .finalize_init()
         .await
@@ -204,6 +212,7 @@ impl KnowledgeBase {
     ) -> Result<Self> {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
+        let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
         let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_catalog(catalog);
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
@@ -219,6 +228,7 @@ impl KnowledgeBase {
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
+            catalog: Some(kept),
         }
         .finalize_init()
         .await?;
@@ -311,6 +321,7 @@ impl KnowledgeBase {
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
+            catalog: None,
         }
         .finalize_init()
         .await
@@ -618,7 +629,26 @@ fn load_catalog(config: &UnikoConfig, extra: &[ModelAliasSpec]) -> Result<Vec<Mo
         embed_catalog(config)
     };
     catalog.extend_from_slice(extra);
+    reject_duplicate_aliases(&catalog)?;
     Ok(catalog)
+}
+
+/// Fail on the first alias that appears twice, naming it.
+///
+/// uni-xervo rejects duplicates too, but its builder error does not say
+/// which alias collided, and the usual cause is an extra spec reusing a
+/// built-in name such as `embed/default`.
+fn reject_duplicate_aliases(catalog: &[ModelAliasSpec]) -> Result<()> {
+    let mut seen = std::collections::HashSet::with_capacity(catalog.len());
+    for spec in catalog {
+        if !seen.insert(spec.alias.as_str()) {
+            return Err(UnikoError::Config(format!(
+                "model alias '{}' is defined more than once in the catalog",
+                spec.alias
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Eagerly download and warm every xervo model in the catalog.
@@ -1001,5 +1031,37 @@ impl std::fmt::Debug for KnowledgeBase {
         f.debug_struct("KnowledgeBase")
             .field("config", &self.config)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn load_catalog_names_an_alias_defined_twice() {
+        let config = UnikoConfig::default();
+        let mut extra = embed_catalog(&config)
+            .into_iter()
+            .find(|s| s.alias == EMBED_ALIAS)
+            .expect("default catalog has an embedding alias");
+        extra.model_id = "some/other-model".into();
+
+        let err = load_catalog(&config, &[extra]).unwrap_err();
+        assert!(
+            matches!(&err, UnikoError::Config(m) if m.contains(EMBED_ALIAS)),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn load_catalog_keeps_distinct_extra_aliases() {
+        let config = UnikoConfig::default();
+        let mut extra = embed_catalog(&config).remove(0);
+        extra.alias = "embed/extra".into();
+
+        let catalog = load_catalog(&config, &[extra]).unwrap();
+        assert_eq!(catalog.len(), embed_catalog(&config).len() + 1);
+        assert_eq!(catalog.last().unwrap().alias, "embed/extra");
     }
 }
