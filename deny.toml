@@ -40,6 +40,13 @@ ignore = [
     # `quick-xml` unbounded namespace alloc in NsReader (DoS) -- same
     # object_store 0.13.2 pin as RUSTSEC-2026-0194.
     "RUSTSEC-2026-0195",
+    # `chrono` unmaintained (informational, all versions, no patched
+    # release). uniko uses chrono directly, but dropping it would not clear
+    # this: uni-db depends on it and exposes its types in the public API
+    # (Value::to_date/to_time, pin_to_timestamp), and so do arrow, parquet,
+    # datafusion, lance and object_store. Tracked upstream as
+    # rustic-ai/uni-db#341. Remove once that stack has moved to jiff or time.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
