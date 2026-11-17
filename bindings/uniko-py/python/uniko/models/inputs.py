@@ -308,9 +308,26 @@ class _LlamaCpp(BaseModel):
         )
 
 
+class _Provider(BaseModel):
+    """Any compiled generation provider, e.g. ``remote/anthropic``."""
+
+    model_config = _IN
+    provider: Literal["generic"] = "generic"
+    alias: str
+    provider_id: str
+    model_id: str
+    options: Optional[dict[str, Any]] = None
+    api_key_env: Optional[str] = None
+
+    def to_native(self) -> Any:
+        return _native().LlmSpec.new(
+            self.alias, self.provider_id, self.model_id, self.options, self.api_key_env
+        )
+
+
 # Discriminated-union alias; validate raw dicts with ``LlmSpecAdapter``.
 LlmSpecModel = Annotated[
-    Union[_OpenAi, _OpenAiKeyEnv, _LlamaCpp],
+    Union[_OpenAi, _OpenAiKeyEnv, _LlamaCpp, _Provider],
     Field(discriminator="provider"),
 ]
 

@@ -1506,7 +1506,7 @@ use uniko_memory::{Uniko, Turn, LlmSpec, Scope};
 
 let memory = Uniko::builder()
     .path("./agent-memory")                       // or .in_memory()
-    .llm(LlmSpec::openai("answerer", "gpt-4o-mini", None))  // enables answer()
+    .llm(LlmSpec::openai("generate/answer", "gpt-4o-mini", None))  // enables answer()
     .scope_to_agent()                             // recall filtered by viewer
     .streaming(true)                              // wire the async pipeline
     .build().await?;
@@ -2455,7 +2455,7 @@ uni.agent("a").session("s1").observe_sync(uniko.Turn("alice", "hi"))
 **Builder with an LLM and answer:**
 
 ```python
-spec = uniko.LlmSpec.openai("gpt", "gpt-4o-mini")           # alias, model_id, base_url?
+spec = uniko.LlmSpec.openai("generate/gpt", "gpt-4o-mini")         # alias, model_id, base_url?
 uni  = await uniko.Uniko.builder().path("/data/kb").llm(spec).streaming(True).build()
 ans  = await uni.agent("a").answer("where does alice like to hike?")
 print(ans.text, ans.citations())

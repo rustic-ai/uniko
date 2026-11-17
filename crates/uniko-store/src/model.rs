@@ -54,7 +54,50 @@ impl From<&ModelAliasSpec> for ModelEntry {
     }
 }
 
+/// Provider ids compiled into this build that can serve
+/// [`ModelTask::Generate`].
+///
+/// Follows the `provider-*` features the workspace enables on uni-db, and
+/// each provider's declared capabilities in uni-xervo. uni-xervo has no
+/// public provider registry to read this from, so a test checks that every
+/// entry is actually registered (`model_catalog_tests`).
+pub const GENERATION_PROVIDERS: &[&str] = &[
+    "remote/anthropic",
+    "remote/azure-openai",
+    "remote/cohere",
+    "remote/gemini",
+    "remote/llamacpp",
+    "remote/mistral",
+    "remote/openai",
+    "remote/vertexai",
+];
+
 impl KnowledgeBase {
+    /// Check one catalog entry the way opening a store would, without
+    /// opening one or loading the model.
+    ///
+    /// Builds a throwaway model runtime holding only `spec` (forced to
+    /// lazy warmup), so uni-xervo validates the provider id and its
+    /// options. No model is downloaded and no remote endpoint is called.
+    ///
+    /// # Errors
+    ///
+    /// [`UnikoError::Config`] naming the alias when the provider is not
+    /// compiled in or the options are invalid for it.
+    pub async fn validate_model_spec(spec: &ModelAliasSpec) -> Result<()> {
+        let mut probe = spec.clone();
+        probe.warmup = uni_db::WarmupPolicy::Lazy;
+        uni_db::xervo::build_model_runtime(vec![probe])
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                UnikoError::Config(format!(
+                    "model alias '{}' (provider '{}') is invalid: {e}",
+                    spec.alias, spec.provider_id
+                ))
+            })
+    }
+
     /// The model aliases this store registered, in catalog order.
     ///
     /// Reflects the catalog the store built at open: the built-in aliases
