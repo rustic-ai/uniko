@@ -93,6 +93,7 @@ pub mod xervo {
 
 /// Cargo features of this crate and whether this build compiled them in.
 pub const COMPILED_FEATURES: &[(&str, bool)] = &[
+    ("batch-record", cfg!(feature = "batch-record")),
     ("candle", cfg!(feature = "candle")),
     ("gpu-cuda", cfg!(feature = "gpu-cuda")),
     ("gpu-metal", cfg!(feature = "gpu-metal")),

@@ -10,7 +10,9 @@ use uniko_pipes::health::PipelineHealth;
 use uniko_store::config::{EmbeddingConfig, NlpConfig, RerankerConfig, UnikoConfig};
 use uniko_store::repository::policy::Membership;
 use uniko_store::xervo::{ModelAliasSpec, ModelTask, WarmupPolicy};
-use uniko_store::{DeletionReport, KnowledgeBase, PrefetchPolicy, SharedRuntime, UnikoError};
+use uniko_store::{
+    DeletionReport, KnowledgeBase, ModelEntry, PrefetchPolicy, SharedRuntime, UnikoError,
+};
 
 use super::RecallScope;
 use crate::Agent;
@@ -569,21 +571,39 @@ impl UnikoBuilder {
     pub async fn build(self) -> Result<Uniko, UnikoError> {
         let (config, extra_catalog) = self.models().await?;
         let pipeline_config = PipelineConfig::from_uniko_config(&config);
+        // Check the answer alias against the catalog the store will have,
+        // before opening it: a typo should not first create the store and
+        // load every model.
+        let entries = match &self.runtime {
+            Some(runtime) => {
+                check_llms_served(runtime, &extra_catalog)?;
+                runtime.model_entries()
+            }
+            None => KnowledgeBase::catalog_entries(&config, &extra_catalog)?,
+        };
         let llm_alias = self
             .answer_alias
             .clone()
-            .or_else(|| self.llms.first().map(|l| l.alias.clone()));
+            .or_else(|| self.llms.first().map(|l| l.alias.clone()))
+            .or_else(|| {
+                // Over a shared runtime the LLMs belong to the runtime, so
+                // its first generation model answers by default.
+                self.runtime.as_ref().and_then(|_| {
+                    entries
+                        .iter()
+                        .find(|e| e.task == ModelTask::Generate)
+                        .map(|e| e.alias.clone())
+                })
+            });
+        if let Some(alias) = &llm_alias {
+            check_answer_alias(&entries, alias)?;
+        }
 
         let kb = match (&self.runtime, self.location) {
-            (Some(runtime), location) => {
-                check_llms_served(runtime, &extra_catalog)?;
-                match location {
-                    Location::InMemory => KnowledgeBase::in_memory_shared(config, runtime).await?,
-                    Location::Path(path) => {
-                        KnowledgeBase::open_shared(path, config, runtime).await?
-                    }
-                }
-            }
+            (Some(runtime), location) => match location {
+                Location::InMemory => KnowledgeBase::in_memory_shared(config, runtime).await?,
+                Location::Path(path) => KnowledgeBase::open_shared(path, config, runtime).await?,
+            },
             (None, Location::InMemory) => {
                 KnowledgeBase::in_memory_with_prefetch(config, extra_catalog, self.prefetch).await?
             }
@@ -592,9 +612,6 @@ impl UnikoBuilder {
                     .await?
             }
         };
-        if let Some(alias) = &llm_alias {
-            check_answer_alias(&kb, alias)?;
-        }
         crate::rules::register_stdlib_rules(&kb).await?;
 
         // One registry for both paths: a source queued through the streaming
@@ -623,31 +640,20 @@ impl UnikoBuilder {
 /// LLMs belong to the runtime (they are part of its catalog), so a builder
 /// using one may repeat them, as long as they match what the runtime holds.
 fn check_llms_served(runtime: &SharedRuntime, llms: &[ModelAliasSpec]) -> Result<(), UnikoError> {
-    let held = runtime.model_entries();
     for spec in llms {
-        let matches = held.iter().any(|e| {
-            e.alias == spec.alias
-                && e.provider_id == spec.provider_id
-                && e.model_id == spec.model_id
-        });
-        if !matches {
-            return Err(UnikoError::Config(format!(
-                "LLM alias '{}' is not in the shared runtime as registered; add it to \
-                 the builder that built the runtime",
+        runtime.check_spec(spec).map_err(|e| {
+            UnikoError::Config(format!(
+                "LLM alias '{}' does not match the shared runtime ({e}); register it \
+                 the same way on the builder that built the runtime",
                 spec.alias
-            )));
-        }
+            ))
+        })?;
     }
     Ok(())
 }
 
-/// Check that the answer alias names a generation model in `kb`'s catalog.
-fn check_answer_alias(kb: &KnowledgeBase, alias: &str) -> Result<(), UnikoError> {
-    // A store always knows its catalog here: the builder opens over its own
-    // catalog or a SharedRuntime, which carries one.
-    let Some(entries) = kb.model_entries() else {
-        return Ok(());
-    };
+/// Check that the answer alias names a generation model in `entries`.
+fn check_answer_alias(entries: &[ModelEntry], alias: &str) -> Result<(), UnikoError> {
     match entries.iter().find(|e| e.alias == alias) {
         None => Err(UnikoError::Config(format!(
             "answer alias '{alias}' is not in the model catalog"
@@ -747,9 +753,17 @@ impl LlmSpec {
     /// Read the provider credential from environment variable `var` at
     /// call time.
     #[must_use]
+    ///
+    /// Sets the provider's credential option: `api_token_env` for
+    /// `remote/vertexai`, `api_key_env` for every other provider.
     pub fn api_key_env(self, var: impl Into<String>) -> Self {
         let var: String = var.into();
-        self.option("api_key_env", var)
+        let key = if self.provider_id == "remote/vertexai" {
+            "api_token_env"
+        } else {
+            "api_key_env"
+        };
+        self.option(key, var)
     }
 
     /// The alias this model registers under.
@@ -881,6 +895,20 @@ impl LlmSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn api_key_env_uses_vertexais_token_option() {
+        let spec = LlmSpec::new("generate/v", "remote/vertexai", "gemini-x")
+            .api_key_env("VERTEX_TOKEN")
+            .option("project_id", "p")
+            .option("location", "us-central1");
+        spec.validate()
+            .await
+            .expect("vertexai accepts its token option");
+        let options = spec.into_alias_spec().options;
+        assert_eq!(options["api_token_env"], "VERTEX_TOKEN");
+        assert!(options.get("api_key_env").is_none());
+    }
 
     /// `remote/llamacpp` rejects unknown option keys and requires
     /// `base_url`, so the lowered alias must carry exactly that key and

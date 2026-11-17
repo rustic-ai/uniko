@@ -76,7 +76,8 @@ let memory = Uniko::builder()
 `openai_with_key_env(...)` for a custom key var, or `llamacpp(alias, model, base_url)` for a
 llama.cpp `llama-server` you run yourself. Any other compiled generation provider goes through
 `new(alias, provider, model)`, with `.option(key, value)` for provider options and
-`.api_key_env(var)` for the credential:
+`.api_key_env(var)` for the credential (for `remote/vertexai` it sets that provider's
+`api_token_env` option):
 
 ```rust
 let claude = LlmSpec::new("generate/claude", "remote/anthropic", "claude-sonnet-4-5")
@@ -118,8 +119,10 @@ Each instance keeps its own graph; only inference is shared. `build_runtime()` u
 model settings (embedding, reranker, NLP, catalog file and `.llm()` specs) and its `.prefetch()`
 policy. A builder using `.runtime()` must name the same models: `build()` fails with
 `UnikoError::Config` naming the alias when the runtime lacks one or holds a different model, provider,
-revision or options for it (execution providers may differ). It may repeat the `.llm()` specs the
-runtime was built with. Shutting one instance down leaves the runtime loaded for the others, and
+revision or options for it (execution providers may differ). LLMs belong to the runtime: the
+builder need not repeat its `.llm()` specs, and the runtime's first generation model answers unless
+`.answer_alias()` names another. A repeated spec must match the runtime's exactly, options included.
+Shutting one instance down leaves the runtime loaded for the others, and
 the load state in `capabilities()` is shared across them.
 
 One layer down, `SharedRuntime::build(&config, extra, policy)` with

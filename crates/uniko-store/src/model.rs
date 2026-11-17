@@ -98,6 +98,24 @@ impl KnowledgeBase {
             })
     }
 
+    /// The catalog a store opened with `config` and `extra_catalog` would
+    /// register, without opening one: the built-in aliases (or the
+    /// `catalog_path` file) followed by the extras.
+    ///
+    /// # Errors
+    ///
+    /// [`UnikoError::Config`] when the catalog file cannot be read or an
+    /// alias is defined twice.
+    pub fn catalog_entries(
+        config: &crate::config::UnikoConfig,
+        extra_catalog: &[ModelAliasSpec],
+    ) -> Result<Vec<ModelEntry>> {
+        Ok(crate::storage::load_catalog(config, extra_catalog)?
+            .iter()
+            .map(ModelEntry::from)
+            .collect())
+    }
+
     /// The model aliases this store registered, in catalog order.
     ///
     /// Reflects the catalog the store built at open: the built-in aliases

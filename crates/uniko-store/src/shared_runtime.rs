@@ -19,9 +19,13 @@ pub enum PrefetchPolicy {
     /// warm. A model that fails is recorded and skipped. The default.
     #[default]
     Eager,
-    /// Load nothing up front; each model loads on first use.
+    /// Load nothing up front; each model loads on first use. A catalog-file
+    /// entry with `warmup: eager` is still loaded by uni-xervo while the
+    /// runtime is built, and reads as not loaded until the store uses it.
     Lazy,
-    /// Return at once and load every model on a background task.
+    /// Return at once and load every model on a task spawned on the
+    /// current tokio runtime, which must outlive the load (a runtime
+    /// dropped first cancels it, leaving the models to load on first use).
     Background,
 }
 
@@ -134,6 +138,29 @@ impl SharedRuntime {
     #[must_use]
     pub fn model_runtime(&self) -> Arc<ModelRuntime> {
         self.runtime.clone()
+    }
+
+    /// Check that this runtime holds `spec`'s alias with the same task,
+    /// provider, model, revision and options (execution providers aside).
+    ///
+    /// # Errors
+    ///
+    /// [`UnikoError::Config`] naming the alias and the first field that
+    /// differs. Option values are never printed.
+    pub fn check_spec(&self, spec: &ModelAliasSpec) -> Result<()> {
+        let Some(held) = self.catalog.iter().find(|s| s.alias == spec.alias) else {
+            return Err(UnikoError::Config(format!(
+                "model alias '{}' is not in the shared runtime",
+                spec.alias
+            )));
+        };
+        match first_difference(spec, held) {
+            Some(field) => Err(UnikoError::Config(format!(
+                "model alias '{}' differs from the shared runtime's ({field})",
+                spec.alias
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Check that this runtime serves every model `config` needs, with
