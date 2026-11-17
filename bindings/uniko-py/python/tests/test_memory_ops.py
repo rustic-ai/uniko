@@ -278,7 +278,9 @@ def test_python_extractor_runs_for_streamed_sources() -> None:
     agent = memory.agent("viewer")
     session = agent.session("photos")
     png = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0])
-    session.submit_source_sync(uniko.IngestSource.from_bytes(png).with_id("streamed-photo"))
+    session.submit_source_sync(
+        uniko.IngestSource.from_bytes(png).with_id("streamed-photo")
+    )
     session.flush_sync()
 
     assert len(seen) == 1 and seen[0].modality == "image"

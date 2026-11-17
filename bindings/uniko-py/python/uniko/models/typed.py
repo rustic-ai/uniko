@@ -306,15 +306,21 @@ class TypedGoals:
         return GoalView.from_native(g)
 
     def create_view_sync(self, spec: Any) -> GoalView:
-        return GoalView.from_native(self._inner.create_view_sync(spec.title, **spec.to_create_kwargs()))
+        return GoalView.from_native(
+            self._inner.create_view_sync(spec.title, **spec.to_create_kwargs())
+        )
 
     async def create_task_view(self, spec: Any) -> TaskView:
-        t = await self._inner.create_task_view(spec.title, **spec.to_create_task_kwargs())
+        t = await self._inner.create_task_view(
+            spec.title, **spec.to_create_task_kwargs()
+        )
         return TaskView.from_native(t)
 
     def create_task_view_sync(self, spec: Any) -> TaskView:
         return TaskView.from_native(
-            self._inner.create_task_view_sync(spec.title, **spec.to_create_task_kwargs())
+            self._inner.create_task_view_sync(
+                spec.title, **spec.to_create_task_kwargs()
+            )
         )
 
 
@@ -554,11 +560,15 @@ class TypedAgent:
     def delete_session_sync(self, session_id: str) -> DeletionReport:
         return DeletionReport.from_native(self._inner.delete_session_sync(session_id))
 
-    async def consolidate(self, *, llm_triples_alias: Optional[str] = None) -> ConsolidationReport:
+    async def consolidate(
+        self, *, llm_triples_alias: Optional[str] = None
+    ) -> ConsolidationReport:
         native = await self._inner.consolidate(llm_triples_alias=llm_triples_alias)
         return ConsolidationReport.from_native(native)
 
-    def consolidate_sync(self, *, llm_triples_alias: Optional[str] = None) -> ConsolidationReport:
+    def consolidate_sync(
+        self, *, llm_triples_alias: Optional[str] = None
+    ) -> ConsolidationReport:
         native = self._inner.consolidate_sync(llm_triples_alias=llm_triples_alias)
         return ConsolidationReport.from_native(native)
 

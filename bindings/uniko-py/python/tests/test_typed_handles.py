@@ -94,7 +94,9 @@ async def test_typed_goals_via_specs() -> None:
     # Creating views: the generated ids come back as typed models.
     made = await goals.create_view(GoalSpec(title="Generated id"))
     assert isinstance(made, GoalView) and made.goal_id
-    task = await goals.create_task_view(TaskSpec(title="follow up", goal_id=made.goal_id))
+    task = await goals.create_task_view(
+        TaskSpec(title="follow up", goal_id=made.goal_id)
+    )
     assert isinstance(task, TaskView) and task.goal_id == made.goal_id
     fetched = await goals.task(task.task_id)
     assert isinstance(fetched, TaskView) and fetched.task_id == task.task_id
@@ -131,7 +133,9 @@ def test_typed_sync_journey() -> None:
 def test_typed_sync_create_views() -> None:
     uni = TypedUniko.in_memory_sync()
     agent = uni.agent("assistant")
-    agent.session("setup").observe_sync(TurnSpec(sender_id="assistant", content="kickoff"))
+    agent.session("setup").observe_sync(
+        TurnSpec(sender_id="assistant", content="kickoff")
+    )
     goals = agent.goals
 
     first = goals.create_view_sync(GoalSpec(title="twin"))
@@ -139,7 +143,9 @@ def test_typed_sync_create_views() -> None:
     assert isinstance(first, GoalView) and first.goal_id
     assert first.goal_id != second.goal_id
 
-    task = goals.create_task_view_sync(TaskSpec(title="follow up", goal_id=first.goal_id))
+    task = goals.create_task_view_sync(
+        TaskSpec(title="follow up", goal_id=first.goal_id)
+    )
     assert isinstance(task, TaskView) and task.goal_id == first.goal_id
     fetched = goals.task_sync(task.task_id)
     assert isinstance(fetched, TaskView) and fetched.task_id == task.task_id

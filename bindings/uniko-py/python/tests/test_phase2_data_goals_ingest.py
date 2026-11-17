@@ -65,7 +65,9 @@ async def test_create_views_return_generated_ids() -> None:
     assert goal.goal_id and goal.title == "Ship the Python SDK"
     assert goal.phase == "planned"
 
-    task = await goals.create_task_view("write tests", goal_id=goal.goal_id, priority=0.8)
+    task = await goals.create_task_view(
+        "write tests", goal_id=goal.goal_id, priority=0.8
+    )
     assert isinstance(task, uniko.TaskView)
     assert task.task_id and task.goal_id == goal.goal_id
 
