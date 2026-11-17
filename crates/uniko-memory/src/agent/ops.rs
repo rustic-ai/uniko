@@ -56,7 +56,8 @@ impl ConsolidateOptions {
     /// One model call per unprocessed Observation, so this belongs on an
     /// offline or scheduled consolidation pass, not on the ingest path.
     /// Observations the model declines or answers unparseably keep their
-    /// SRL/DEP triple; [`CycleStats::triples_refined`] counts the rest.
+    /// SRL/DEP triple; [`CycleStats::triples_refined`] counts the rest, and
+    /// [`CycleStats::triples_failed`] the calls that failed outright.
     #[must_use]
     pub fn llm_triples(alias: impl Into<String>) -> Self {
         Self {

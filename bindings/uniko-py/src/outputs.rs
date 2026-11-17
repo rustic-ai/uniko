@@ -624,10 +624,14 @@ pub struct PyCycleStats {
     /// Observations sent for LLM triple refinement (0 on the default path).
     #[pyo3(get)]
     triples_requested: usize,
-    /// Observations whose triple the LLM refined; the rest kept their
-    /// rule-based triple.
+    /// Observations whose triple was replaced by a parsed LLM reply; the
+    /// rest kept their rule-based triple.
     #[pyo3(get)]
     triples_refined: usize,
+    /// Observations whose LLM call failed outright (endpoint down,
+    /// timeout, provider error).
+    #[pyo3(get)]
+    triples_failed: usize,
 }
 
 impl PyCycleStats {
@@ -643,6 +647,7 @@ impl PyCycleStats {
                 drift_alerts: stats.drift_alerts,
                 triples_requested: stats.triples_requested,
                 triples_refined: stats.triples_refined,
+                triples_failed: stats.triples_failed,
             },
         )
     }
@@ -652,14 +657,15 @@ impl PyCycleStats {
 impl PyCycleStats {
     fn __repr__(&self) -> String {
         format!(
-            "CycleStats(observations_processed={}, facts_created={}, facts_reinforced={}, facts_invalidated={}, drift_alerts={}, triples_requested={}, triples_refined={})",
+            "CycleStats(observations_processed={}, facts_created={}, facts_reinforced={}, facts_invalidated={}, drift_alerts={}, triples_requested={}, triples_refined={}, triples_failed={})",
             self.observations_processed,
             self.facts_created,
             self.facts_reinforced,
             self.facts_invalidated,
             self.drift_alerts,
             self.triples_requested,
-            self.triples_refined
+            self.triples_refined,
+            self.triples_failed
         )
     }
 }

@@ -148,6 +148,7 @@ class CycleStats:
     drift_alerts: int
     triples_requested: int
     triples_refined: int
+    triples_failed: int
     def __repr__(self) -> str: ...
 
 @final

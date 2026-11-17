@@ -178,8 +178,10 @@ def test_consolidate_reports_the_cortex_sweeps() -> None:
     assert isinstance(ConsolidationReport.from_native(report).cycle.facts_created, int)
     # The default path asks no model to refine triples.
     assert report.cycle.triples_requested == 0 and report.cycle.triples_refined == 0
+    assert report.cycle.triples_failed == 0
     typed = ConsolidationReport.from_native(report)
     assert typed.cycle.triples_requested == 0 and typed.cycle.triples_refined == 0
+    assert typed.cycle.triples_failed == 0
 
 
 def test_consolidate_rejects_unknown_triple_alias() -> None:

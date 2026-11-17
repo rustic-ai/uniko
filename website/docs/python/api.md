@@ -812,7 +812,8 @@ The `cycle` part of a `ConsolidationReport`.
 | `facts_invalidated` | `int` |
 | `drift_alerts` | `int` |
 | `triples_requested` | `int` — Observations sent for LLM refinement; `0` without `llm_triples_alias` |
-| `triples_refined` | `int` — of those, how many the model refined; the rest kept the rule-based triple |
+| `triples_refined` | `int` — of those, how many were replaced by a parsed model reply; the rest kept the rule-based triple |
+| `triples_failed` | `int` — of those, how many model calls failed outright (endpoint down, timeout) |
 
 ### `MessageView`
 

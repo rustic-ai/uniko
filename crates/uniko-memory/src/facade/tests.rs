@@ -3591,9 +3591,11 @@ async fn spawn_chat_stub(
                     .find_map(|l| l.strip_prefix("content-length:"))
                     .and_then(|v| v.trim().parse::<usize>().ok())
                     .unwrap_or(0);
+                // Always answer once a request head arrived, even if the body
+                // read fails, so the client never waits out its timeout.
                 while buf.len() < head_end + body_len {
                     let Ok(n) = stream.read(&mut chunk).await else {
-                        return;
+                        break;
                     };
                     if n == 0 {
                         break;
@@ -3746,6 +3748,41 @@ async fn consolidate_with_llm_triples_falls_back_on_unparseable_replies() {
     assert!(requested >= 1, "the seeded observation was sent");
     assert_eq!(hits.load(Ordering::SeqCst), requested, "one call each");
     assert_eq!(report.cycle.triples_refined, 0, "nothing parsed");
+    assert_eq!(report.cycle.triples_failed, 0, "every call was answered");
+
+    let predicates = fact_predicates(&agent).await;
+    assert!(
+        predicates.iter().any(|p| p == "joined"),
+        "the rule-based triple still produced its fact: {predicates:?}"
+    );
+
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn consolidate_with_llm_triples_counts_unreachable_endpoint_as_failed() {
+    use crate::ConsolidateOptions;
+
+    // Reserve a port, then close it, so every call is refused.
+    let base_url = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        format!("http://{}/v1", listener.local_addr().expect("addr"))
+    };
+    let Some((memory, agent)) = seeded_for_triple_refinement(&base_url).await else {
+        return;
+    };
+
+    let report = agent
+        .consolidate_with(ConsolidateOptions::llm_triples("generate/triples"))
+        .await
+        .expect("a down endpoint falls back rather than failing the cycle");
+    let requested = report.cycle.triples_requested;
+    assert!(requested >= 1, "the seeded observation was sent");
+    assert_eq!(report.cycle.triples_refined, 0);
+    assert_eq!(report.cycle.triples_failed, requested, "every call failed");
 
     let predicates = fact_predicates(&agent).await;
     assert!(

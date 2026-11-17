@@ -219,7 +219,9 @@ println!(
 
 The alias must be registered (for example with `UnikoBuilder::llm`) and be a generation model;
 otherwise `consolidate_with` returns `UnikoError::Config` before doing any work. Observations the
-model declines or answers unparseably keep their rule-based triple.
+model declines or answers unparseably keep their rule-based triple, as do those whose call fails;
+`report.cycle.triples_failed` counts the latter, so an unreachable endpoint shows up as
+`triples_failed == triples_requested` rather than as a silent fallback.
 
 ---
 

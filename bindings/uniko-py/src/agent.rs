@@ -317,8 +317,10 @@ pymethods_with_sync! {
         /// model call. Pass ``llm_triples_alias`` (a generation alias, e.g.
         /// one registered with ``UnikoBuilder.llm``) to refine each
         /// Observation's triple with that model first; an unknown or
-        /// non-generation alias raises ``ConfigError`` before any work, and
-        /// ``report.cycle.triples_refined`` counts the triples it changed.
+        /// non-generation alias raises ``ConfigError`` before any work.
+        /// ``report.cycle.triples_refined`` counts triples replaced by a
+        /// parsed model reply and ``triples_failed`` the calls that failed
+        /// outright (e.g. the endpoint is down).
         #[pyo3(signature = (*, llm_triples_alias=None))]
         fn consolidate / consolidate_sync(&self, py, llm_triples_alias: Option<String>) -> Py<PyConsolidationReport> {
             prepare {
