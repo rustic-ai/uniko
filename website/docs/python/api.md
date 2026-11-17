@@ -83,7 +83,7 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
         .config({"recall_limit": 10, "recall_token_budget": 4096})
         .embedding("bge-small")
         .reranker(None)
-        .llm(uniko.LlmSpec.openai("answerer", "gpt-4o-mini"))
+        .llm(uniko.LlmSpec.openai("generate/answer", "gpt-4o-mini"))
         .streaming(True)
         .scope_to_agent()
         .build())
@@ -139,7 +139,8 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `embedding` | `embedding(embedding: str \| dict) -> UnikoBuilder` | — (sync) | Embedding model: a preset name or an `embedding` section. |
 | `reranker` | `reranker(reranker: str \| dict \| None) -> UnikoBuilder` | — (sync) | Reranker: `"bge-base"`, `"minilm"`, a `reranker` section, or `None` for off. |
 | `nlp` | `nlp(nlp: str \| dict) -> UnikoBuilder` | — (sync) | NLP model for entity and observation extraction: `"v1"` (default), a kniv v7 size (`"v7-tiny"`, `"v7-small"`, `"v7-medium"`, `"v7-large"`, `"v7-xlarge"`, `"v7-xlarge-d"`), or an `nlp` section. Wins over `config()` in either order. |
-| `llm` | `llm(spec: LlmSpec) -> UnikoBuilder` | — (sync) | Generation model — **required for `answer()`**. |
+| `llm` | `llm(spec: LlmSpec) -> UnikoBuilder` | — (sync) | Generation model — **required for `answer()`**. Each call adds one; the first answers by default. |
+| `answer_alias` | `answer_alias(alias: str) -> UnikoBuilder` | — (sync) | Which generation alias `answer()` uses: an `llm()` alias or one from the `catalog_path` file. `build()` raises `ConfigError` if it is missing or not a generation model. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
 | `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |
@@ -201,11 +202,23 @@ and synchronous.
 | `openai` | `@staticmethod openai(alias: str, model_id: str, base_url: str \| None = None)` | Key read from `OPENAI_API_KEY`. |
 | `openai_with_key_env` | `@staticmethod openai_with_key_env(alias: str, model_id: str, key_env: str, base_url: str \| None = None)` | Key read from the named env var. |
 | `llamacpp` | `@staticmethod llamacpp(alias: str, model_id: str, base_url: str, key_env: str \| None = None)` | A model held by a llama.cpp `llama-server`. `base_url` includes `/v1`; pass `key_env` only if the server runs with `--api-key`. |
+| `new` | `@staticmethod new(alias: str, provider: str, model_id: str, options: dict[str, Any] \| None = None, api_key_env: str \| None = None)` | Any compiled generation provider: `remote/anthropic`, `remote/azure-openai`, `remote/cohere`, `remote/gemini`, `remote/llamacpp`, `remote/mistral`, `remote/openai`, `remote/vertexai`. `options` are provider options; credentials go only through `api_key_env`. |
+
+`alias` is a read-only property. Aliases take the `task/name` form. `build()` checks every spec
+before opening the store and raises `ConfigError` naming the alias for a provider that cannot
+generate, an option the provider rejects, an inline credential (`api_key`, `token`, ...), or an
+alias registered twice. `repr()` shows only the alias.
 
 ```python
-spec = uniko.LlmSpec.openai("answerer", "gpt-4o-mini")
-uni = await uniko.Uniko.builder().llm(spec).build()
+spec = uniko.LlmSpec.openai("generate/answer", "gpt-4o-mini")
+claude = uniko.LlmSpec.new(
+    "generate/claude", "remote/anthropic", "claude-sonnet-4-5", api_key_env="ANTHROPIC_API_KEY"
+)
+uni = await uniko.Uniko.builder().llm(spec).llm(claude).answer_alias("generate/claude").build()
 ```
+
+The Pydantic layer's `LlmSpecModel` takes the same spec as `{"provider": "generic", "alias": ...,
+"provider_id": ..., "model_id": ..., "options": ..., "api_key_env": ...}`.
 
 ---
 

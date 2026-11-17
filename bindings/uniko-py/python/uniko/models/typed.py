@@ -784,6 +784,10 @@ class TypedUnikoBuilder:
         self._inner = self._inner.llm(_native_arg(spec))
         return self
 
+    def answer_alias(self, alias: str) -> "TypedUnikoBuilder":
+        self._inner = self._inner.answer_alias(alias)
+        return self
+
     def streaming(self, on: bool) -> "TypedUnikoBuilder":
         self._inner = self._inner.streaming(on)
         return self

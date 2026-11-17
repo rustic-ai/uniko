@@ -409,9 +409,19 @@ pymethods_with_sync! {
         }
 
         /// Register an LLM, enabling `Agent.answer`.
+        ///
+        /// Each call adds one more generation model; the first answers
+        /// unless `answer_alias` names another.
         fn llm<'py>(slf: PyRef<'py, Self>, spec: &PyLlmSpec) -> PyResult<PyRef<'py, Self>> {
             let spec = spec.spec();
             slf.map(|b| b.llm(spec))?;
+            Ok(slf)
+        }
+
+        /// Choose which generation alias `Agent.answer` uses: an `llm()`
+        /// alias or one from the `catalog_path` file.
+        fn answer_alias<'py>(slf: PyRef<'py, Self>, alias: String) -> PyResult<PyRef<'py, Self>> {
+            slf.map(|b| b.answer_alias(alias))?;
             Ok(slf)
         }
 
@@ -473,7 +483,8 @@ pymethods_with_sync! {
 /// An LLM registration for `Agent.answer`.
 ///
 /// Construct via a provider helper (`LlmSpec.openai`,
-/// `LlmSpec.llamacpp`).
+/// `LlmSpec.llamacpp`) or, for any other compiled generation provider,
+/// `LlmSpec.new`.
 #[pyclass(name = "LlmSpec", module = "uniko")]
 pub struct PyLlmSpec {
     inner: LlmSpec,
@@ -488,6 +499,34 @@ impl PyLlmSpec {
 
 #[pymethods]
 impl PyLlmSpec {
+    /// A generation model served by any compiled provider, such as
+    /// `remote/anthropic`, `remote/mistral` or `remote/gemini`.
+    ///
+    /// `options` are provider options (never credentials: name the
+    /// credential's environment variable with `api_key_env`). The builder
+    /// validates provider and options when it builds.
+    #[staticmethod]
+    #[pyo3(signature = (alias, provider, model_id, options=None, api_key_env=None))]
+    fn new(
+        alias: String,
+        provider: String,
+        model_id: String,
+        options: Option<&Bound<'_, pyo3::types::PyDict>>,
+        api_key_env: Option<String>,
+    ) -> PyResult<Self> {
+        let mut spec = LlmSpec::new(alias, provider, model_id);
+        if let Some(options) = options {
+            for (key, value) in options.iter() {
+                let key: String = key.extract()?;
+                spec = spec.option(key, crate::convert::py_to_json(&value)?);
+            }
+        }
+        if let Some(var) = api_key_env {
+            spec = spec.api_key_env(var);
+        }
+        Ok(Self { inner: spec })
+    }
+
     /// An OpenAI-compatible chat model (key read from `OPENAI_API_KEY`).
     #[staticmethod]
     #[pyo3(signature = (alias, model_id, base_url=None))]
@@ -532,8 +571,14 @@ impl PyLlmSpec {
         }
     }
 
+    /// The alias this model registers under.
+    #[getter]
+    fn alias(&self) -> &str {
+        self.inner.alias()
+    }
+
     fn __repr__(&self) -> String {
-        "LlmSpec(...)".to_string()
+        format!("LlmSpec(alias={:?})", self.inner.alias())
     }
 }
 

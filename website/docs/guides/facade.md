@@ -52,7 +52,7 @@ use uniko_memory::{EmbeddingConfig, LlmSpec, Uniko};
 let memory = Uniko::builder()
     .path("./agent-memory")
     .embedding(EmbeddingConfig::bge_small_en_v15())          // swap the embedder
-    .llm(LlmSpec::openai("answerer", "gpt-4o-mini", None))   // enables answer()
+    .llm(LlmSpec::openai("generate/answer", "gpt-4o-mini", None))   // enables answer()
     .streaming(true)                                         // enables submit()/flush()
     .scope_to_agent()                                        // reads default to the agent's visibility
     .build()
@@ -63,7 +63,8 @@ let memory = Uniko::builder()
 |---|---|
 | `.path(p)` / `.in_memory()` | Where the store lives. |
 | `.embedding(EmbeddingConfig)` | The embedder (vector search). |
-| `.llm(LlmSpec)` | A generation model — **required for `answer()`**. |
+| `.llm(LlmSpec)` | A generation model — **required for `answer()`**. Call it once per model; each call adds one. |
+| `.answer_alias(alias)` | Which generation model `answer()` uses: an `.llm()` alias or one from the `catalog_path` file. Defaults to the first `.llm()`. |
 | `.streaming(bool)` | Enables the fire-and-forget `submit`/`flush` lane. |
 | `.scope_to_agent()` / `.scope(RecallScope)` | Default read visibility. |
 | `.extractor(Arc<dyn ModalityExtractor>)` | A pluggable image/audio/video extractor — implement `modality()` and `extract()` on `uniko_extract::ingest::modality::ModalityExtractor` (`Send + Sync + Debug`). Without one, image/audio/video sources return `UnikoError::Unsupported`. |
@@ -71,7 +72,34 @@ let memory = Uniko::builder()
 
 **`LlmSpec`** picks the generation model: `openai(alias, model, base_url)` (reads `OPENAI_API_KEY`),
 `openai_with_key_env(...)` for a custom key var, or `llamacpp(alias, model, base_url)` for a
-llama.cpp `llama-server` you run yourself.
+llama.cpp `llama-server` you run yourself. Any other compiled generation provider goes through
+`new(alias, provider, model)`, with `.option(key, value)` for provider options and
+`.api_key_env(var)` for the credential:
+
+```rust
+let claude = LlmSpec::new("generate/claude", "remote/anthropic", "claude-sonnet-4-5")
+    .api_key_env("ANTHROPIC_API_KEY");
+let memory = Uniko::builder()
+    .llm(LlmSpec::openai("generate/answer", "gpt-4o-mini", None))
+    .llm(claude)
+    .answer_alias("generate/claude")
+    .build()
+    .await?;
+```
+
+The compiled generation providers are `remote/anthropic`, `remote/azure-openai`, `remote/cohere`,
+`remote/gemini`, `remote/llamacpp`, `remote/mistral`, `remote/openai` and `remote/vertexai`
+(`uniko_store::GENERATION_PROVIDERS`). Aliases take the `task/name` form. `build()` checks every
+`LlmSpec` before it opens the store, and fails with `UnikoError::Config` naming the alias on:
+
+- a provider that is not compiled in or cannot generate;
+- an option the provider does not accept;
+- a credential passed inline (`api_key`, `token`, ...) instead of through `api_key_env`;
+- the same alias registered twice;
+- an `answer_alias` that is not in the catalog or is not a generation model.
+
+A spec's `Debug` output shows the option keys, never their values. Remote endpoints are not called
+until the first request, so a wrong key or URL still surfaces then.
 
 !!! note "Capabilities, not wiring"
     You never construct a `KnowledgeBase`, a pipeline, or a model catalog. The builder is the only
@@ -389,7 +417,7 @@ use uniko_memory::{CreateGoalParams, IngestSource, LlmSpec, Turn, Uniko};
 async fn main() -> anyhow::Result<()> {
     let memory = Uniko::builder()
         .in_memory()
-        .llm(LlmSpec::openai("answerer", "gpt-4o-mini", None))
+        .llm(LlmSpec::openai("generate/answer", "gpt-4o-mini", None))
         .build()
         .await?;
     let agent = memory.agent("assistant");
