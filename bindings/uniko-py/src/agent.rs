@@ -13,8 +13,9 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use uniko_api::tools::{
-    AddObservationParams, Agent, AssertFactParams, InvalidateFactParams, NodeId, RecallOverrides,
-    RecordActionParams, RecordEpisodeParams, Scope, Visibility, fact_id_for_scoped,
+    AddObservationParams, Agent, AssertFactParams, ConsolidateOptions, InvalidateFactParams,
+    NodeId, RecallOverrides, RecordActionParams, RecordEpisodeParams, Scope, Visibility,
+    fact_id_for_scoped,
 };
 
 use crate::convert::{self, params_to_rust};
@@ -279,8 +280,6 @@ pymethods_with_sync! {
             }
         }
 
-        /// Run one consolidation cycle for this agent, now.
-        ///
         /// Retire a logical source: no revision of it grounds a current answer
         /// (issue #41).
         ///
@@ -307,13 +306,30 @@ pymethods_with_sync! {
             }
         }
 
+        /// Run one consolidation pass for this agent, now.
+        ///
         /// Compiles unprocessed Observations into Facts, reinforcing or
-        /// invalidating prior beliefs and flagging entity drift. Always
-        /// available — no streaming pipeline required.
-        fn consolidate / consolidate_sync(&self, py) -> Py<PyConsolidationReport> {
-            prepare {}
+        /// invalidating prior beliefs and flagging entity drift, then runs
+        /// procedure promotion and topic detection. Always available — no
+        /// streaming pipeline required.
+        ///
+        /// By default triples come from rule-based extraction, with no
+        /// model call. Pass ``llm_triples_alias`` (a generation alias, e.g.
+        /// one registered with ``UnikoBuilder.llm``) to refine each
+        /// Observation's triple with that model first; an unknown or
+        /// non-generation alias raises ``ConfigError`` before any work, and
+        /// ``report.cycle.triples_refined`` counts the triples it changed.
+        #[pyo3(signature = (*, llm_triples_alias=None))]
+        fn consolidate / consolidate_sync(&self, py, llm_triples_alias: Option<String>) -> Py<PyConsolidationReport> {
+            prepare {
+                let options = match llm_triples_alias {
+                    Some(alias) => ConsolidateOptions::llm_triples(alias),
+                    None => ConsolidateOptions::default(),
+                };
+
+            }
             run(agent = self.inner.clone()) {
-                let stats = agent.consolidate().await.map_err(to_pyerr)?;
+                let stats = agent.consolidate_with(options).await.map_err(to_pyerr)?;
                 Python::attach(|py| PyConsolidationReport::from_rust(py, &stats))
 
             }

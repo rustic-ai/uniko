@@ -61,6 +61,13 @@ pub struct CycleStats {
     /// Number of Entities that transitioned to `unstable = true` in
     /// this cycle (F39 drift alerts).
     pub drift_alerts: usize,
+    /// Observations sent for LLM triple refinement ([`TripleSource::Llm`]).
+    /// Zero on the default SRL/DEP path.
+    pub triples_requested: usize,
+    /// Observations whose triple the LLM refined. The difference from
+    /// [`triples_requested`](Self::triples_requested) is how many fell back
+    /// to their SRL/DEP triple (LLM error, `SKIP`, or an unparseable reply).
+    pub triples_refined: usize,
 }
 
 /// Fraction of observations within a `(subject, predicate)` group that
@@ -180,6 +187,8 @@ pub async fn run_cycle_with(
     // before grouping so the LLM's cleaner predicates collapse near-
     // duplicates the SRL/DEP path leaves spread across distinct keys
     // (e.g. "got" vs "got_a" vs "received" all collapsing to "received").
+    let mut triples_requested = 0usize;
+    let mut triples_refined = 0usize;
     if let TripleSource::Llm { alias } = triple_source
         && !observations.is_empty()
     {
@@ -217,6 +226,8 @@ pub async fn run_cycle_with(
             dropped = requested - overwritten,
             "llm triple refinement complete",
         );
+        triples_requested = requested;
+        triples_refined = overwritten;
     }
     if observations.is_empty() {
         let completed_at = Utc::now();
@@ -604,6 +615,8 @@ pub async fn run_cycle_with(
         facts_reinforced: reinforced_facts.len(),
         facts_invalidated: invalidated_facts.len(),
         drift_alerts,
+        triples_requested,
+        triples_refined,
     })
 }
 

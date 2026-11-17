@@ -18,7 +18,7 @@ use uniko_store::{NodeId, UnikoError, Value};
 
 use super::Agent;
 use crate::action::{RecordActionParams, RecordActionResult, record_action};
-use crate::consolidation::CycleStats;
+use crate::consolidation::{CycleStats, TripleSource};
 use crate::episode::{RecordEpisodeParams, record_episode};
 use crate::fact::{AssertFactParams, InvalidateFactParams, assert_fact, invalidate_fact};
 use crate::observation::{AddObservationParams, add_observation};
@@ -35,6 +35,36 @@ pub struct ConsolidationReport {
     pub procedures: PromotionReport,
     /// Topic detection (P6), which covers the whole store.
     pub topics: TopicReport,
+}
+
+/// How [`Agent::consolidate_with`] runs the observation-to-fact cycle.
+///
+/// The default reproduces [`Agent::consolidate`]: triples come from the
+/// rule-based SRL/DEP extraction already stored on each Observation, with
+/// no model call.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ConsolidateOptions {
+    /// Where the cycle's `(subject, predicate, object)` triples come from.
+    pub triple_source: TripleSource,
+}
+
+impl ConsolidateOptions {
+    /// Refine each Observation's triple with the generation model at
+    /// `alias` before grouping.
+    ///
+    /// One model call per unprocessed Observation, so this belongs on an
+    /// offline or scheduled consolidation pass, not on the ingest path.
+    /// Observations the model declines or answers unparseably keep their
+    /// SRL/DEP triple; [`CycleStats::triples_refined`] counts the rest.
+    #[must_use]
+    pub fn llm_triples(alias: impl Into<String>) -> Self {
+        Self {
+            triple_source: TripleSource::Llm {
+                alias: alias.into(),
+            },
+        }
+    }
 }
 
 /// A rule as [`Agent::list_rules`] and [`Agent::explain_rule`] show it.
@@ -337,7 +367,37 @@ impl Agent {
     /// logged and reported as zero, as the streaming pipeline does, so one
     /// failing sweep does not lose the cycle's work.
     pub async fn consolidate(&self) -> Result<ConsolidationReport, UnikoError> {
-        let cycle = crate::consolidation::run_cycle(&self.kb, &self.agent_id, None).await?;
+        self.consolidate_with(ConsolidateOptions::default()).await
+    }
+
+    /// [`consolidate`](Self::consolidate) with explicit options — today,
+    /// the source of the cycle's triples.
+    ///
+    /// With [`ConsolidateOptions::llm_triples`], the alias is checked
+    /// before any work: it must be registered (for example through
+    /// [`UnikoBuilder::llm`](crate::UnikoBuilder::llm)) and resolve to a
+    /// generation model, so a misconfigured alias fails here rather than
+    /// silently falling back on every Observation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] when the refinement alias is missing
+    /// or not a generation model, and otherwise as
+    /// [`consolidate`](Self::consolidate).
+    pub async fn consolidate_with(
+        &self,
+        options: ConsolidateOptions,
+    ) -> Result<ConsolidationReport, UnikoError> {
+        if let TripleSource::Llm { alias } = &options.triple_source {
+            self.kb.ensure_generator(alias).await?;
+        }
+        let cycle = crate::consolidation::run_cycle_with(
+            &self.kb,
+            &self.agent_id,
+            None,
+            &options.triple_source,
+        )
+        .await?;
         let procedures = match promote_procedures_once(
             &self.kb,
             &self.agent_id,

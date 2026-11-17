@@ -141,4 +141,34 @@ impl KnowledgeBase {
     pub fn model_runtime(&self) -> Option<std::sync::Arc<crate::ModelRuntime>> {
         self.db.xervo().raw_runtime().cloned()
     }
+
+    /// Check that `alias` names a text-generation model this store can
+    /// use, loading it if it is not loaded yet.
+    ///
+    /// For callers that are about to commit to an expensive pass built on
+    /// [`generate`](Self::generate) and want a misconfigured alias to fail
+    /// up front rather than per call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] when no model runtime is configured,
+    /// when `alias` is not in the catalog, or when it does not resolve to a
+    /// generation model (wrong task, unknown provider, or a load failure).
+    pub async fn ensure_generator(&self, alias: &str) -> Result<()> {
+        let runtime = self.model_runtime().ok_or_else(|| {
+            UnikoError::Config(format!(
+                "generation alias '{alias}': no model runtime is configured"
+            ))
+        })?;
+        if !runtime.contains_alias(alias).await {
+            return Err(UnikoError::Config(format!(
+                "generation alias '{alias}' is not registered in the model catalog"
+            )));
+        }
+        runtime.generator(alias).await.map(|_| ()).map_err(|e| {
+            UnikoError::Config(format!(
+                "alias '{alias}' is not a usable generation model: {e}"
+            ))
+        })
+    }
 }

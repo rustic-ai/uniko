@@ -621,6 +621,13 @@ pub struct PyCycleStats {
     /// Entities that flipped to `unstable` (drift alerts).
     #[pyo3(get)]
     drift_alerts: usize,
+    /// Observations sent for LLM triple refinement (0 on the default path).
+    #[pyo3(get)]
+    triples_requested: usize,
+    /// Observations whose triple the LLM refined; the rest kept their
+    /// rule-based triple.
+    #[pyo3(get)]
+    triples_refined: usize,
 }
 
 impl PyCycleStats {
@@ -634,6 +641,8 @@ impl PyCycleStats {
                 facts_reinforced: stats.facts_reinforced,
                 facts_invalidated: stats.facts_invalidated,
                 drift_alerts: stats.drift_alerts,
+                triples_requested: stats.triples_requested,
+                triples_refined: stats.triples_refined,
             },
         )
     }
@@ -643,12 +652,14 @@ impl PyCycleStats {
 impl PyCycleStats {
     fn __repr__(&self) -> String {
         format!(
-            "CycleStats(observations_processed={}, facts_created={}, facts_reinforced={}, facts_invalidated={}, drift_alerts={})",
+            "CycleStats(observations_processed={}, facts_created={}, facts_reinforced={}, facts_invalidated={}, drift_alerts={}, triples_requested={}, triples_refined={})",
             self.observations_processed,
             self.facts_created,
             self.facts_reinforced,
             self.facts_invalidated,
-            self.drift_alerts
+            self.drift_alerts,
+            self.triples_requested,
+            self.triples_refined
         )
     }
 }
