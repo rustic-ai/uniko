@@ -589,10 +589,6 @@ jobs:
             /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
           df -h /
 
-      - name: Authenticate to crates.io (Trusted Publishing)
-        id: auth
-        uses: rust-lang/crates-io-auth-action@v1
-
       - name: Publish in dependency order
         # Idempotent, rate-limit-aware ordered publish (mirrors rustic-ai/uni-db):
         #   - "already exists" on the index -> treat as success/skip, so a re-run
@@ -608,20 +604,50 @@ jobs:
         # inside an `if`: a bare `out="$(cargo publish ...)"` exits the step on
         # the first failure, before the output is printed or any of the above
         # handling runs.
+        #
+        # Each attempt mints its own crates.io token through Trusted Publishing,
+        # the exchange rust-lang/crates-io-auth-action performs, and revokes it
+        # afterwards. Those tokens expire 30 minutes after they are issued, and
+        # the verification builds alone take longer than that: 0.5.1 got one
+        # token up front, published four crates, and every upload after minute
+        # 30 failed with 403 "Invalid authentication token".
         env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           # The verification builds use the dev profile. Debug info is most of
           # their size on disk and nothing reads it here; it is not part of the
           # published crate.
           CARGO_PROFILE_DEV_DEBUG: "0"
         run: |
           set -uo pipefail
+          tokens_url=https://crates.io/api/v1/trusted_publishing/tokens
+          mint_token() {
+            local jwt
+            jwt="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=crates.io" | jq -r .value)" || return 1
+            CARGO_REGISTRY_TOKEN="$(jq -n --arg jwt "$jwt" '{jwt: $jwt}' \
+              | curl -sSf -X POST -H 'Content-Type: application/json' --data @- "$tokens_url" \
+              | jq -r .token)" || return 1
+            [ -n "$CARGO_REGISTRY_TOKEN" ] && [ "$CARGO_REGISTRY_TOKEN" != null ] || return 1
+            echo "::add-mask::$CARGO_REGISTRY_TOKEN"
+            export CARGO_REGISTRY_TOKEN
+          }
+          revoke_token() {
+            [ -n "${CARGO_REGISTRY_TOKEN:-}" ] || return 0
+            curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $CARGO_REGISTRY_TOKEN" \
+              "$tokens_url" || echo "  -> could not revoke the crates.io token"
+            unset CARGO_REGISTRY_TOKEN
+          }
+          trap revoke_token EXIT
           publish_crate() {
             local crate="$1" attempt=0 max=20 out rc
             while :; do
               attempt=$((attempt + 1))
               echo "::group::cargo publish -p $crate (attempt $attempt/$max)"
-              if out="$(cargo publish -p "$crate" --locked 2>&1)"; then rc=0; else rc=$?; fi
+              if mint_token; then
+                if out="$(cargo publish -p "$crate" --locked 2>&1)"; then rc=0; else rc=$?; fi
+              else
+                out="could not mint a crates.io token"; rc=1
+              fi
+              revoke_token
               echo "$out"; echo "::endgroup::"
               df -h / | tail -1
               [ "$rc" -eq 0 ] && return 0

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release workflow mints a fresh crates.io token for each publish
+  attempt.** Trusted Publishing tokens expire after 30 minutes, and the
+  0.5.1 publish, which got one token up front, lost it after four crates.
+
 ## [0.5.1] - 2026-11-15
 
 ### Fixed
