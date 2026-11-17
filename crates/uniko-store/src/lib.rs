@@ -35,6 +35,7 @@ pub mod types;
 
 pub use error::{Result, UnikoError};
 #[doc(inline)]
+pub use model::ModelEntry;
 pub use storage::KnowledgeBase;
 #[doc(inline)]
 pub use storage::deletion::DeletionReport;

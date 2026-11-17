@@ -17,6 +17,7 @@ mod deletion_tests;
 mod hybrid_schema_tests;
 mod locy_tests;
 mod migration_artifact_content;
+mod model_catalog_tests;
 mod schema_artifact_content;
 mod schema_completeness;
 mod schema_tests;
