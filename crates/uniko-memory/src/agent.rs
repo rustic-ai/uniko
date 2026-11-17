@@ -28,7 +28,7 @@ use crate::rules::{AddRuleParams, add_rule};
 
 mod ops;
 pub(crate) use ops::ensure_agent_participant;
-pub use ops::{ConsolidationReport, RuleView};
+pub use ops::{ConsolidateOptions, ConsolidationReport, RuleView};
 
 /// System prompt used by [`Agent::answer`] when generating a reply.
 const ANSWER_SYSTEM_PROMPT: &str = "You are a helpful assistant. Answer the question using only the \

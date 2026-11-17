@@ -48,8 +48,8 @@ pub(crate) mod value_convert;
 #[doc(inline)]
 pub use action::{RecordActionParams, RecordActionResult, record_action};
 #[doc(inline)]
-pub use agent::{Agent, ConsolidationReport, RuleView};
-pub use consolidation::CycleStats;
+pub use agent::{Agent, ConsolidateOptions, ConsolidationReport, RuleView};
+pub use consolidation::{CycleStats, TripleSource};
 #[doc(inline)]
 pub use episode::{RecordEpisodeParams, record_episode};
 #[doc(inline)]

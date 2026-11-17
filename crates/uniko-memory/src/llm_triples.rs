@@ -68,26 +68,54 @@ pub async fn refine_triples(
     llm_alias: &str,
     inputs: &[ObservationInput],
 ) -> Result<Vec<LlmTriple>, UnikoError> {
+    Ok(refine_triples_counted(kb, llm_alias, inputs).await.triples)
+}
+
+/// Outcome of [`refine_triples_counted`].
+#[derive(Debug, Default)]
+pub(crate) struct RefineOutcome {
+    /// Rows the LLM refined.
+    pub triples: Vec<LlmTriple>,
+    /// Rows whose LLM call itself failed (transport, timeout, provider
+    /// error), as opposed to a `SKIP` or an unparseable reply.
+    pub failed: usize,
+}
+
+/// [`refine_triples`], also counting rows whose LLM call failed so the
+/// caller can tell an unreachable endpoint from a model that declined.
+pub(crate) async fn refine_triples_counted(
+    kb: &KnowledgeBase,
+    llm_alias: &str,
+    inputs: &[ObservationInput],
+) -> RefineOutcome {
     let results = stream::iter(inputs.iter().cloned())
         .map(|input| async move { extract_one(kb, llm_alias, &input).await })
         .buffer_unordered(CONCURRENCY)
         .collect::<Vec<_>>()
         .await;
 
-    Ok(results.into_iter().flatten().collect())
+    let mut outcome = RefineOutcome::default();
+    for result in results {
+        match result {
+            Ok(Some(t)) => outcome.triples.push(t),
+            Ok(None) => {}
+            Err(()) => outcome.failed += 1,
+        }
+    }
+    outcome
 }
 
 /// Refine a single observation's triple via LLM.
 ///
-/// Returns `None` when the LLM call fails, when the model emits `SKIP`,
-/// or when the response is malformed.  LLM transport errors are logged
-/// at `WARN` before being dropped so the batch can continue with the
+/// Returns `Ok(None)` when the model emits `SKIP` or the response is
+/// malformed, and `Err(())` when the LLM call itself fails.  Transport
+/// errors are logged at `WARN`; either way the batch continues with the
 /// original SRL/DEP triple for that row.
 async fn extract_one(
     kb: &KnowledgeBase,
     llm_alias: &str,
     input: &ObservationInput,
-) -> Option<LlmTriple> {
+) -> Result<Option<LlmTriple>, ()> {
     let speaker = input.speaker_hint.as_deref().unwrap_or("the speaker");
     let user = format!(
         "Observation: \"{content}\"\nSpeaker: {speaker}\n\nTriple:",
@@ -110,11 +138,11 @@ async fn extract_one(
                 node_id = input.node_id,
                 "LLM triple extraction failed; keeping original triple"
             );
-            return None;
+            return Err(());
         }
     };
 
-    parse_triple(&text, input.node_id)
+    Ok(parse_triple(&text, input.node_id))
 }
 
 /// Parse the LLM response into a triple, or `None` for SKIP / malformed.

@@ -3910,6 +3910,330 @@ async fn consolidation_keeps_scoped_facts_apart() {
     );
 }
 
+/// A minimal OpenAI-compatible `/v1/chat/completions` stub on a loopback
+/// port: every request gets `reply` as the assistant message. Returns the
+/// `base_url` (including `/v1`) and a counter of requests served.
+async fn spawn_chat_stub(
+    reply: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stub");
+    let addr = listener.local_addr().expect("stub addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let served = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let served = served.clone();
+            tokio::spawn(async move {
+                // Read the head, then exactly Content-Length body bytes.
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let head_end = loop {
+                    let Ok(n) = stream.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                let body_len = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                // Always answer once a request head arrived, even if the body
+                // read fails, so the client never waits out its timeout.
+                while buf.len() < head_end + body_len {
+                    let Ok(n) = stream.read(&mut chunk).await else {
+                        break;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                served.fetch_add(1, Ordering::SeqCst);
+                let body = serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": reply } }],
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    (format!("http://{addr}/v1"), hits)
+}
+
+/// Build an instance whose `generate/triples` alias is the chat stub, seed one
+/// Observation with a rule-based triple, and return both. `None` when the
+/// instance or its embedder is unavailable.
+async fn seeded_for_triple_refinement(base_url: &str) -> Option<(Uniko, crate::Agent)> {
+    use crate::{AddObservationParams, LlmSpec};
+
+    let memory = match Uniko::builder()
+        .in_memory()
+        .llm(LlmSpec::llamacpp("generate/triples", "stub", base_url))
+        .build()
+        .await
+    {
+        Ok(memory) => memory,
+        // A rejected alias spec is a test bug, not a missing model.
+        Err(e) if e.to_string().contains("Configuration error") => {
+            panic!("the stub alias was rejected: {e}")
+        }
+        Err(e) => {
+            eprintln!("skipping: instance unavailable: {e}");
+            return None;
+        }
+    };
+    let agent = memory.agent("consolidator");
+    let mut session = agent.session("hr");
+    match session
+        .observe(Turn::new("user", "alice joined acme last week").id("hr-1"))
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return None;
+        }
+        Err(e) => panic!("observe failed: {e}"),
+    }
+    agent
+        .add_observation(AddObservationParams {
+            message_id: "hr-1".into(),
+            content: "alice joined acme last week".into(),
+            subject: "alice".into(),
+            predicate: Some("joined".into()),
+            object: Some("acme".into()),
+            ..AddObservationParams::default()
+        })
+        .await
+        .expect("add observation");
+    drop(session);
+    Some((memory, agent))
+}
+
+/// Fact predicates currently in the store.
+async fn fact_predicates(agent: &crate::Agent) -> Vec<String> {
+    agent
+        .kb()
+        .query_nodes(labels::FACT, None, None)
+        .await
+        .expect("query facts")
+        .into_iter()
+        .filter_map(|(_, p)| match p.get("predicate") {
+            Some(Value::String(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `consolidate_with(llm_triples)` replaces the rule-based triple with the
+/// model's and reports the refinement (issue #63).
+#[tokio::test]
+async fn consolidate_with_llm_triples_refines_through_the_alias() {
+    use std::sync::atomic::Ordering;
+
+    use crate::ConsolidateOptions;
+
+    let (base_url, hits) = spawn_chat_stub("Alice|employed_by|Acme").await;
+    let Some((memory, agent)) = seeded_for_triple_refinement(&base_url).await else {
+        return;
+    };
+
+    let report = agent
+        .consolidate_with(ConsolidateOptions::llm_triples("generate/triples"))
+        .await
+        .expect("consolidate with llm triples");
+    // The observed turn may add NLP-extracted observations of its own, so
+    // count relative to what was requested rather than assuming one.
+    let requested = report.cycle.triples_requested;
+    assert!(requested >= 1, "the seeded observation was sent");
+    assert_eq!(hits.load(Ordering::SeqCst), requested, "one call each");
+    assert_eq!(
+        report.cycle.triples_refined, requested,
+        "every reply parsed"
+    );
+    assert_eq!(report.cycle.observations_processed, requested);
+
+    let predicates = fact_predicates(&agent).await;
+    assert!(
+        predicates.iter().any(|p| p == "employed_by"),
+        "the refined predicate became a fact: {predicates:?}"
+    );
+    assert!(
+        !predicates.iter().any(|p| p == "joined"),
+        "the rule-based predicate was replaced: {predicates:?}"
+    );
+
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A model reply that is not a triple falls back to the rule-based triple,
+/// and the report says nothing was refined.
+#[tokio::test]
+async fn consolidate_with_llm_triples_falls_back_on_unparseable_replies() {
+    use std::sync::atomic::Ordering;
+
+    use crate::ConsolidateOptions;
+
+    let (base_url, hits) = spawn_chat_stub("I cannot help with that").await;
+    let Some((memory, agent)) = seeded_for_triple_refinement(&base_url).await else {
+        return;
+    };
+
+    let report = agent
+        .consolidate_with(ConsolidateOptions::llm_triples("generate/triples"))
+        .await
+        .expect("consolidate with llm triples");
+    let requested = report.cycle.triples_requested;
+    assert!(requested >= 1, "the seeded observation was sent");
+    assert_eq!(hits.load(Ordering::SeqCst), requested, "one call each");
+    assert_eq!(report.cycle.triples_refined, 0, "nothing parsed");
+    assert_eq!(report.cycle.triples_failed, 0, "every call was answered");
+
+    let predicates = fact_predicates(&agent).await;
+    assert!(
+        predicates.iter().any(|p| p == "joined"),
+        "the rule-based triple still produced its fact: {predicates:?}"
+    );
+
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn consolidate_with_llm_triples_counts_unreachable_endpoint_as_failed() {
+    use crate::ConsolidateOptions;
+
+    // Reserve a port, then close it, so every call is refused.
+    let base_url = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        format!("http://{}/v1", listener.local_addr().expect("addr"))
+    };
+    let Some((memory, agent)) = seeded_for_triple_refinement(&base_url).await else {
+        return;
+    };
+
+    let report = agent
+        .consolidate_with(ConsolidateOptions::llm_triples("generate/triples"))
+        .await
+        .expect("a down endpoint falls back rather than failing the cycle");
+    let requested = report.cycle.triples_requested;
+    assert!(requested >= 1, "the seeded observation was sent");
+    assert_eq!(report.cycle.triples_refined, 0);
+    assert_eq!(report.cycle.triples_failed, requested, "every call failed");
+
+    let predicates = fact_predicates(&agent).await;
+    assert!(
+        predicates.iter().any(|p| p == "joined"),
+        "the rule-based triple still produced its fact: {predicates:?}"
+    );
+
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// An alias that is missing, or not a generation model, is rejected before
+/// the cycle runs; the default path never calls a model.
+#[tokio::test]
+async fn consolidate_with_rejects_bad_refinement_aliases() {
+    use crate::{AddObservationParams, ConsolidateOptions};
+
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("consolidator");
+    let mut session = agent.session("notes");
+    match session
+        .observe(Turn::new("user", "the budget is capped").id("n-1"))
+        .await
+    {
+        Ok(_) => {}
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("observe failed: {e}"),
+    }
+    agent
+        .add_observation(AddObservationParams {
+            message_id: "n-1".into(),
+            content: "the budget is capped at ten thousand".into(),
+            subject: "budget".into(),
+            predicate: Some("capped_at".into()),
+            object: Some("ten thousand".into()),
+            ..AddObservationParams::default()
+        })
+        .await
+        .expect("add observation");
+
+    let cycles = || async {
+        agent
+            .kb()
+            .query_nodes(labels::CONSOLIDATION_CYCLE, None, None)
+            .await
+            .expect("query cycles")
+            .len()
+    };
+    let before = cycles().await;
+
+    let missing = agent
+        .consolidate_with(ConsolidateOptions::llm_triples("no-such-alias"))
+        .await
+        .expect_err("unknown alias is rejected");
+    assert!(
+        matches!(&missing, UnikoError::Config(m) if m.contains("no-such-alias")),
+        "{missing:?}"
+    );
+    let not_generation = agent
+        .consolidate_with(ConsolidateOptions::llm_triples(
+            uniko_store::schema::EMBED_ALIAS,
+        ))
+        .await
+        .expect_err("an embedding alias is not a generator");
+    assert!(
+        matches!(not_generation, UnikoError::Config(_)),
+        "{not_generation:?}"
+    );
+    assert_eq!(cycles().await, before, "no cycle ran for a rejected alias");
+
+    // The default path is unchanged and asks for no refinement.
+    let report = agent.consolidate().await.expect("default consolidate");
+    assert!(report.cycle.observations_processed >= 1);
+    assert_eq!(report.cycle.triples_requested, 0);
+    assert_eq!(report.cycle.triples_refined, 0);
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
 /// Procedures learned by `consolidate` are matched and scored through
 /// `Agent`, and carry the embedding recall searches them by.
 #[tokio::test]

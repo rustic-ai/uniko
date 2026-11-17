@@ -275,7 +275,7 @@ builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoni
 | `finalize_session` | `finalize_session(session_id: str) -> Awaitable[FinalizeReport]` | `finalize_session_sync` | Build/refresh a session's retrieval surfaces without its `Session` handle. |
 | `retire_source` | `retire_source(source_id: str) -> Awaitable[bool]` | `retire_source_sync` | Hide everything recorded under a source id from recall, reversibly. |
 | `restore_source` | `restore_source(source_id: str) -> Awaitable[bool]` | `restore_source_sync` | Undo `retire_source`. |
-| `consolidate` | `consolidate() -> Awaitable[ConsolidationReport]` | `consolidate_sync` | Consolidate now: Observations → Facts, then procedure promotion and topic detection. |
+| `consolidate` | `consolidate(*, llm_triples_alias: str \| None = None) -> Awaitable[ConsolidationReport]` | `consolidate_sync` | Consolidate now: Observations → Facts, then procedure promotion and topic detection. Pass `llm_triples_alias` (a registered generation alias) to refine each triple with that model first; an unknown or non-generation alias raises `ConfigError`. |
 | `unfinalized_session_ids` | `unfinalized_session_ids() -> Awaitable[list[str]]` | `unfinalized_session_ids_sync` | Sessions with no session-level chunks yet — drives a backfill loop. |
 | `forget_participant` | `forget_participant(participant_id: str) -> Awaitable[DeletionReport]` | `forget_participant_sync` | Forget a participant. |
 
@@ -824,6 +824,9 @@ The `cycle` part of a `ConsolidationReport`.
 | `facts_reinforced` | `int` |
 | `facts_invalidated` | `int` |
 | `drift_alerts` | `int` |
+| `triples_requested` | `int` — Observations sent for LLM refinement; `0` without `llm_triples_alias` |
+| `triples_refined` | `int` — of those, how many were replaced by a parsed model reply; the rest kept the rule-based triple |
+| `triples_failed` | `int` — of those, how many model calls failed outright (endpoint down, timeout) |
 
 ### `MessageView`
 

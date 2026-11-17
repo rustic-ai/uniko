@@ -176,6 +176,25 @@ def test_consolidate_reports_the_cortex_sweeps() -> None:
     assert isinstance(report.cycle, uniko.CycleStats)
     assert report.procedures.created >= 0 and report.topics.created >= 0
     assert isinstance(ConsolidationReport.from_native(report).cycle.facts_created, int)
+    # The default path asks no model to refine triples.
+    assert report.cycle.triples_requested == 0 and report.cycle.triples_refined == 0
+    assert report.cycle.triples_failed == 0
+    typed = ConsolidationReport.from_native(report)
+    assert typed.cycle.triples_requested == 0 and typed.cycle.triples_refined == 0
+    assert typed.cycle.triples_failed == 0
+
+
+def test_consolidate_rejects_unknown_triple_alias() -> None:
+    """``llm_triples_alias`` must name a registered generation model (#63)."""
+    memory = uniko.Uniko.in_memory_sync()
+    agent = memory.agent("a")
+    agent.session("s").observe_sync(uniko.Turn("alice", "I love hiking in the Alps"))
+    with pytest.raises(uniko.ConfigError, match="no-such-alias"):
+        agent.consolidate_sync(llm_triples_alias="no-such-alias")
+    typed = TypedUniko.in_memory_sync().agent("a")
+    typed.session("s").observe_sync(uniko.Turn("alice", "hello"))
+    with pytest.raises(uniko.ConfigError):
+        typed.consolidate_sync(llm_triples_alias="no-such-alias")
 
 
 def test_typed_wrappers_return_models() -> None:

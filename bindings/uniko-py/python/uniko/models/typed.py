@@ -554,11 +554,13 @@ class TypedAgent:
     def delete_session_sync(self, session_id: str) -> DeletionReport:
         return DeletionReport.from_native(self._inner.delete_session_sync(session_id))
 
-    async def consolidate(self) -> ConsolidationReport:
-        return ConsolidationReport.from_native(await self._inner.consolidate())
+    async def consolidate(self, *, llm_triples_alias: Optional[str] = None) -> ConsolidationReport:
+        native = await self._inner.consolidate(llm_triples_alias=llm_triples_alias)
+        return ConsolidationReport.from_native(native)
 
-    def consolidate_sync(self) -> ConsolidationReport:
-        return ConsolidationReport.from_native(self._inner.consolidate_sync())
+    def consolidate_sync(self, *, llm_triples_alias: Optional[str] = None) -> ConsolidationReport:
+        native = self._inner.consolidate_sync(llm_triples_alias=llm_triples_alias)
+        return ConsolidationReport.from_native(native)
 
     # Facts, actions, episodes, observations. Keyword arguments pass
     # through unchanged; see the native methods for the full list.
