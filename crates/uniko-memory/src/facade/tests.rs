@@ -1073,6 +1073,49 @@ async fn create_views_return_usable_generated_ids() {
     assert_eq!(explicit_task.task_id, "t-explicit");
     assert_eq!(explicit_task.goal_id, None);
 
+    // Retrying with the same explicit id updates in place: one goal, one
+    // task, no duplicated ownership/assignment links.
+    let retried = goals
+        .create_view(CreateGoalParams {
+            goal_id: Some("g-explicit".into()),
+            title: "renamed goal".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("retry explicit goal");
+    assert_eq!(retried.title, "renamed goal");
+    let retried_task = goals
+        .create_task_view(CreateTaskParams {
+            task_id: Some("t-explicit".into()),
+            title: "named task".into(),
+            goal_id: Some("g-explicit".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("retry explicit task");
+    assert_eq!(retried_task.goal_id.as_deref(), Some("g-explicit"));
+    goals
+        .create_task_view(CreateTaskParams {
+            task_id: Some("t-explicit".into()),
+            title: "named task".into(),
+            goal_id: Some("g-explicit".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("retry explicit task again");
+    let all = goals.all().await.expect("all");
+    assert_eq!(all.iter().filter(|g| g.goal_id == "g-explicit").count(), 1);
+    let tasks = goals.tasks().await.expect("tasks");
+    assert_eq!(
+        tasks.iter().filter(|t| t.task_id == "t-explicit").count(),
+        1
+    );
+    let linked = goals.tasks_of("g-explicit").await.expect("tasks_of");
+    assert_eq!(
+        linked.iter().filter(|t| t.task_id == "t-explicit").count(),
+        1
+    );
+
     // Two creates without an id are two goals.
     let a = goals
         .create_view(CreateGoalParams {

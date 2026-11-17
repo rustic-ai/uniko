@@ -128,6 +128,24 @@ def test_typed_sync_journey() -> None:
     assert isinstance(uni.config(), UnikoConfigModel)
 
 
+def test_typed_sync_create_views() -> None:
+    uni = TypedUniko.in_memory_sync()
+    agent = uni.agent("assistant")
+    agent.session("setup").observe_sync(TurnSpec(sender_id="assistant", content="kickoff"))
+    goals = agent.goals
+
+    first = goals.create_view_sync(GoalSpec(title="twin"))
+    second = goals.create_view_sync(GoalSpec(title="twin"))
+    assert isinstance(first, GoalView) and first.goal_id
+    assert first.goal_id != second.goal_id
+
+    task = goals.create_task_view_sync(TaskSpec(title="follow up", goal_id=first.goal_id))
+    assert isinstance(task, TaskView) and task.goal_id == first.goal_id
+    fetched = goals.task_sync(task.task_id)
+    assert isinstance(fetched, TaskView) and fetched.task_id == task.task_id
+    assert goals.task_sync("no-such-task") is None
+
+
 def test_typed_builder() -> None:
     uni = TypedUniko.builder().in_memory().streaming(False).build_sync()
     assert isinstance(uni, TypedUniko)

@@ -515,6 +515,11 @@ create_task_view(...)   # same arguments -> TaskView
 Omitting `goal_id` / `task_id` generates a new id on every call, so two calls create two goals or
 tasks. Pass an id when you need to know it up front.
 
+Creating again with an id that already exists updates that goal or task in place: its properties
+are overwritten and it keeps a single owner, assignee and goal link, so retrying with the same id
+is safe. If only the embedding step fails, the goal or task is still stored and the `_view` forms
+return it instead of raising, so a generated id is never lost.
+
 !!! note "Valid phase strings"
     Phases are plain lowercase strings, not enums.
 

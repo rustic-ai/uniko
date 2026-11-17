@@ -319,7 +319,7 @@ let ctx = agent.goals().context("goal-1").await?;        // Option<GoalContext>
 | --- | --- |
 | **Read** | `all()` · `in_phase(GoalPhase)` · `active()` · `planned()` · `completed()` · `get(id)` · `task(id)` · `tasks()` · `tasks_in(TaskPhase)` · `tasks_of(goal_id)` · `context(goal_id)` |
 | **Transition** (→ `Result<bool>`, `false` = unknown id) | `start(id)` · `complete(id, Option<Json>)` · `abandon(id)` · `set_status(id, &str)` · `start_task` · `complete_task` · `block_task` · `set_task_status` |
-| **Create** | `create(CreateGoalParams) -> NodeId` · `create_task(CreateTaskParams) -> NodeId` · `create_view(CreateGoalParams) -> GoalView` · `create_task_view(CreateTaskParams) -> TaskView` (the view carries the generated id) |
+| **Create** | `create(CreateGoalParams) -> NodeId` · `create_task(CreateTaskParams) -> NodeId` · `create_view(CreateGoalParams) -> GoalView` · `create_task_view(CreateTaskParams) -> TaskView` (the view carries the generated id; re-creating under an existing id updates it in place) |
 
 **`GoalView`** `{ goal_id, title, description?, status, phase: GoalPhase, created_at?, deadline?,
 completed_at?, metrics: Option<Json> }` · **`TaskView`** `{ task_id, title, description?, status,
