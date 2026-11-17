@@ -116,7 +116,7 @@ pub async fn create_goal(
         .await?;
 
     // ── Mandatory OWNED_BY edge (Goal → Participant) ──
-    kb.create_edge(edges::OWNED_BY, goal_node, participant_id, &HashMap::new())
+    kb.ensure_edge(edges::OWNED_BY, goal_node, participant_id)
         .await?;
 
     // ── Optional PARENT_GOAL (this → parent) ──
@@ -126,7 +126,7 @@ pub async fn create_goal(
             .await?
         {
             Some(parent) => {
-                kb.create_edge(edges::PARENT_GOAL, goal_node, parent.0, &HashMap::new())
+                kb.ensure_edge(edges::PARENT_GOAL, goal_node, parent.0)
                     .await?;
             }
             None => {

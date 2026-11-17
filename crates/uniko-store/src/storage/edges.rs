@@ -83,6 +83,26 @@ impl KnowledgeBase {
         Ok(eid)
     }
 
+    /// Create a property-less `edge_type` edge from `from` to `to` unless
+    /// one already exists, returning the existing or new edge id.
+    ///
+    /// Use this for structural links that must stay unique per node pair
+    /// when the caller re-runs an upsert (for example re-creating a Goal
+    /// under the same external id): [`create_edge`](Self::create_edge)
+    /// always adds a new parallel edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Schema`] if `edge_type` is unknown, or
+    /// [`UnikoError::Storage`] on database failure.
+    pub async fn ensure_edge(&self, edge_type: &str, from: NodeId, to: NodeId) -> Result<EdgeId> {
+        let existing = self.get_edges(from, edge_type, Direction::Outgoing).await?;
+        if let Some(edge) = existing.iter().find(|e| e.to == to) {
+            return Ok(edge.id);
+        }
+        self.create_edge(edge_type, from, to, &HashMap::new()).await
+    }
+
     /// Create multiple edges of potentially different types in a single
     /// transaction.
     ///

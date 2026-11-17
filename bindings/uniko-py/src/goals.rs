@@ -47,6 +47,64 @@ fn opt_json(value: Option<Bound<'_, PyAny>>) -> PyResult<Option<serde_json::Valu
     value.map(|b| py_to_json(&b)).transpose()
 }
 
+/// Build [`CreateGoalParams`] from the keyword arguments `create` and
+/// `create_view` share.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the facade CreateGoalParams field set as keyword args"
+)]
+fn goal_params(
+    title: String,
+    goal_id: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    metrics: Option<Bound<'_, PyAny>>,
+    guardrails: Option<Bound<'_, PyAny>>,
+    deadline: Option<Bound<'_, PyAny>>,
+    parent_goal_id: Option<String>,
+) -> PyResult<CreateGoalParams> {
+    Ok(CreateGoalParams {
+        goal_id,
+        title,
+        description,
+        status,
+        metrics: opt_json(metrics)?,
+        guardrails: opt_json(guardrails)?,
+        deadline: deadline.map(|d| py_to_datetime(&d)).transpose()?,
+        parent_goal_id,
+        created_at: None,
+    })
+}
+
+/// Build [`CreateTaskParams`] from the keyword arguments `create_task` and
+/// `create_task_view` share.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the facade CreateTaskParams field set as keyword args"
+)]
+fn task_params(
+    title: String,
+    task_id: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+    priority: Option<f64>,
+    goal_id: Option<String>,
+    depends_on_task_id: Option<String>,
+    subtask_of_task_id: Option<String>,
+) -> CreateTaskParams {
+    CreateTaskParams {
+        task_id,
+        title,
+        description,
+        status,
+        priority,
+        goal_id,
+        depends_on_task_id,
+        subtask_of_task_id,
+        created_at: None,
+    }
+}
+
 /// The agent's goal/task surface.
 ///
 /// Obtained from [`Agent.goals`](crate::agent::PyAgent). Reads are scoped to
@@ -159,6 +217,19 @@ pymethods_with_sync! {
                 let goal = agent.goals().get(&goal_id).await.map_err(to_pyerr)?;
                 Python::attach(|py| match goal {
                     Some(g) => PyGoalView::from_rust(py, &g).map(|p| p.into_any()),
+                    None => Ok(py.None()),
+                })
+
+            }
+        }
+
+        /// Fetch one task by id; resolves to ``None`` when unknown.
+        fn task / task_sync(&self, py, task_id: String) -> Py<PyAny> {
+            prepare {}
+            run(agent = self.inner.clone()) {
+                let task = agent.goals().task(&task_id).await.map_err(to_pyerr)?;
+                Python::attach(|py| match task {
+                    Some(t) => PyTaskView::from_rust(py, &t).map(|p| p.into_any()),
                     None => Ok(py.None()),
                 })
 
@@ -331,22 +402,36 @@ pymethods_with_sync! {
         )]
         fn create / create_sync(&self, py, title: String, goal_id: Option<String>, description: Option<String>, status: Option<String>, metrics: Option<Bound<'_, PyAny>>, guardrails: Option<Bound<'_, PyAny>>, deadline: Option<Bound<'_, PyAny>>, parent_goal_id: Option<String>) -> NodeId {
             prepare {
-                let deadline = deadline.map(|d| py_to_datetime(&d)).transpose()?;
-                let params = CreateGoalParams {
-                    goal_id,
-                    title,
-                    description,
-                    status,
-                    metrics: opt_json(metrics)?,
-                    guardrails: opt_json(guardrails)?,
-                    deadline,
-                    parent_goal_id,
-                    created_at: None,
-                };
+                let params = goal_params(title, goal_id, description, status, metrics, guardrails, deadline, parent_goal_id)?;
 
             }
             run(agent = self.inner.clone()) {
                 agent.goals().create(params).await.map_err(to_pyerr)
+
+            }
+        }
+
+        /// Create a goal, returning it as a ``GoalView``.
+        ///
+        /// Unlike ``create``, the result carries the goal's ``goal_id``, which
+        /// every other goal method takes. Omit ``goal_id`` and a fresh one is
+        /// generated on each call; pass one and the goal is created under it.
+        #[pyo3(signature = (
+            title, *, goal_id=None, description=None, status=None,
+            metrics=None, guardrails=None, deadline=None, parent_goal_id=None
+        ))]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "mirrors the facade CreateGoalParams field set as keyword args"
+        )]
+        fn create_view / create_view_sync(&self, py, title: String, goal_id: Option<String>, description: Option<String>, status: Option<String>, metrics: Option<Bound<'_, PyAny>>, guardrails: Option<Bound<'_, PyAny>>, deadline: Option<Bound<'_, PyAny>>, parent_goal_id: Option<String>) -> Py<PyGoalView> {
+            prepare {
+                let params = goal_params(title, goal_id, description, status, metrics, guardrails, deadline, parent_goal_id)?;
+
+            }
+            run(agent = self.inner.clone()) {
+                let goal = agent.goals().create_view(params).await.map_err(to_pyerr)?;
+                Python::attach(|py| PyGoalView::from_rust(py, &goal))
 
             }
         }
@@ -362,21 +447,37 @@ pymethods_with_sync! {
         )]
         fn create_task / create_task_sync(&self, py, title: String, task_id: Option<String>, description: Option<String>, status: Option<String>, priority: Option<f64>, goal_id: Option<String>, depends_on_task_id: Option<String>, subtask_of_task_id: Option<String>) -> NodeId {
             prepare {
-                let params = CreateTaskParams {
-                    task_id,
-                    title,
-                    description,
-                    status,
-                    priority,
-                    goal_id,
-                    depends_on_task_id,
-                    subtask_of_task_id,
-                    created_at: None,
-                };
+                let params = task_params(title, task_id, description, status, priority, goal_id, depends_on_task_id, subtask_of_task_id);
 
             }
             run(agent = self.inner.clone()) {
                 agent.goals().create_task(params).await.map_err(to_pyerr)
+
+            }
+        }
+
+        /// Create a task, returning it as a ``TaskView``.
+        ///
+        /// Unlike ``create_task``, the result carries the task's ``task_id``,
+        /// which every other task method takes. Omit ``task_id`` and a fresh
+        /// one is generated on each call; pass one and the task is created
+        /// under it.
+        #[pyo3(signature = (
+            title, *, task_id=None, description=None, status=None, priority=None,
+            goal_id=None, depends_on_task_id=None, subtask_of_task_id=None
+        ))]
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "mirrors the facade CreateTaskParams field set as keyword args"
+        )]
+        fn create_task_view / create_task_view_sync(&self, py, title: String, task_id: Option<String>, description: Option<String>, status: Option<String>, priority: Option<f64>, goal_id: Option<String>, depends_on_task_id: Option<String>, subtask_of_task_id: Option<String>) -> Py<PyTaskView> {
+            prepare {
+                let params = task_params(title, task_id, description, status, priority, goal_id, depends_on_task_id, subtask_of_task_id);
+
+            }
+            run(agent = self.inner.clone()) {
+                let task = agent.goals().create_task_view(params).await.map_err(to_pyerr)?;
+                Python::attach(|py| PyTaskView::from_rust(py, &task))
 
             }
         }
