@@ -98,7 +98,9 @@ pub use uniko_store::operations::facts::{FactUpsert, fact_id_for, fact_id_for_sc
 // method signature, surfaced so callers handle errors / name ids without
 // reaching into `uniko_store`.
 #[doc(no_inline)]
-pub use uniko_store::{DeletionReport, NodeId, UnikoError};
+pub use uniko_store::{
+    DeletionReport, ModelState, ModelStatus, NodeId, PrefetchPolicy, SharedRuntime, UnikoError,
+};
 // Logic / query surface: `Agent::query` / `run_rule` / `abduce` return
 // these; `Value` is the graph value type for query params and rows.
 #[doc(no_inline)]

@@ -1173,10 +1173,10 @@ pub struct KnowledgeBase {
 |---|---|
 | `in_memory(cfg)` / `in_memory_with_xervo(cfg, extra)` | Ephemeral KB (tests, benches) |
 | `open(path, cfg)` | Persistent KB |
-| `open_with_xervo[_no_prefetch]` | Persistent + explicit catalog |
-| `build_shared_runtime(cfg, specs)` + `open_with_runtime(...)` | Share ONE `Arc<ModelRuntime>` (one ONNX session / VRAM arena) across many KBs |
+| `open_with_xervo[_no_prefetch]` / `open_with_prefetch(.., PrefetchPolicy)` | Persistent + explicit catalog |
+| `SharedRuntime::build(cfg, specs, policy)` + `in_memory_shared` / `open_shared` | Share ONE model runtime (one ONNX session / VRAM arena) across many KBs |
 
-`build_shared_runtime` bootstraps a throwaway in-memory `Uni` just to run `uni-db`'s `#[cfg(provider-*)]` gates, extracts the `Arc<ModelRuntime>`, and hands it to many `open_with_runtime` KBs. This is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`, and it is the only open path that lets a BGE-M3 hybrid KB reopen (the catalog-open path rejects non-`Embed` vector-index aliases, `uni-db #130`) (`mod.rs:214-299`).
+`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and shares the runtime's per-alias load state, so `model_status()` works on every store over it. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`, and it is the only open path that lets a BGE-M3 hybrid KB reopen (the catalog-open path rejects non-`Embed` vector-index aliases, `uni-db #130`) (`mod.rs:214-299`).
 
 Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`mod.rs:27-50, 196-198`).
 
@@ -2645,7 +2645,7 @@ reject_retired_flags(argv)              # migration errors before clap
   → data::load_locomo → filter by --conversations / --categories
   → UnikoConfig::default() + bench_cfg.apply_to_uniko_config    (:214)
   → build_catalog_specs
-  → KnowledgeBase::build_shared_runtime                          (:234)   ← ONE xervo runtime
+  → SharedRuntime::build                                         (:234)   ← ONE xervo runtime
   → load Pricing + open EventWriter
   for each conversation:
       parse_sessions
@@ -2979,7 +2979,7 @@ Aliases used throughout the schema and search code are consts in `schema/mod.rs`
 
 Two catalog subtleties from the benchmark harness generalize to any embedded use:
 
-- A **shared `ModelRuntime`** (built via `KnowledgeBase::build_shared_runtime`, then passed to `open_with_runtime`) lets many KBs share one set of ONNX sessions / one VRAM arena. This is mandatory at concurrency ≥ 3 on an 8 GB GPU to avoid per-KB ONNX OOM.
+- A **shared `ModelRuntime`** (built via `SharedRuntime::build`, then passed to `KnowledgeBase::open_shared`) lets many KBs share one set of ONNX sessions / one VRAM arena. This is mandatory at concurrency ≥ 3 on an 8 GB GPU to avoid per-KB ONNX OOM.
 - The prebuilt-runtime open path is the **only** way a `bge-m3` hybrid KB reopens — the catalog-open path rejects non-`Embed` vector-index aliases (a uni-db limitation, `#130`).
 
 #### 10.1.4 The installed-schema snapshot (`config/schema.json`) and count drift
@@ -3404,7 +3404,7 @@ Because uniko sits on a live, evolving embedded engine, `uniko-store` carries a 
 | **#145 FOLD-alias returns 0.0** | A value-aggregate `FOLD` that is `YIELD`-renamed returns 0.0. | Compute `mean_importance` / `mean_episode_importance` in Rust; only trust `COUNT` in Locy FOLDs (`execution.rs`, `stdlib.rs`, cortex `procedures.rs`). |
 | **RC12 — rule invocation** | Handing a bare rule name to `execute_rule` fails to parse; `$param` in a post-FOLD `HAVING` doesn't resolve. | Invoke registered rules by name via `query_rule` (builds `QUERY <name> RETURN ...`); push threshold filters into the Rust consumer (`upsert_procedure` applies `promote_threshold`, not the rule). |
 | **`max(DateTime)` aggregate** | Serialized as LargeBinary, breaks readback. | `close_inactive_sessions` avoids the Cypher aggregate. |
-| **#130 — catalog-open rejects non-Embed vector aliases** | A bge-m3 hybrid KB (sparse/ColBERT aliases) won't reopen via the catalog path. | Reopen only via the prebuilt-runtime path (`build_shared_runtime` + `open_with_runtime`). |
+| **#130 — catalog-open rejects non-Embed vector aliases** | A bge-m3 hybrid KB (sparse/ColBERT aliases) won't reopen via the catalog path. | Reopen only via the prebuilt-runtime path (`SharedRuntime::build` + `open_shared`). |
 | **Bulk API doesn't return EIDs** | `bulk_insert_vertices/edges` skip the Cypher executor (~980× faster/row) but don't surface allocated EIDs or re-validate property names. | Callers validate keys up front; the `return_ids` arm falls back to UNWIND-Cypher (`batch.rs`, `edges.rs`). |
 | **Multi-target edge label-filter leak** | Same-type edges to different labels can leak the wrong target under load. | Match by endpoint id, not label. |
 | **`datetime_value` vs string coercion** | Writing DateTime as a string coerces poorly. | Prefer `datetime_value` for DateTime writes. |

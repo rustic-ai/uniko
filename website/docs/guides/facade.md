@@ -65,6 +65,8 @@ let memory = Uniko::builder()
 | `.embedding(EmbeddingConfig)` | The embedder (vector search). |
 | `.llm(LlmSpec)` | A generation model — **required for `answer()`**. Call it once per model; each call adds one. |
 | `.answer_alias(alias)` | Which generation model `answer()` uses: an `.llm()` alias or one from the `catalog_path` file. Defaults to the first `.llm()`. |
+| `.prefetch(PrefetchPolicy)` | When models load: `Eager` (default) before `build()` returns, `Lazy` on first use, `Background` on a task. |
+| `.runtime(SharedRuntime)` | Open over a runtime shared with other instances instead of loading models again. |
 | `.streaming(bool)` | Enables the fire-and-forget `submit`/`flush` lane. |
 | `.scope_to_agent()` / `.scope(RecallScope)` | Default read visibility. |
 | `.extractor(Arc<dyn ModalityExtractor>)` | A pluggable image/audio/video extractor — implement `modality()` and `extract()` on `uniko_extract::ingest::modality::ModalityExtractor` (`Send + Sync + Debug`). Without one, image/audio/video sources return `UnikoError::Unsupported`. |
@@ -100,6 +102,29 @@ The compiled generation providers are `remote/anthropic`, `remote/azure-openai`,
 
 A spec's `Debug` output shows the option keys, never their values. Remote endpoints are not called
 until the first request, so a wrong key or URL still surfaces then.
+
+### Sharing models between instances
+
+Each instance loads its own models by default. To run several (one store per user, say) without
+loading every model several times, build one `SharedRuntime` and open each instance over it:
+
+```rust
+let runtime = Uniko::builder().build_runtime().await?;       // loads the default models once
+let alice = Uniko::builder().path("./alice").runtime(runtime.clone()).build().await?;
+let bob = Uniko::builder().path("./bob").runtime(runtime.clone()).build().await?;
+```
+
+Each instance keeps its own graph; only inference is shared. `build_runtime()` uses the builder's
+model settings (embedding, reranker, NLP, catalog file and `.llm()` specs) and its `.prefetch()`
+policy. A builder using `.runtime()` must name the same models: `build()` fails with
+`UnikoError::Config` naming the alias when the runtime lacks one or holds a different model, provider,
+revision or options for it (execution providers may differ). It may repeat the `.llm()` specs the
+runtime was built with. Shutting one instance down leaves the runtime loaded for the others, and
+the load state in `capabilities()` is shared across them.
+
+One layer down, `SharedRuntime::build(&config, extra, policy)` with
+`KnowledgeBase::in_memory_shared` / `open_shared` does the same. `build_shared_runtime` and
+`open_with_runtime` are deprecated: they skip that check and leave `model_status()` empty.
 
 !!! note "Capabilities, not wiring"
     You never construct a `KnowledgeBase`, a pipeline, or a model catalog. The builder is the only

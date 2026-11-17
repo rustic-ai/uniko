@@ -55,7 +55,7 @@ use uni_db::ModelAliasSpec;
 use uniko_memory::consolidation::TripleSource;
 use uniko_memory::recall::ContextBundle;
 use uniko_store::config::UnikoConfig;
-use uniko_store::{KnowledgeBase, ModelRuntime};
+use uniko_store::{KnowledgeBase, SharedRuntime};
 
 // ── KB Lifecycle ────────────────────────────────────────────────
 
@@ -117,18 +117,18 @@ pub async fn open_kb(
     Ok(Arc::new(kb))
 }
 
-/// Open an existing persistent KB using a process-shared `ModelRuntime`.
+/// Open an existing persistent KB over a process-shared model runtime.
 ///
 /// Same as [`open_kb`] but reuses an externally-built runtime instead
 /// of loading its own ONNX sessions — required for `q ≥ 3` on an 8 GB
 /// GPU where per-KB sessions OOM. See
-/// [`KnowledgeBase::build_shared_runtime`].
+/// [`SharedRuntime::build`].
 pub async fn open_kb_with_runtime(
     ingest_dir: &Path,
     config: UnikoConfig,
-    runtime: Arc<ModelRuntime>,
+    runtime: SharedRuntime,
 ) -> Result<Arc<KnowledgeBase>> {
-    let kb = KnowledgeBase::open_with_runtime(ingest_dir, config, runtime)
+    let kb = KnowledgeBase::open_shared(ingest_dir, config, &runtime)
         .await
         .context("opening KB with shared runtime")?;
     Ok(Arc::new(kb))

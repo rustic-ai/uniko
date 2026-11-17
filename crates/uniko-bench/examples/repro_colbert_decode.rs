@@ -38,7 +38,9 @@ async fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&kb_dir);
 
     // Hybrid open path (build a shared runtime, then open via it).
-    let runtime = uniko_store::KnowledgeBase::build_shared_runtime(&config, &[]).await?;
+    let runtime =
+        uniko_store::SharedRuntime::build(&config, Vec::new(), uniko_store::PrefetchPolicy::Eager)
+            .await?;
     let kb = uniko_bench::open_kb_with_runtime(&kb_dir, config, runtime).await?;
 
     // Insert Observations whose `content` triggers EmbedHybrid auto-embed

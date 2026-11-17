@@ -30,6 +30,7 @@ pub mod operations;
 pub mod repository;
 pub mod schema;
 pub mod search;
+mod shared_runtime;
 pub mod storage;
 pub mod text;
 pub mod types;
@@ -38,6 +39,7 @@ pub use error::{Result, UnikoError};
 #[doc(inline)]
 pub use model::{GENERATION_PROVIDERS, ModelEntry};
 pub use model_state::{ModelState, ModelStatus};
+pub use shared_runtime::{PrefetchPolicy, SharedRuntime};
 pub use storage::KnowledgeBase;
 #[doc(inline)]
 pub use storage::deletion::DeletionReport;

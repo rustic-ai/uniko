@@ -160,11 +160,24 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `nlp` | `nlp(nlp: str \| dict) -> UnikoBuilder` | — (sync) | NLP model for entity and observation extraction: `"v1"` (default), a kniv v7 size (`"v7-tiny"`, `"v7-small"`, `"v7-medium"`, `"v7-large"`, `"v7-xlarge"`, `"v7-xlarge-d"`), or an `nlp` section. Wins over `config()` in either order. |
 | `llm` | `llm(spec: LlmSpec) -> UnikoBuilder` | — (sync) | Generation model — **required for `answer()`**. Each call adds one; the first answers by default. |
 | `answer_alias` | `answer_alias(alias: str) -> UnikoBuilder` | — (sync) | Which generation alias `answer()` uses: an `llm()` alias or one from the `catalog_path` file. `build()` raises `ConfigError` if it is missing or not a generation model. |
+| `prefetch` | `prefetch(policy: "eager" \| "lazy" \| "background") -> UnikoBuilder` | — (sync) | When models load: before `build()` returns (default), on first use, or on a background task. |
+| `runtime` | `runtime(runtime: SharedRuntime) -> UnikoBuilder` | — (sync) | Open over a runtime shared with other instances; `build()` raises `ConfigError` if it does not serve this builder's models. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
 | `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |
 | `extractor` | `extractor(modality: str, extract: Callable[[ExtractRequest], str]) -> UnikoBuilder` | — (sync) | Index `"image"`, `"audio"` or `"video"` sources as the text `extract` returns. |
 | `build` | `build() -> Awaitable[Uniko]` | `build_sync` | Terminal: produce the `Uniko` instance. |
+| `build_runtime` | `build_runtime() -> Awaitable[SharedRuntime]` | `build_runtime_sync` | Terminal: a `SharedRuntime` for this builder's models, loaded as `prefetch()` says. |
+
+To run several instances without loading each model several times, build one runtime and pass it
+to each builder. Each instance keeps its own graph, and shutting one down leaves the runtime loaded
+for the others. `SharedRuntime.aliases` lists the aliases it serves.
+
+```python
+runtime = await uniko.Uniko.builder().build_runtime()
+alice = await uniko.Uniko.builder().path("./alice").runtime(runtime).build()
+bob = await uniko.Uniko.builder().path("./bob").runtime(runtime).build()
+```
 
 ### Configuration
 

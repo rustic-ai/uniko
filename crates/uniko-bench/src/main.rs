@@ -226,14 +226,18 @@ async fn main() -> Result<()> {
     }
 
     // One Xervo runtime shared across every KB opened in this run. Built from a
-    // bootstrap in-memory DB (each model loads once) and passed via
-    // `open_with_runtime`. The prebuilt-runtime open path is also what lets a
+    // catalog (each model loads once) and opened over with
+    // `open_shared`. The prebuilt-runtime open path is also what lets a
     // hybrid (bge-m3) KB reopen at all: the catalog-open path rejects a vector
     // index whose embedding alias is a non-`Embed` task (rustic-ai/uni-db#130),
     // while the prebuilt-runtime path skips that validation.
-    let shared_runtime = uniko_store::KnowledgeBase::build_shared_runtime(&config, &extra_catalog)
-        .await
-        .context("building shared Xervo runtime")?;
+    let shared_runtime = uniko_store::SharedRuntime::build(
+        &config,
+        extra_catalog.clone(),
+        uniko_store::PrefetchPolicy::Eager,
+    )
+    .await
+    .context("building shared Xervo runtime")?;
 
     let llm_alias: Option<&str> = if bench_cfg.retrieval_only {
         None
