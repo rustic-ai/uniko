@@ -26,25 +26,35 @@ pub enum PrefetchPolicy {
     /// Return at once and load every model on a task spawned on the
     /// current tokio runtime, which must outlive the load (a runtime
     /// dropped first cancels it, leaving the models to load on first use).
+    ///
+    /// A store's own background load is cancelled by
+    /// [`KnowledgeBase::shutdown`](crate::KnowledgeBase::shutdown). A
+    /// [`SharedRuntime`]'s runs to completion: the runtime outlives any
+    /// one store.
     Background,
 }
 
 impl PrefetchPolicy {
-    /// Run this policy over `catalog`, loading through `runtime`.
+    /// Run this policy over `catalog`, loading through `runtime`. For
+    /// `Background`, returns a handle that cancels the spawned load.
     pub(crate) async fn run(
         self,
         catalog: Arc<[ModelAliasSpec]>,
         states: ModelStates,
         runtime: Arc<ModelRuntime>,
-    ) {
+    ) -> Option<tokio::task::AbortHandle> {
         match self {
-            Self::Lazy => {}
-            Self::Eager => prefetch_through(&catalog, &states, runtime).await,
-            Self::Background => {
+            Self::Lazy => None,
+            Self::Eager => {
+                prefetch_through(&catalog, &states, runtime).await;
+                None
+            }
+            Self::Background => Some(
                 tokio::spawn(async move {
                     prefetch_through(&catalog, &states, runtime).await;
-                });
-            }
+                })
+                .abort_handle(),
+            ),
         }
     }
 }
@@ -81,6 +91,7 @@ pub struct SharedRuntime {
     pub(crate) runtime: Arc<ModelRuntime>,
     pub(crate) catalog: Arc<[ModelAliasSpec]>,
     pub(crate) states: ModelStates,
+    answer_alias: Option<String>,
 }
 
 impl fmt::Debug for SharedRuntime {
@@ -89,6 +100,7 @@ impl fmt::Debug for SharedRuntime {
         let aliases: Vec<&str> = self.catalog.iter().map(|s| s.alias.as_str()).collect();
         f.debug_struct("SharedRuntime")
             .field("aliases", &aliases)
+            .field("answer_alias", &self.answer_alias)
             .finish_non_exhaustive()
     }
 }
@@ -118,14 +130,51 @@ impl SharedRuntime {
             .map_err(|e| UnikoError::Config(format!("model catalog is invalid: {e}")))?;
         let catalog: Arc<[ModelAliasSpec]> = catalog.into();
         let states = model_state::new_states(&catalog);
-        prefetch
+        // A shared runtime outlives any one store, so its background load
+        // is left to finish rather than tied to a handle.
+        let _ = prefetch
             .run(catalog.clone(), states.clone(), runtime.clone())
             .await;
         Ok(Self {
             runtime,
             catalog,
             states,
+            answer_alias: None,
         })
+    }
+
+    /// Record which generation alias answers by default for instances
+    /// opened over this runtime.
+    ///
+    /// # Errors
+    ///
+    /// [`UnikoError::Config`] when `alias` is not in the catalog or is not
+    /// a generation model.
+    pub fn with_answer_alias(mut self, alias: impl Into<String>) -> Result<Self> {
+        let alias = alias.into();
+        match self.catalog.iter().find(|s| s.alias == alias) {
+            None => {
+                return Err(UnikoError::Config(format!(
+                    "answer alias '{alias}' is not in the shared runtime"
+                )));
+            }
+            Some(s) if s.task != uni_db::ModelTask::Generate => {
+                return Err(UnikoError::Config(format!(
+                    "answer alias '{alias}' is a {:?} model, not a generation model",
+                    s.task
+                )));
+            }
+            Some(_) => {}
+        }
+        self.answer_alias = Some(alias);
+        Ok(self)
+    }
+
+    /// The generation alias that answers by default over this runtime, if
+    /// one was recorded with [`with_answer_alias`](Self::with_answer_alias).
+    #[must_use]
+    pub fn answer_alias(&self) -> Option<&str> {
+        self.answer_alias.as_deref()
     }
 
     /// The aliases this runtime serves, in catalog order.

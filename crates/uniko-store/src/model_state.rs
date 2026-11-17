@@ -56,6 +56,17 @@ pub(crate) fn record(states: &ModelStates, alias: &str, state: ModelState) {
     }
 }
 
+/// Record a failed load of `alias`, unless another path has loaded it in
+/// the meantime: a model that works must not read as failed.
+pub(crate) fn record_failure(states: &ModelStates, alias: &str, error: String) {
+    let mut table = states.write().unwrap_or_else(|p| p.into_inner());
+    if let Some(slot) = table.get_mut(alias)
+        && *slot != ModelState::Loaded
+    {
+        *slot = ModelState::Failed(error);
+    }
+}
+
 /// Mark `alias` loaded, taking the write lock only on the first success.
 pub(crate) fn mark_loaded(states: &ModelStates, alias: &str) {
     let already = states
@@ -96,7 +107,7 @@ pub(crate) async fn prefetch_each<F, Fut, E>(
                     elapsed_ms = alias_started.elapsed().as_millis() as u64,
                     "model prefetch failed; it may still load on first use"
                 );
-                record(states, &spec.alias, ModelState::Failed(error));
+                record_failure(states, &spec.alias, error);
             }
         }
     }
@@ -200,16 +211,20 @@ impl KnowledgeBase {
         Some(out)
     }
 
+    /// Record that `alias` loaded, for code that loads a model through
+    /// [`model_runtime`](Self::model_runtime) rather than through
+    /// [`embed`](Self::embed), [`generate`](Self::generate) and friends
+    /// (which record it themselves). Clears an earlier `Failed`.
+    pub fn note_model_loaded(&self, alias: &str) {
+        mark_loaded(&self.model_states, alias);
+    }
+
     pub(crate) fn mark_model_loaded(&self, alias: &str) {
         mark_loaded(&self.model_states, alias);
     }
 
     pub(crate) fn mark_model_failed(&self, alias: &str, error: &str) {
-        record(
-            &self.model_states,
-            alias,
-            ModelState::Failed(redact_urls(error)),
-        );
+        record_failure(&self.model_states, alias, redact_urls(error));
     }
 }
 
@@ -239,23 +254,24 @@ fn string_option(spec: &ModelAliasSpec, key: &str) -> Option<String> {
 }
 
 /// `url` without userinfo, query or fragment.
+///
+/// Userinfo ends at the *last* `@`, so a password holding an unescaped
+/// `@`, `/`, `?` or `#` is still removed whole. A legitimate `@` later in
+/// the URL costs the host, never a secret.
 pub(crate) fn redact_url(url: &str) -> String {
-    let cut = url.find(['?', '#']).unwrap_or(url.len());
-    let url = &url[..cut];
     let Some(scheme_end) = url.find("://") else {
-        return url.to_string();
+        let cut = url.find(['?', '#']).unwrap_or(url.len());
+        return url[..cut].to_string();
     };
-    let rest_start = scheme_end + 3;
-    let rest = &url[rest_start..];
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    match rest[..authority_end].rfind('@') {
-        Some(at) => format!("{}{}", &url[..rest_start], &rest[at + 1..]),
-        None => url.to_string(),
-    }
+    let (scheme, rest) = url.split_at(scheme_end + 3);
+    let rest = rest.rfind('@').map_or(rest, |at| &rest[at + 1..]);
+    let cut = rest.find(['?', '#']).unwrap_or(rest.len());
+    format!("{scheme}{}", &rest[..cut])
 }
 
 /// `text` with every `http(s)://` URL (any case) passed through
-/// [`redact_url`].
+/// [`redact_url`]. A URL runs to the next whitespace or quote, so
+/// punctuation inside a password cannot end it early.
 pub(crate) fn redact_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -270,7 +286,7 @@ pub(crate) fn redact_urls(text: &str) -> String {
             continue;
         }
         let end = candidate
-            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ','))
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>'))
             .unwrap_or(candidate.len());
         out.push_str(&redact_url(&candidate[..end]));
         rest = &candidate[end..];
@@ -305,6 +321,42 @@ mod tests {
         assert_eq!(redact_urls("httpx is fine"), "httpx is fine");
         let shouty = redact_urls("failed: HTTPS://u:secret@h.io/x");
         assert!(!shouty.contains("secret"), "{shouty}");
+        for tricky in [
+            "https://u:pa#ss@h.io/v1",
+            "https://u:pa/ss@h.io/v1",
+            "https://u:pa?ss@h.io/v1",
+            "(https://u:pa)ss@h.io/x)",
+        ] {
+            let out = redact_urls(tricky);
+            assert!(
+                !out.contains("pa") && !out.contains("ss@"),
+                "{tricky} -> {out}"
+            );
+            assert!(out.contains("h.io"), "{tricky} -> {out}");
+        }
+    }
+
+    #[test]
+    fn a_late_failure_does_not_override_a_successful_load() {
+        let states: ModelStates = Arc::new(RwLock::new(HashMap::from([(
+            "embed/a".to_string(),
+            ModelState::NotLoaded,
+        )])));
+        mark_loaded(&states, "embed/a");
+        record_failure(&states, "embed/a", "timed out".into());
+        assert_eq!(states.read().unwrap()["embed/a"], ModelState::Loaded);
+
+        let fresh: ModelStates = Arc::new(RwLock::new(HashMap::from([(
+            "embed/b".to_string(),
+            ModelState::NotLoaded,
+        )])));
+        record_failure(&fresh, "embed/b", "boom".into());
+        mark_loaded(&fresh, "embed/b");
+        assert_eq!(
+            fresh.read().unwrap()["embed/b"],
+            ModelState::Loaded,
+            "success clears a failure"
+        );
     }
 
     #[test]

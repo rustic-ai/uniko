@@ -120,14 +120,16 @@ model settings (embedding, reranker, NLP, catalog file and `.llm()` specs) and i
 policy. A builder using `.runtime()` must name the same models: `build()` fails with
 `UnikoError::Config` naming the alias when the runtime lacks one or holds a different model, provider,
 revision or options for it (execution providers may differ). LLMs belong to the runtime: the
-builder need not repeat its `.llm()` specs, and the runtime's first generation model answers unless
-`.answer_alias()` names another. A repeated spec must match the runtime's exactly, options included.
+builder need not repeat its `.llm()` specs, and the answer alias of the builder that built the
+runtime (its `.answer_alias()`, else its first `.llm()`) answers unless `.answer_alias()` names
+another. A repeated spec must match the runtime's exactly, options included.
 Shutting one instance down leaves the runtime loaded for the others, and
 the load state in `capabilities()` is shared across them.
 
 One layer down, `SharedRuntime::build(&config, extra, policy)` with
 `KnowledgeBase::in_memory_shared` / `open_shared` does the same. `build_shared_runtime` and
-`open_with_runtime` are deprecated: they skip that check and leave `model_status()` empty.
+`open_with_runtime` are deprecated: they skip that check, and `model_status()` returns `None` for
+a store opened that way.
 
 !!! note "Capabilities, not wiring"
     You never construct a `KnowledgeBase`, a pipeline, or a model catalog. The builder is the only
@@ -436,8 +438,11 @@ for model in caps.models.unwrap_or_default() {
 }
 ```
 
-Prefetch at open loads each alias in turn and keeps going past a failure, which it logs at `warn`
-and records as `Failed`. Model entries never carry provider options; credentials show only as the
+Prefetch at open (with the default `PrefetchPolicy::Eager`) loads each alias in turn and keeps
+going past a failure, which it logs at `warn` and records as `Failed`; a later successful use
+clears it. A hybrid embedder that only uni-db's auto-embedding on write has used reads as
+`NotLoaded` until the first recall. `extractors` lists only extractors you registered; built-in
+text, code, markup, structured and PDF ingest are always available. Model entries never carry provider options; credentials show only as the
 `api_key_env` variable name and `base_url` loses any userinfo and query. The same per-alias report
 is available one layer down as `KnowledgeBase::model_status()`.
 

@@ -524,8 +524,20 @@ impl UnikoBuilder {
     /// [`build`](UnikoBuilder::build).
     pub async fn build_runtime(self) -> Result<SharedRuntime, UnikoError> {
         let prefetch = self.prefetch;
+        let answer_alias = self.default_answer_alias();
         let (config, extra_catalog) = self.models().await?;
-        SharedRuntime::build(&config, extra_catalog, prefetch).await
+        let runtime = SharedRuntime::build(&config, extra_catalog, prefetch).await?;
+        match answer_alias {
+            Some(alias) => runtime.with_answer_alias(alias),
+            None => Ok(runtime),
+        }
+    }
+
+    /// `answer_alias`, else the first `.llm()`.
+    fn default_answer_alias(&self) -> Option<String> {
+        self.answer_alias
+            .clone()
+            .or_else(|| self.llms.first().map(|l| l.alias.clone()))
     }
 
     /// The merged config and the validated LLM catalog entries.
@@ -581,20 +593,13 @@ impl UnikoBuilder {
             }
             None => KnowledgeBase::catalog_entries(&config, &extra_catalog)?,
         };
-        let llm_alias = self
-            .answer_alias
-            .clone()
-            .or_else(|| self.llms.first().map(|l| l.alias.clone()))
-            .or_else(|| {
-                // Over a shared runtime the LLMs belong to the runtime, so
-                // its first generation model answers by default.
-                self.runtime.as_ref().and_then(|_| {
-                    entries
-                        .iter()
-                        .find(|e| e.task == ModelTask::Generate)
-                        .map(|e| e.alias.clone())
-                })
-            });
+        // Over a shared runtime the LLMs belong to the runtime, so the
+        // answer alias recorded when it was built applies by default.
+        let llm_alias = self.default_answer_alias().or_else(|| {
+            self.runtime
+                .as_ref()
+                .and_then(|r| r.answer_alias().map(str::to_string))
+        });
         if let Some(alias) = &llm_alias {
             check_answer_alias(&entries, alias)?;
         }
@@ -642,9 +647,13 @@ impl UnikoBuilder {
 fn check_llms_served(runtime: &SharedRuntime, llms: &[ModelAliasSpec]) -> Result<(), UnikoError> {
     for spec in llms {
         runtime.check_spec(spec).map_err(|e| {
+            let detail = match e {
+                UnikoError::Config(m) => m,
+                other => other.to_string(),
+            };
             UnikoError::Config(format!(
-                "LLM alias '{}' does not match the shared runtime ({e}); register it \
-                 the same way on the builder that built the runtime",
+                "{detail}; register LLM alias '{}' the same way on the builder that \
+                 built the runtime",
                 spec.alias
             ))
         })?;

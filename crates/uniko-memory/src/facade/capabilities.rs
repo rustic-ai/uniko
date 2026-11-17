@@ -20,10 +20,14 @@ pub struct Capabilities {
     /// Every optional Cargo feature of the engine crates, and whether this
     /// build compiled it in (e.g. `pdf-ocr`, `gpu-cuda`, `candle`).
     pub compiled_features: BTreeMap<String, bool>,
-    /// Modalities with a registered [`ModalityExtractor`](crate::ModalityExtractor).
+    /// Modalities with a user-registered
+    /// [`ModalityExtractor`](crate::ModalityExtractor) (image, audio,
+    /// video). Built-in text, code, markup, structured and PDF ingest are
+    /// always available and are not listed, so this is empty by default.
     pub extractors: Vec<Modality>,
     /// Each catalog model and whether it has loaded; `None` when the
-    /// store's catalog is unknown.
+    /// store's catalog is unknown. A hybrid embedder used only by uni-db's
+    /// auto-embedding on write reads as not loaded until the first recall.
     pub models: Option<Vec<ModelStatus>>,
     /// The alias [`Agent::answer`](crate::Agent::answer) uses, if any.
     pub answer_alias: Option<String>,
@@ -46,7 +50,7 @@ impl Uniko {
         let compiled_features = uniko_store::COMPILED_FEATURES
             .iter()
             .chain(uniko_extract::COMPILED_FEATURES)
-            .chain(crate::COMPILED_FEATURES)
+            .chain(uniko_cortex::COMPILED_FEATURES)
             .map(|(name, on)| ((*name).to_string(), *on))
             .collect();
         Capabilities {

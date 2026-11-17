@@ -23,3 +23,8 @@ pub use procedures::{
 };
 #[doc(inline)]
 pub use topics::{TopicConfig, TopicReport, detect_topics_once, detect_topics_once_with_llm};
+
+/// Cargo features of this crate and whether this build compiled them in.
+/// `llm` here is what turns on abstractive summaries, whichever crate's
+/// feature enabled it.
+pub const COMPILED_FEATURES: &[(&str, bool)] = &[("llm", cfg!(feature = "llm"))];

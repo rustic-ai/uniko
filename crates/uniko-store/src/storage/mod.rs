@@ -117,6 +117,8 @@ pub struct KnowledgeBase {
     /// Per-alias load state for [`KnowledgeBase::model_status`]. Empty
     /// when the catalog is unknown.
     pub(crate) model_states: crate::model_state::ModelStates,
+    /// The store's own background prefetch, cancelled at shutdown.
+    pub(crate) prefetch_task: Option<tokio::task::AbortHandle>,
 }
 
 impl KnowledgeBase {
@@ -168,7 +170,7 @@ impl KnowledgeBase {
         let model_states = crate::model_state::new_states(&kept);
         let db = Uni::in_memory().xervo_catalog(catalog).build().await?;
         apply_schema(&db, &config).await?;
-        let kb = Self {
+        let mut kb = Self {
             db: Arc::new(db),
             config,
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -176,8 +178,9 @@ impl KnowledgeBase {
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
             model_states,
+            prefetch_task: None,
         };
-        kb.prefetch_catalog(prefetch).await;
+        kb.prefetch_task = kb.prefetch_catalog(prefetch).await;
         kb.finalize_init().await
     }
 
@@ -258,10 +261,12 @@ impl KnowledgeBase {
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
             model_states,
+            prefetch_task: None,
         }
         .finalize_init()
         .await?;
-        kb.prefetch_catalog(prefetch).await;
+        let mut kb = kb;
+        kb.prefetch_task = kb.prefetch_catalog(prefetch).await;
         Ok(kb)
     }
 
@@ -326,6 +331,7 @@ impl KnowledgeBase {
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(runtime.catalog.clone()),
             model_states: runtime.states.clone(),
+            prefetch_task: None,
         }
         .finalize_init()
         .await
@@ -390,6 +396,7 @@ impl KnowledgeBase {
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: None,
             model_states: Arc::default(),
+            prefetch_task: None,
         }
         .finalize_init()
         .await
@@ -400,13 +407,13 @@ impl KnowledgeBase {
     /// [`ModelState::Failed`](crate::ModelState::Failed) and skipped: the
     /// store still opens (catalog entries keep `required: false`) and the
     /// remaining aliases are still loaded.
-    async fn prefetch_catalog(&self, policy: PrefetchPolicy) {
+    async fn prefetch_catalog(&self, policy: PrefetchPolicy) -> Option<tokio::task::AbortHandle> {
         let (Some(catalog), Some(runtime)) = (self.catalog.clone(), self.model_runtime()) else {
-            return;
+            return None;
         };
         policy
             .run(catalog, self.model_states.clone(), runtime)
-            .await;
+            .await
     }
 
     /// Run post-construction init steps. Currently:
@@ -674,6 +681,10 @@ impl KnowledgeBase {
     /// Returns [`UnikoError::Internal`] if other `Arc` references still
     /// exist, or [`UnikoError::Storage`] if shutdown fails.
     pub async fn shutdown(self) -> Result<()> {
+        // Stop loading models nobody will use; a no-op once it finished.
+        if let Some(task) = &self.prefetch_task {
+            task.abort();
+        }
         let db = Arc::try_unwrap(self.db).map_err(|_| {
             UnikoError::Internal("cannot shutdown: outstanding references exist".into())
         })?;

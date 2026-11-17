@@ -5332,3 +5332,49 @@ async fn a_bad_answer_alias_fails_before_opening_the_store() {
     );
     assert!(!path.exists(), "the store was created before the check");
 }
+
+/// The answer alias chosen on the builder that built a runtime carries to
+/// every instance over it.
+#[tokio::test]
+async fn the_runtimes_answer_alias_carries_to_its_instances() {
+    use std::sync::atomic::Ordering;
+
+    use crate::LlmSpec;
+
+    let (judge_url, judge_hits) = spawn_chat_stub("from the judge").await;
+    let (answer_url, answer_hits) = spawn_chat_stub("from the answerer").await;
+    let Ok(runtime) = Uniko::builder()
+        .llm(LlmSpec::llamacpp("gen/judge", "stub", judge_url.as_str()))
+        .llm(LlmSpec::llamacpp("gen/answer", "stub", answer_url.as_str()))
+        .answer_alias("gen/answer")
+        .build_runtime()
+        .await
+    else {
+        return;
+    };
+    assert_eq!(runtime.answer_alias(), Some("gen/answer"));
+    let Some(memory) = build_or_skip(Uniko::builder().runtime(runtime)).await else {
+        return;
+    };
+    match memory.agent("a").answer("q").await {
+        Ok(answer) => assert_eq!(answer.text, "from the answerer"),
+        Err(e) if is_model_unavailable(&e) => return,
+        Err(e) => panic!("answer failed: {e}"),
+    }
+    assert_eq!(judge_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(answer_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn build_runtime_rejects_an_answer_alias_it_cannot_answer_with() {
+    let err = Uniko::builder()
+        .prefetch(uniko_store::PrefetchPolicy::Lazy)
+        .answer_alias("embed/default")
+        .build_runtime()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("not a generation model")),
+        "{err}"
+    );
+}

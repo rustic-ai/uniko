@@ -50,3 +50,27 @@ async def test_typed_capabilities() -> None:
     _check(caps.model_dump())
     assert caps.models is not None
     assert all(m.state in {"not_loaded", "loaded", "failed"} for m in caps.models)
+
+
+def test_a_failed_model_validates_with_its_error() -> None:
+    caps = Capabilities.model_validate(
+        {
+            "compiled_features": {"pdf-ocr": False},
+            "extractors": [],
+            "models": [
+                {
+                    "alias": "embed/missing",
+                    "task": "embed",
+                    "provider_id": "local/onnx",
+                    "model_id": "nope",
+                    "state": "failed",
+                    "error": "download failed",
+                }
+            ],
+            "answer_alias": None,
+            "ocr_compiled": False,
+            "ocr_configured": False,
+        }
+    )
+    assert caps.models is not None
+    assert (caps.models[0].state, caps.models[0].error) == ("failed", "download failed")
