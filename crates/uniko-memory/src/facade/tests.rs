@@ -960,6 +960,142 @@ async fn planned_goal_appears_in_planned_slice() {
     memory.shutdown().await.expect("shutdown");
 }
 
+/// `create_view` / `create_task_view` hand back the generated external ids,
+/// and those ids drive every other goal and task method (issue #64).
+#[tokio::test]
+async fn create_views_return_usable_generated_ids() {
+    use crate::{CreateGoalParams, CreateTaskParams, GoalPhase, TaskPhase};
+
+    let Ok(memory) = Uniko::in_memory().await else {
+        eprintln!("skipping: in-memory instance unavailable (no model?)");
+        return;
+    };
+    let agent = memory.agent("planner");
+    seed_participant(agent.kb(), "planner").await;
+    let goals = agent.goals();
+
+    let goal = match goals
+        .create_view(CreateGoalParams {
+            title: "Ship the API".into(),
+            status: Some("planned".into()),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(goal) => goal,
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("create goal: {e}"),
+    };
+    assert!(!goal.goal_id.is_empty(), "a goal id was generated");
+    assert_eq!(goal.title, "Ship the API");
+    assert_eq!(goal.phase, GoalPhase::Planned);
+
+    let task = goals
+        .create_task_view(CreateTaskParams {
+            title: "write docs".into(),
+            goal_id: Some(goal.goal_id.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("create task");
+    assert!(!task.task_id.is_empty(), "a task id was generated");
+    assert_ne!(task.task_id, goal.goal_id);
+    assert_eq!(task.goal_id.as_deref(), Some(goal.goal_id.as_str()));
+    assert_eq!(task.phase, TaskPhase::Planned);
+
+    // The returned ids work with reads, transitions and goal context.
+    assert_eq!(
+        goals
+            .get(&goal.goal_id)
+            .await
+            .expect("get")
+            .map(|g| g.title),
+        Some("Ship the API".to_string())
+    );
+    assert!(goals.start(&goal.goal_id).await.expect("start goal"));
+    assert!(goals.start_task(&task.task_id).await.expect("start task"));
+    assert_eq!(
+        goals
+            .task(&task.task_id)
+            .await
+            .expect("task")
+            .map(|t| t.phase),
+        Some(TaskPhase::Active)
+    );
+    assert!(
+        goals
+            .complete_task(&task.task_id)
+            .await
+            .expect("complete task")
+    );
+    let context = goals
+        .context(&goal.goal_id)
+        .await
+        .expect("context")
+        .expect("goal context");
+    assert_eq!(context.goal.phase, GoalPhase::Active);
+    assert!(
+        context.tasks.iter().any(|t| t.task_id == task.task_id),
+        "task in goal context: {:?}",
+        context.tasks
+    );
+    assert!(
+        goals
+            .tasks_of(&goal.goal_id)
+            .await
+            .expect("tasks_of")
+            .iter()
+            .any(|t| t.task_id == task.task_id && t.phase == TaskPhase::Completed)
+    );
+
+    // An explicit id is used as given.
+    let explicit = goals
+        .create_view(CreateGoalParams {
+            goal_id: Some("g-explicit".into()),
+            title: "named goal".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create explicit goal");
+    assert_eq!(explicit.goal_id, "g-explicit");
+    assert_eq!(explicit.title, "named goal");
+    let explicit_task = goals
+        .create_task_view(CreateTaskParams {
+            task_id: Some("t-explicit".into()),
+            title: "named task".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create explicit task");
+    assert_eq!(explicit_task.task_id, "t-explicit");
+    assert_eq!(explicit_task.goal_id, None);
+
+    // Two creates without an id are two goals.
+    let a = goals
+        .create_view(CreateGoalParams {
+            title: "twin".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create a");
+    let b = goals
+        .create_view(CreateGoalParams {
+            title: "twin".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create b");
+    assert_ne!(a.goal_id, b.goal_id);
+
+    assert!(goals.task("no-such-task").await.expect("task").is_none());
+
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
 /// `context()` returns the typed goal + its tasks; unknown goal → None.
 #[tokio::test]
 async fn goal_context_returns_typed_subtree() {

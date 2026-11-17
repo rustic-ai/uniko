@@ -15,6 +15,7 @@ from uniko.models import (
     ObserveResult,
     ScopeSpec,
     TaskSpec,
+    TaskView,
     TurnSpec,
     UnikoConfigModel,
 )
@@ -89,6 +90,14 @@ async def test_typed_goals_via_specs() -> None:
     assert isinstance(goal, GoalView) and goal.metrics == {"phase": 3}
     assert await goals.start("g1") is True  # transition stays a bool
     assert any(g.goal_id == "g1" for g in await goals.active())
+
+    # Creating views: the generated ids come back as typed models.
+    made = await goals.create_view(GoalSpec(title="Generated id"))
+    assert isinstance(made, GoalView) and made.goal_id
+    task = await goals.create_task_view(TaskSpec(title="follow up", goal_id=made.goal_id))
+    assert isinstance(task, TaskView) and task.goal_id == made.goal_id
+    fetched = await goals.task(task.task_id)
+    assert isinstance(fetched, TaskView) and fetched.task_id == task.task_id
 
 
 async def test_typed_query_stays_passthrough() -> None:

@@ -204,6 +204,14 @@ class TypedGoals:
         g = self._inner.get_sync(goal_id)
         return GoalView.from_native(g) if g is not None else None
 
+    async def task(self, task_id: str) -> Optional[TaskView]:
+        t = await self._inner.task(task_id)
+        return TaskView.from_native(t) if t is not None else None
+
+    def task_sync(self, task_id: str) -> Optional[TaskView]:
+        t = self._inner.task_sync(task_id)
+        return TaskView.from_native(t) if t is not None else None
+
     async def tasks(self) -> list[TaskView]:
         return [TaskView.from_native(t) for t in await self._inner.tasks()]
 
@@ -291,6 +299,23 @@ class TypedGoals:
 
     def create_task_sync(self, spec: Any) -> int:
         return self._inner.create_task_sync(spec.title, **spec.to_create_task_kwargs())
+
+    # Creation ← specs, returning the created view (carries the generated id).
+    async def create_view(self, spec: Any) -> GoalView:
+        g = await self._inner.create_view(spec.title, **spec.to_create_kwargs())
+        return GoalView.from_native(g)
+
+    def create_view_sync(self, spec: Any) -> GoalView:
+        return GoalView.from_native(self._inner.create_view_sync(spec.title, **spec.to_create_kwargs()))
+
+    async def create_task_view(self, spec: Any) -> TaskView:
+        t = await self._inner.create_task_view(spec.title, **spec.to_create_task_kwargs())
+        return TaskView.from_native(t)
+
+    def create_task_view_sync(self, spec: Any) -> TaskView:
+        return TaskView.from_native(
+            self._inner.create_task_view_sync(spec.title, **spec.to_create_task_kwargs())
+        )
 
 
 # ── Session ────────────────────────────────────────────────────────────────

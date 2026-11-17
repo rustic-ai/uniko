@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use uniko_store::id::new_id;
 use uniko_store::types::{datetime_from_value, datetime_value};
 use uniko_store::{KnowledgeBase, NodeId, UnikoError, Value};
 
@@ -209,6 +210,26 @@ impl<'a> Goals<'a> {
             )
             .await?;
         Ok(rows.first().map(goal_from_row))
+    }
+
+    /// Fetch one task by id. `Ok(None)` when unknown.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when the query fails.
+    pub async fn task(&self, task_id: &str) -> Result<Option<TaskView>, UnikoError> {
+        let rows = self
+            .kb
+            .query_cypher(
+                "MATCH (t:Task {task_id: $id}) \
+                 OPTIONAL MATCH (t)-[:PART_OF]->(g:Goal) \
+                 RETURN t.task_id AS task_id, t.title AS title, t.description AS description, \
+                        t.status AS status, t.priority AS priority, g.goal_id AS goal_id, \
+                        t.created_at AS created_at, t.completed_at AS completed_at LIMIT 1",
+                &str_param("id", task_id),
+            )
+            .await?;
+        Ok(rows.first().map(task_from_row))
     }
 
     /// All tasks assigned to the agent.
@@ -427,6 +448,48 @@ impl<'a> Goals<'a> {
     /// Returns [`UnikoError`] when creation fails.
     pub async fn create_task(&self, params: CreateTaskParams) -> Result<NodeId, UnikoError> {
         create_task(self.kb, self.agent_id, params).await
+    }
+
+    /// Create a goal owned by this agent and return it as a [`GoalView`].
+    ///
+    /// Unlike [`create`](Self::create), the result carries the goal's
+    /// external id, which every other goal method takes. When
+    /// `params.goal_id` is `None` a fresh id is generated on each call; when
+    /// it is set, the goal is created under that id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when creation fails, or
+    /// [`UnikoError::Internal`] if the goal cannot be read back.
+    pub async fn create_view(&self, mut params: CreateGoalParams) -> Result<GoalView, UnikoError> {
+        let goal_id = params.goal_id.get_or_insert_with(new_id).clone();
+        create_goal(self.kb, self.agent_id, params).await?;
+        self.get(&goal_id).await?.ok_or_else(|| {
+            UnikoError::Internal(format!("goal '{goal_id}' not readable after create"))
+        })
+    }
+
+    /// Create a task assigned to this agent and return it as a
+    /// [`TaskView`].
+    ///
+    /// Unlike [`create_task`](Self::create_task), the result carries the
+    /// task's external id, which every other task method takes. When
+    /// `params.task_id` is `None` a fresh id is generated on each call; when
+    /// it is set, the task is created under that id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when creation fails, or
+    /// [`UnikoError::Internal`] if the task cannot be read back.
+    pub async fn create_task_view(
+        &self,
+        mut params: CreateTaskParams,
+    ) -> Result<TaskView, UnikoError> {
+        let task_id = params.task_id.get_or_insert_with(new_id).clone();
+        create_task(self.kb, self.agent_id, params).await?;
+        self.task(&task_id).await?.ok_or_else(|| {
+            UnikoError::Internal(format!("task '{task_id}' not readable after create"))
+        })
     }
 }
 

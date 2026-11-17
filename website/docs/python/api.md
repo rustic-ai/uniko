@@ -473,6 +473,7 @@ Each read has a `_sync` twin (`all_sync`, `get_sync`, …).
 | `planned` | `planned()` | `list[GoalView]` |
 | `completed` | `completed()` | `list[GoalView]` |
 | `get` | `get(goal_id: str)` | `GoalView \| None` |
+| `task` | `task(task_id: str)` | `TaskView \| None` |
 | `tasks` | `tasks()` | `list[TaskView]` |
 | `tasks_in` | `tasks_in(phase: str)` | `list[TaskView]` |
 | `tasks_of` | `tasks_of(goal_id: str)` | `list[TaskView]` |
@@ -495,17 +496,24 @@ Each returns `Awaitable[bool]` (`False` when the id doesn't resolve) and has a `
 
 ### Creation
 
-Both return `Awaitable[int]` (the new node id) and have a `_sync` twin. All arguments after `title`
-are keyword-only.
+`create` and `create_task` return `Awaitable[int]` (the new node id). `create_view` and
+`create_task_view` take the same arguments and return the created `GoalView` / `TaskView`, which
+carries the `goal_id` / `task_id` every other method takes, including one generated because you
+omitted it. Each has a `_sync` twin. All arguments after `title` are keyword-only.
 
 ```python
 create(title, *, goal_id=None, description=None, status=None, metrics=None,
        guardrails=None, deadline: datetime | None = None, parent_goal_id=None)
+create_view(...)        # same arguments -> GoalView
 
 create_task(title, *, task_id=None, description=None, status=None,
             priority: float | None = None, goal_id=None,
             depends_on_task_id=None, subtask_of_task_id=None)
+create_task_view(...)   # same arguments -> TaskView
 ```
+
+Omitting `goal_id` / `task_id` generates a new id on every call, so two calls create two goals or
+tasks. Pass an id when you need to know it up front.
 
 !!! note "Valid phase strings"
     Phases are plain lowercase strings, not enums.
