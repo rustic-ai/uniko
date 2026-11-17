@@ -116,15 +116,17 @@ The fields and their defaults are listed in the [configuration guide](../guides/
 `capabilities()` reports what this build and instance can do:
 
 - `compiled_features`: each optional engine feature (`pdf-ocr`, `onnx`, `code-parse`, `gpu-cuda`,
-  `gpu-metal`, `candle`, `llm`) and whether this build has it;
+  `gpu-metal`, `candle`, `llm`, `batch-record`) and whether this build has it;
 - `extractors`: the modalities with a registered extractor;
 - `models`: one entry per catalog alias, with `alias`, `task`, `provider_id`, `model_id`,
   `revision`, `state` (`"not_loaded"`, `"loaded"` or `"failed"`, with `error` when failed),
   `api_key_env`, `base_url`, and the requested and active ONNX execution providers;
 - `answer_alias`, `ocr_compiled` and `ocr_configured`.
 
-Prefetch at open tries every model and keeps going past one that fails, so a single bad alias
-shows up here as `"failed"` instead of stopping the others loading. Model entries never include
+Prefetch at open (with the default `prefetch("eager")`) tries every model and keeps going past one
+that fails, so a single bad alias shows up here as `"failed"` instead of stopping the others
+loading; a later successful use clears it. `extractors` lists only extractors registered with
+`extractor()`; built-in text, code, markup, structured and PDF ingest are always available. Model entries never include
 provider options; an API key appears only as its environment-variable name, and `base_url` has
 any userinfo and query string removed. `active_execution_providers` is only known for loaded
 local ONNX embedding and reranking models, and lists the providers requested minus those not
@@ -172,7 +174,8 @@ so you can fluently compose, and re-using a builder after `build()` raises
 To run several instances without loading each model several times, build one runtime and pass it
 to each builder. Each instance keeps its own graph, and shutting one down leaves the runtime loaded
 for the others. The LLMs belong to the runtime, so the instance builders need not repeat `llm()`:
-the runtime's first generation model answers unless `answer_alias()` names another.
+the answer alias of the builder that built the runtime (its `answer_alias()`, else its first
+`llm()`) answers unless `answer_alias()` names another.
 `SharedRuntime.aliases` lists the aliases it serves.
 
 ```python

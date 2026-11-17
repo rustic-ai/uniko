@@ -144,6 +144,3 @@ pub(crate) fn sort_by_score_desc<T>(items: &mut [T], score: impl Fn(&T) -> f64) 
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 }
-
-/// Cargo features of this crate and whether this build compiled them in.
-pub const COMPILED_FEATURES: &[(&str, bool)] = &[("llm", cfg!(feature = "llm"))];

@@ -329,7 +329,9 @@ impl PyUnikoBuilder {
     fn map(&self, f: impl FnOnce(UnikoBuilder) -> UnikoBuilder) -> PyResult<()> {
         let mut guard = self.inner.lock().expect("UnikoBuilder mutex poisoned");
         let builder = guard.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("UnikoBuilder already consumed by build()")
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "UnikoBuilder already consumed by build() or build_runtime()",
+            )
         })?;
         *guard = Some(f(builder));
         Ok(())
@@ -513,7 +515,7 @@ pymethods_with_sync! {
                     .take()
                     .ok_or_else(|| {
                         pyo3::exceptions::PyRuntimeError::new_err(
-                            "UnikoBuilder already consumed by build()",
+                            "UnikoBuilder already consumed by build() or build_runtime()",
                         )
                     })?;
 
@@ -537,7 +539,7 @@ pymethods_with_sync! {
                     .take()
                     .ok_or_else(|| {
                         pyo3::exceptions::PyRuntimeError::new_err(
-                            "UnikoBuilder already consumed by build()",
+                            "UnikoBuilder already consumed by build() or build_runtime()",
                         )
                     })?;
 

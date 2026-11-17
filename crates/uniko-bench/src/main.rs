@@ -227,10 +227,9 @@ async fn main() -> Result<()> {
 
     // One Xervo runtime shared across every KB opened in this run. Built from a
     // catalog (each model loads once) and opened over with
-    // `open_shared`. The prebuilt-runtime open path is also what lets a
-    // hybrid (bge-m3) KB reopen at all: the catalog-open path rejects a vector
-    // index whose embedding alias is a non-`Embed` task (rustic-ai/uni-db#130),
-    // while the prebuilt-runtime path skips that validation.
+    // `open_shared`. (Before uni-db 5.2.1 this was also the only open path
+    // that let a hybrid bge-m3 KB reopen, rustic-ai/uni-db#130; the
+    // catalog-open path now checks embedding capability as well.)
     let shared_runtime = uniko_store::SharedRuntime::build(
         &config,
         extra_catalog.clone(),
@@ -319,9 +318,9 @@ async fn main() -> Result<()> {
         );
 
         let kb_dir = cli.ingest_dir.join(&sample.sample_id);
-        // Decide reuse-vs-ingest before opening: `open_with_runtime` creates
-        // the dir, so `exists()` must be checked first. Both branches open via
-        // the shared prebuilt runtime (see #130 note above).
+        // Decide reuse-vs-ingest before opening: `open_shared` creates the
+        // dir, so `exists()` must be checked first. Both branches open via the
+        // shared prebuilt runtime.
         let reuse_existing = cli.reuse && kb_dir.exists();
         let kb = uniko_bench::open_kb_with_runtime(&kb_dir, config.clone(), shared_runtime.clone())
             .await?;

@@ -169,6 +169,31 @@ async fn prefetch_records_each_alias_and_keeps_going_past_a_failure() {
         ModelState::Loaded
     );
 
+    // The failed entry serializes flat, with its error.
+    let failed = serde_json::to_value(status_of(&statuses, "embed/missing")).unwrap();
+    assert_eq!(failed["state"], "failed", "{failed}");
+    assert!(
+        failed["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{failed}"
+    );
+    let loaded = serde_json::to_value(status_of(&statuses, "embed/default")).unwrap();
+    assert_eq!(loaded["state"], "loaded");
+    assert!(loaded.get("error").is_none(), "{loaded}");
+
+    // A loaded local ONNX embedder reports its execution providers.
+    let eps = status_of(&statuses, "embed/default")
+        .active_execution_providers
+        .clone();
+    assert!(
+        eps.is_some_and(|e| !e.is_empty()),
+        "embed/default reports no EPs"
+    );
+    assert!(
+        status_of(&statuses, "embed/missing")
+            .active_execution_providers
+            .is_none()
+    );
+
     kb.shutdown().await.unwrap();
 }
 
@@ -226,6 +251,7 @@ async fn model_status_redacts_endpoints_and_never_shows_options() {
         remote.base_url.as_deref(),
         Some("https://llm.example.com/v1")
     );
+    assert!(remote.active_execution_providers.is_none());
     for rendered in [
         format!("{statuses:?}"),
         serde_json::to_string(&statuses).unwrap(),
@@ -390,4 +416,78 @@ async fn a_hybrid_embedder_works_over_a_shared_runtime() {
     let vectors = kb.embed("embed/default", &["hello"]).await.unwrap();
     assert_eq!(vectors[0].len(), 1024);
     kb.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_store_on_other_devices_opens_over_the_same_runtime() {
+    use uniko_store::{PrefetchPolicy, SharedRuntime};
+
+    let config = UnikoConfig::default();
+    let runtime = SharedRuntime::build(&config, Vec::new(), PrefetchPolicy::Lazy)
+        .await
+        .unwrap();
+    let mut gpu = config.clone();
+    gpu.embedding.execution_providers = Some(vec!["cuda".into(), "cpu".into()]);
+    let kb = KnowledgeBase::in_memory_shared(gpu, &runtime)
+        .await
+        .expect("execution providers pick a device, not a model");
+    kb.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_catalog_file_config_opens_over_a_runtime_built_from_it() {
+    use uniko_store::{PrefetchPolicy, SharedRuntime};
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = UnikoConfig::default();
+    let mut catalog = uniko_store::storage::embed_catalog(&base);
+    catalog.push(ModelAliasSpec {
+        warmup: WarmupPolicy::Lazy,
+        ..generate_spec(
+            "remote/llamacpp",
+            serde_json::json!({"base_url": "http://127.0.0.1:9/v1"}),
+        )
+    });
+    let path = dir.path().join("catalog.json");
+    std::fs::write(&path, serde_json::to_string(&catalog).unwrap()).unwrap();
+    let config = UnikoConfig {
+        catalog_path: Some(path),
+        ..base
+    };
+
+    let runtime = SharedRuntime::build(&config, Vec::new(), PrefetchPolicy::Lazy)
+        .await
+        .unwrap();
+    assert!(
+        runtime
+            .model_entries()
+            .iter()
+            .any(|e| e.alias == "gen/test")
+    );
+    let kb = KnowledgeBase::open_shared(dir.path().join("kb"), config, &runtime)
+        .await
+        .unwrap();
+    assert!(
+        kb.model_entries()
+            .unwrap()
+            .iter()
+            .any(|e| e.alias == "gen/test")
+    );
+    kb.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_during_a_background_prefetch_succeeds() {
+    use uniko_store::PrefetchPolicy;
+
+    let kb = KnowledgeBase::in_memory_with_prefetch(
+        UnikoConfig::default(),
+        Vec::new(),
+        PrefetchPolicy::Background,
+    )
+    .await
+    .unwrap();
+    kb.shutdown()
+        .await
+        .expect("the background load holds no store reference");
 }
