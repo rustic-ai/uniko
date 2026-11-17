@@ -392,7 +392,30 @@ supporting evidence it's soft-invalidated with a recorded reason, not silently d
 
 ---
 
-## 9. Shut down
+## 9. Check what is available
+
+`memory.capabilities().await` returns a `Capabilities` report without loading anything:
+
+- the optional engine features this build compiled in;
+- the modalities with a registered extractor;
+- each catalog model alias with its load state (`NotLoaded`, `Loaded` or `Failed` with the error);
+- the answer alias, and whether OCR is compiled in and enabled.
+
+```rust
+let caps = memory.capabilities().await;
+for model in caps.models.unwrap_or_default() {
+    println!("{} ({:?}) via {}: {:?}", model.alias, model.task, model.provider_id, model.state);
+}
+```
+
+Prefetch at open loads each alias in turn and keeps going past a failure, which it logs at `warn`
+and records as `Failed`. Model entries never carry provider options; credentials show only as the
+`api_key_env` variable name and `base_url` loses any userinfo and query. The same per-alias report
+is available one layer down as `KnowledgeBase::model_status()`.
+
+---
+
+## 10. Shut down
 
 ```rust
 drop(session);

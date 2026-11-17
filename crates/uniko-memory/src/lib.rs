@@ -54,8 +54,8 @@ pub use consolidation::{CycleStats, TripleSource};
 pub use episode::{RecordEpisodeParams, record_episode};
 #[doc(inline)]
 pub use facade::{
-    ArtifactView, Data, FinalizeReport, GoalContext, GoalPhase, GoalView, Goals, LlmSpec,
-    MessageView, ObserveResult, Outline, OutlineEntry, ReadRange, ReadResult, RecallScope,
+    ArtifactView, Capabilities, Data, FinalizeReport, GoalContext, GoalPhase, GoalView, Goals,
+    LlmSpec, MessageView, ObserveResult, Outline, OutlineEntry, ReadRange, ReadResult, RecallScope,
     SearchHit, SearchOptions, Session, SourceRef, Sources, SummarizeReport, TaskPhase, TaskView,
     ToolCall, ToolCallResult, ToolCallView, ToolOutput, Turn, TurnUnit, Uniko, UnikoBuilder,
     UnitResult,
@@ -142,3 +142,6 @@ pub(crate) fn sort_by_score_desc<T>(items: &mut [T], score: impl Fn(&T) -> f64) 
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 }
+
+/// Cargo features of this crate and whether this build compiled them in.
+pub const COMPILED_FEATURES: &[(&str, bool)] = &[("llm", cfg!(feature = "llm"))];

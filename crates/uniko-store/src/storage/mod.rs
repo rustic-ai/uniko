@@ -113,13 +113,17 @@ pub struct KnowledgeBase {
     /// elsewhere ([`KnowledgeBase::open_with_runtime`]), whose catalog
     /// this store never saw.
     pub(crate) catalog: Option<Arc<[ModelAliasSpec]>>,
+    /// Per-alias load state for [`KnowledgeBase::model_status`]. Empty
+    /// when the catalog is unknown.
+    pub(crate) model_states: crate::model_state::ModelStates,
 }
 
 impl KnowledgeBase {
     /// Create an in-memory knowledge base for testing or ephemeral use.
     ///
-    /// Registers the full schema on creation and eagerly warms xervo
-    /// models via [`prefetch_all`](uni_db::api::xervo::UniXervo::prefetch_all).
+    /// Registers the full schema on creation and eagerly warms each xervo
+    /// model in the catalog; see [`model_status`](Self::model_status) for
+    /// which ones loaded.
     ///
     /// # Errors
     ///
@@ -146,19 +150,20 @@ impl KnowledgeBase {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
+        let model_states = crate::model_state::new_states(&kept);
         let db = Uni::in_memory().xervo_catalog(catalog).build().await?;
         apply_schema(&db, &config).await?;
-        prefetch_models(&db).await;
-        Self {
+        let kb = Self {
             db: Arc::new(db),
             config,
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
-        }
-        .finalize_init()
-        .await
+            model_states,
+        };
+        kb.prefetch_catalog().await;
+        kb.finalize_init().await
     }
 
     /// Open or create a persistent knowledge base at `path`.
@@ -213,6 +218,7 @@ impl KnowledgeBase {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
+        let model_states = crate::model_state::new_states(&kept);
         let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_catalog(catalog);
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
@@ -229,11 +235,12 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
+            model_states,
         }
         .finalize_init()
         .await?;
         if prefetch {
-            prefetch_models(&kb.db).await;
+            kb.prefetch_catalog().await;
         }
         Ok(kb)
     }
@@ -271,7 +278,11 @@ impl KnowledgeBase {
     ) -> Result<Arc<uni_xervo::runtime::ModelRuntime>> {
         config.validate()?;
         let catalog = load_catalog(config, extra_catalog)?;
-        let bootstrap = Uni::in_memory().xervo_catalog(catalog).build().await?;
+        let states = crate::model_state::new_states(&catalog);
+        let bootstrap = Uni::in_memory()
+            .xervo_catalog(catalog.clone())
+            .build()
+            .await?;
         let runtime = bootstrap.xervo().raw_runtime().cloned().ok_or_else(|| {
             UnikoError::Internal(
                 "bootstrap Uni did not register an xervo runtime (was the catalog empty?)".into(),
@@ -279,7 +290,12 @@ impl KnowledgeBase {
         })?;
         // Warm every alias up front so the first inference per KB
         // doesn't pay the cold-start latency.
-        prefetch_models(&bootstrap).await;
+        let xervo = bootstrap.xervo();
+        crate::model_state::prefetch_each(&catalog, &states, |alias| {
+            let xervo = xervo.clone();
+            async move { xervo.prefetch(&[alias.as_str()]).await }
+        })
+        .await;
         // Dropping the bootstrap Uni at the end of scope is fine —
         // the runtime is held by the returned `Arc`.
         drop(bootstrap);
@@ -322,9 +338,29 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: None,
+            model_states: Arc::default(),
         }
         .finalize_init()
         .await
+    }
+
+    /// Eagerly download and warm every model in this store's catalog,
+    /// one alias at a time, so the first inference hits a warm model.
+    ///
+    /// A model that fails is logged at `warn`, recorded as
+    /// [`ModelState::Failed`](crate::ModelState::Failed), and skipped: the
+    /// store still opens (catalog entries keep `required: false`) and the
+    /// remaining aliases are still loaded.
+    async fn prefetch_catalog(&self) {
+        let Some(catalog) = self.catalog.clone() else {
+            return;
+        };
+        let xervo = self.db.xervo();
+        crate::model_state::prefetch_each(&catalog, &self.model_states, |alias| {
+            let xervo = xervo.clone();
+            async move { xervo.prefetch(&[alias.as_str()]).await }
+        })
+        .await;
     }
 
     /// Run post-construction init steps. Currently:
@@ -649,32 +685,6 @@ fn reject_duplicate_aliases(catalog: &[ModelAliasSpec]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Eagerly download and warm every xervo model in the catalog.
-///
-/// `prefetch_all()` materializes each artifact into the repo snapshot
-/// and loads the model into memory, so the first inference call hits a
-/// pre-warmed runner.  Errors are surfaced at `warn` level (we keep
-/// `required: false` so the KB still opens; failures are operationally
-/// important to see).
-async fn prefetch_models(db: &Uni) {
-    let started = std::time::Instant::now();
-    match db.xervo().prefetch_all().await {
-        Ok(()) => {
-            tracing::info!(
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "xervo prefetch_all complete"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "xervo prefetch_all failed — models may load lazily on first use"
-            );
-        }
-    }
 }
 
 /// Apply the schema from a JSON file or the builder-based registration.

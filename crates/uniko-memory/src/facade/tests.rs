@@ -5113,3 +5113,46 @@ async fn build_rejects_an_answer_alias_that_cannot_answer() {
         }
     }
 }
+
+#[tokio::test]
+async fn capabilities_report_models_features_and_the_answer_alias() {
+    use uniko_store::ModelState;
+
+    use crate::LlmSpec;
+
+    let builder = Uniko::builder().in_memory().llm(LlmSpec::llamacpp(
+        "gen/a",
+        "stub",
+        "http://127.0.0.1:9/v1",
+    ));
+    let Some(memory) = build_or_skip(builder).await else {
+        return;
+    };
+    let caps = memory.capabilities().await;
+
+    assert_eq!(caps.answer_alias.as_deref(), Some("gen/a"));
+    for feature in [
+        "pdf-ocr",
+        "onnx",
+        "code-parse",
+        "gpu-cuda",
+        "gpu-metal",
+        "candle",
+        "llm",
+    ] {
+        assert!(caps.compiled_features.contains_key(feature), "{feature}");
+    }
+    assert_eq!(caps.ocr_compiled, caps.compiled_features["pdf-ocr"]);
+    assert!(!caps.ocr_configured, "OCR is off by default");
+    assert!(caps.extractors.is_empty(), "{:?}", caps.extractors);
+
+    let models = caps.models.expect("the builder's store knows its catalog");
+    let embed = models.iter().find(|m| m.alias == "embed/default").unwrap();
+    assert_eq!(embed.state, ModelState::Loaded);
+    let generator = models.iter().find(|m| m.alias == "gen/a").unwrap();
+    assert_eq!(generator.provider_id, "remote/llamacpp");
+    assert_eq!(generator.base_url.as_deref(), Some("http://127.0.0.1:9/v1"));
+
+    let json = serde_json::to_value(memory.capabilities().await).unwrap();
+    assert_eq!(json["models"][0]["state"], "loaded", "{json}");
+}

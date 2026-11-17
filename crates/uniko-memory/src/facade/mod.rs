@@ -27,6 +27,7 @@
 //! # }
 //! ```
 
+mod capabilities;
 mod data;
 mod goals;
 mod session;
@@ -36,6 +37,7 @@ mod tests;
 mod tool;
 mod uniko;
 
+pub use capabilities::Capabilities;
 pub use data::{ArtifactView, Data, MessageView};
 pub use goals::{GoalContext, GoalPhase, GoalView, Goals, TaskPhase, TaskView};
 pub use session::{

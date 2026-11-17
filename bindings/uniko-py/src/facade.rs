@@ -251,6 +251,26 @@ pymethods_with_sync! {
             }
         }
 
+        /// What this build and instance can do, as a dict: compiled
+        /// features, registered extractors, each model alias with its load
+        /// state, the answer alias, and whether OCR is compiled and enabled.
+        ///
+        /// Loads nothing. Model entries carry no provider options; an API
+        /// key appears only as its environment-variable name.
+        fn capabilities / capabilities_sync(&self, py) -> Py<PyAny> {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                let report = instance.capabilities().await;
+                let json = serde_json::to_value(&report)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                Python::attach(|py| crate::convert::json_to_py(py, &json))
+
+            }
+        }
+
         /// Erase the entire graph. Intended for dev/test reset.
         fn purge / purge_sync(&self, py) -> Py<PyDeletionReport> {
             prepare {
