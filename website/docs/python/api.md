@@ -103,6 +103,7 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 | `remove_org_member` | `remove_org_member(participant_id: str, org_id: str) -> Awaitable[bool]` | `remove_org_member_sync` | Remove it. |
 | `add_team_to_org` | `add_team_to_org(team_id: str, org_id: str) -> Awaitable[bool]` | `add_team_to_org_sync` | Put a team in an org; its members get the org. |
 | `remove_team_from_org` | `remove_team_from_org(team_id: str, org_id: str) -> Awaitable[bool]` | `remove_team_from_org_sync` | Take it out again. |
+| `capabilities` | `capabilities() -> Awaitable[dict[str, Any]]` | `capabilities_sync` | Compiled features, extractors, each model's load state, the answer alias, OCR. Loads nothing. |
 | `purge` | `purge() -> Awaitable[DeletionReport]` | `purge_sync` | Erase the whole graph (dev/test reset). |
 | `shutdown` | `shutdown() -> Awaitable[None]` | `shutdown_sync` | Drain workers and close. **Consumes the handle.** |
 
@@ -111,6 +112,24 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 `UnikoBuilder.config()` accepts, so you can read it, change a value and build with it.
 `embedding.provider_options` is shown as `"<redacted>"` when set, because it can hold API keys.
 The fields and their defaults are listed in the [configuration guide](../guides/configuration.md).
+
+`capabilities()` reports what this build and instance can do:
+
+- `compiled_features`: each optional engine feature (`pdf-ocr`, `onnx`, `code-parse`, `gpu-cuda`,
+  `gpu-metal`, `candle`, `llm`) and whether this build has it;
+- `extractors`: the modalities with a registered extractor;
+- `models`: one entry per catalog alias, with `alias`, `task`, `provider_id`, `model_id`,
+  `revision`, `state` (`"not_loaded"`, `"loaded"` or `"failed"`, with `error` when failed),
+  `api_key_env`, `base_url`, and the requested and active ONNX execution providers;
+- `answer_alias`, `ocr_compiled` and `ocr_configured`.
+
+Prefetch at open tries every model and keeps going past one that fails, so a single bad alias
+shows up here as `"failed"` instead of stopping the others loading. Model entries never include
+provider options; an API key appears only as its environment-variable name, and `base_url` has
+any userinfo and query string removed. `active_execution_providers` is only known for loaded
+local ONNX embedding and reranking models, and lists the providers requested minus those not
+compiled in, not proof that a GPU attached. `TypedUniko.capabilities()` returns the same as a
+`Capabilities` Pydantic model.
 
 !!! warning "`shutdown` needs sole ownership"
     `shutdown` consumes the handle and requires that all derived `Agent`/`Session` objects are

@@ -164,4 +164,12 @@ impl ModalityRegistry {
     pub fn get(&self, modality: Modality) -> Option<&Arc<dyn ModalityExtractor>> {
         self.extractors.get(&modality)
     }
+
+    /// The modalities with a registered extractor, in a stable order.
+    #[must_use]
+    pub fn modalities(&self) -> Vec<Modality> {
+        let mut out: Vec<Modality> = self.extractors.keys().copied().collect();
+        out.sort_by_key(|m| format!("{m:?}"));
+        out
+    }
 }

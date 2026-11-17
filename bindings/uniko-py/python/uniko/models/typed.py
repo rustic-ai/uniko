@@ -31,6 +31,7 @@ from .outputs import (
     AbductionResult,
     Answer,
     ArtifactView,
+    Capabilities,
     ContextBundle,
     DeletionReport,
     FinalizeReport,
@@ -901,6 +902,12 @@ class TypedUniko:
 
     def backfill_search_text_sync(self) -> int:
         return self._inner.backfill_search_text_sync()
+
+    async def capabilities(self) -> Capabilities:
+        return Capabilities.from_native(await self._inner.capabilities())
+
+    def capabilities_sync(self) -> Capabilities:
+        return Capabilities.from_native(self._inner.capabilities_sync())
 
     async def purge(self) -> DeletionReport:
         return DeletionReport.from_native(await self._inner.purge())

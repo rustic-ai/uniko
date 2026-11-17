@@ -42,11 +42,11 @@ use crate::pipeline::PipelineSystem;
 /// ```
 #[derive(Clone)]
 pub struct Uniko {
-    kb: KnowledgeBase,
-    llm_alias: Option<String>,
+    pub(super) kb: KnowledgeBase,
+    pub(super) llm_alias: Option<String>,
     streaming: Option<Arc<PipelineSystem>>,
     scope: RecallScope,
-    extractors: Arc<ModalityRegistry>,
+    pub(super) extractors: Arc<ModalityRegistry>,
 }
 
 impl fmt::Debug for Uniko {
