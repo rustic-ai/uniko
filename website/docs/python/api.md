@@ -171,7 +171,9 @@ so you can fluently compose, and re-using a builder after `build()` raises
 
 To run several instances without loading each model several times, build one runtime and pass it
 to each builder. Each instance keeps its own graph, and shutting one down leaves the runtime loaded
-for the others. `SharedRuntime.aliases` lists the aliases it serves.
+for the others. The LLMs belong to the runtime, so the instance builders need not repeat `llm()`:
+the runtime's first generation model answers unless `answer_alias()` names another.
+`SharedRuntime.aliases` lists the aliases it serves.
 
 ```python
 runtime = await uniko.Uniko.builder().build_runtime()
@@ -234,7 +236,7 @@ and synchronous.
 | `openai` | `@staticmethod openai(alias: str, model_id: str, base_url: str \| None = None)` | Key read from `OPENAI_API_KEY`. |
 | `openai_with_key_env` | `@staticmethod openai_with_key_env(alias: str, model_id: str, key_env: str, base_url: str \| None = None)` | Key read from the named env var. |
 | `llamacpp` | `@staticmethod llamacpp(alias: str, model_id: str, base_url: str, key_env: str \| None = None)` | A model held by a llama.cpp `llama-server`. `base_url` includes `/v1`; pass `key_env` only if the server runs with `--api-key`. |
-| `new` | `@staticmethod new(alias: str, provider: str, model_id: str, options: dict[str, Any] \| None = None, api_key_env: str \| None = None)` | Any compiled generation provider: `remote/anthropic`, `remote/azure-openai`, `remote/cohere`, `remote/gemini`, `remote/llamacpp`, `remote/mistral`, `remote/openai`, `remote/vertexai`. `options` are provider options; credentials go only through `api_key_env`. |
+| `new` | `@staticmethod new(alias: str, provider: str, model_id: str, options: dict[str, Any] \| None = None, api_key_env: str \| None = None)` | Any compiled generation provider: `remote/anthropic`, `remote/azure-openai`, `remote/cohere`, `remote/gemini`, `remote/llamacpp`, `remote/mistral`, `remote/openai`, `remote/vertexai`. `options` are provider options; credentials go only through `api_key_env` (for `remote/vertexai` it sets `api_token_env`). |
 
 `alias` is a read-only property. Aliases take the `task/name` form. `build()` checks every spec
 before opening the store and raises `ConfigError` naming the alias for a provider that cannot

@@ -181,7 +181,9 @@ impl KnowledgeBase {
                 model_id: spec.model_id.clone(),
                 revision: spec.revision.clone(),
                 state,
-                api_key_env: string_option(spec, "api_key_env"),
+                // Vertex AI names its credential variable `api_token_env`.
+                api_key_env: string_option(spec, "api_key_env")
+                    .or_else(|| string_option(spec, "api_token_env")),
                 base_url: string_option(spec, "base_url").map(|u| redact_url(&u)),
                 requested_execution_providers: spec
                     .options
@@ -252,15 +254,18 @@ pub(crate) fn redact_url(url: &str) -> String {
     }
 }
 
-/// `text` with every `http(s)://` URL passed through [`redact_url`].
+/// `text` with every `http(s)://` URL (any case) passed through
+/// [`redact_url`].
 pub(crate) fn redact_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(pos) = rest.find("http") {
+    // ASCII lowercasing keeps byte offsets, so positions carry over.
+    while let Some(pos) = rest.to_ascii_lowercase().find("http") {
         let (before, candidate) = rest.split_at(pos);
         out.push_str(before);
-        if !(candidate.starts_with("http://") || candidate.starts_with("https://")) {
-            out.push_str("http");
+        let lower = candidate.get(..8).unwrap_or(candidate).to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            out.push_str(&candidate[..4]);
             rest = &candidate[4..];
             continue;
         }
@@ -298,6 +303,8 @@ mod tests {
         assert!(!out.contains("secret") && !out.contains("token=t"), "{out}");
         assert!(out.contains("https://h.io/x"), "{out}");
         assert_eq!(redact_urls("httpx is fine"), "httpx is fine");
+        let shouty = redact_urls("failed: HTTPS://u:secret@h.io/x");
+        assert!(!shouty.contains("secret"), "{shouty}");
     }
 
     #[test]

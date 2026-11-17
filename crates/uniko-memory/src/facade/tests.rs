@@ -5254,3 +5254,81 @@ async fn lazy_prefetch_leaves_models_unloaded() {
         "{models:?}"
     );
 }
+
+#[tokio::test]
+async fn a_builder_over_a_runtime_rejects_an_llm_with_other_options() {
+    use crate::LlmSpec;
+
+    let Ok(runtime) = Uniko::builder()
+        .prefetch(uniko_store::PrefetchPolicy::Lazy)
+        .llm(LlmSpec::llamacpp(
+            "gen/a",
+            "stub",
+            "http://127.0.0.1:9/tenant-a",
+        ))
+        .build_runtime()
+        .await
+    else {
+        return;
+    };
+    let err = Uniko::builder()
+        .runtime(runtime)
+        .llm(LlmSpec::llamacpp(
+            "gen/a",
+            "stub",
+            "http://127.0.0.1:9/tenant-b",
+        ))
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("'gen/a'") && m.contains("options")),
+        "{err}"
+    );
+    assert!(!err.to_string().contains("tenant-a"), "{err}");
+}
+
+/// Over a shared runtime the LLMs belong to the runtime, so its first
+/// generation model answers without repeating `.llm()`.
+#[tokio::test]
+async fn answer_defaults_to_the_runtimes_generation_model() {
+    use std::sync::atomic::Ordering;
+
+    use crate::LlmSpec;
+
+    let (url, hits) = spawn_chat_stub("from the runtime").await;
+    let Ok(runtime) = Uniko::builder()
+        .llm(LlmSpec::llamacpp("gen/a", "stub", url.as_str()))
+        .build_runtime()
+        .await
+    else {
+        return;
+    };
+    let Some(memory) = build_or_skip(Uniko::builder().runtime(runtime)).await else {
+        return;
+    };
+    match memory.agent("a").answer("q").await {
+        Ok(answer) => assert_eq!(answer.text, "from the runtime"),
+        Err(e) if is_model_unavailable(&e) => return,
+        Err(e) => panic!("answer failed: {e}"),
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+/// A bad answer alias fails before the store is created.
+#[tokio::test]
+async fn a_bad_answer_alias_fails_before_opening_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb");
+    let err = Uniko::builder()
+        .path(&path)
+        .answer_alias("generate/typo")
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("generate/typo")),
+        "{err}"
+    );
+    assert!(!path.exists(), "the store was created before the check");
+}
