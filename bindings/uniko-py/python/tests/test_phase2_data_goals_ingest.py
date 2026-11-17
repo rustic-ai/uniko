@@ -53,6 +53,36 @@ async def test_goals_lifecycle() -> None:
     assert completed.phase == "completed"
 
 
+async def test_create_views_return_generated_ids() -> None:
+    """``create_view`` / ``create_task_view`` hand back usable ids (#64)."""
+    uni = await uniko.Uniko.in_memory()
+    agent = uni.agent("assistant")
+    await agent.session("setup").observe(uniko.Turn("assistant", "kicking off"))
+    goals = agent.goals
+
+    goal = await goals.create_view("Ship the Python SDK", status="planned")
+    assert isinstance(goal, uniko.GoalView)
+    assert goal.goal_id and goal.title == "Ship the Python SDK"
+    assert goal.phase == "planned"
+
+    task = await goals.create_task_view(
+        "write tests", goal_id=goal.goal_id, priority=0.8
+    )
+    assert isinstance(task, uniko.TaskView)
+    assert task.task_id and task.goal_id == goal.goal_id
+
+    assert await goals.start(goal.goal_id) is True
+    assert await goals.start_task(task.task_id) is True
+    fetched = await goals.task(task.task_id)
+    assert fetched is not None and fetched.phase == "active"
+    ctx = await goals.context(goal.goal_id)
+    assert ctx is not None and any(t.task_id == task.task_id for t in ctx.tasks)
+
+    explicit = await goals.create_view("named", goal_id="g-named")
+    assert explicit.goal_id == "g-named"
+    assert await goals.task("no-such-task") is None
+
+
 async def test_data_message_and_artifact_lookup() -> None:
     uni = await uniko.Uniko.in_memory()
     agent = uni.agent("assistant")

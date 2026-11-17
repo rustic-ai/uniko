@@ -317,9 +317,9 @@ let ctx = agent.goals().context("goal-1").await?;        // Option<GoalContext>
 
 | Group | Methods |
 | --- | --- |
-| **Read** | `all()` · `in_phase(GoalPhase)` · `active()` · `planned()` · `completed()` · `get(id)` · `tasks()` · `tasks_in(TaskPhase)` · `tasks_of(goal_id)` · `context(goal_id)` |
+| **Read** | `all()` · `in_phase(GoalPhase)` · `active()` · `planned()` · `completed()` · `get(id)` · `task(id)` · `tasks()` · `tasks_in(TaskPhase)` · `tasks_of(goal_id)` · `context(goal_id)` |
 | **Transition** (→ `Result<bool>`, `false` = unknown id) | `start(id)` · `complete(id, Option<Json>)` · `abandon(id)` · `set_status(id, &str)` · `start_task` · `complete_task` · `block_task` · `set_task_status` |
-| **Create** | `create(CreateGoalParams) -> NodeId` · `create_task(CreateTaskParams) -> NodeId` |
+| **Create** | `create(CreateGoalParams) -> NodeId` · `create_task(CreateTaskParams) -> NodeId` · `create_view(CreateGoalParams) -> GoalView` · `create_task_view(CreateTaskParams) -> TaskView` (the view carries the generated id; re-creating under an existing id updates it in place) |
 
 **`GoalView`** `{ goal_id, title, description?, status, phase: GoalPhase, created_at?, deadline?,
 completed_at?, metrics: Option<Json> }` · **`TaskView`** `{ task_id, title, description?, status,
@@ -331,7 +331,7 @@ Completed · Blocked` — derived from the free-form `status` (+ `completed_at`)
 exposed.
 
 !!! note "Participant must exist"
-    `create`/`create_task` require the agent's `Participant` to exist — `observe()` creates it on
+    `create`/`create_task` (and their `_view` forms) require the agent's `Participant` to exist — `observe()` creates it on
     first sight. A pure-planning agent should observe at least once, or seed the participant.
 
 ---

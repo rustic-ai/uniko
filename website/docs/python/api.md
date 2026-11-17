@@ -275,7 +275,7 @@ builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoni
 | `finalize_session` | `finalize_session(session_id: str) -> Awaitable[FinalizeReport]` | `finalize_session_sync` | Build/refresh a session's retrieval surfaces without its `Session` handle. |
 | `retire_source` | `retire_source(source_id: str) -> Awaitable[bool]` | `retire_source_sync` | Hide everything recorded under a source id from recall, reversibly. |
 | `restore_source` | `restore_source(source_id: str) -> Awaitable[bool]` | `restore_source_sync` | Undo `retire_source`. |
-| `consolidate` | `consolidate() -> Awaitable[ConsolidationReport]` | `consolidate_sync` | Consolidate now: Observations → Facts, then procedure promotion and topic detection. |
+| `consolidate` | `consolidate(*, llm_triples_alias: str \| None = None) -> Awaitable[ConsolidationReport]` | `consolidate_sync` | Consolidate now: Observations → Facts, then procedure promotion and topic detection. Pass `llm_triples_alias` (a registered generation alias) to refine each triple with that model first; an unknown or non-generation alias raises `ConfigError`. |
 | `unfinalized_session_ids` | `unfinalized_session_ids() -> Awaitable[list[str]]` | `unfinalized_session_ids_sync` | Sessions with no session-level chunks yet — drives a backfill loop. |
 | `forget_participant` | `forget_participant(participant_id: str) -> Awaitable[DeletionReport]` | `forget_participant_sync` | Forget a participant. |
 
@@ -473,6 +473,7 @@ Each read has a `_sync` twin (`all_sync`, `get_sync`, …).
 | `planned` | `planned()` | `list[GoalView]` |
 | `completed` | `completed()` | `list[GoalView]` |
 | `get` | `get(goal_id: str)` | `GoalView \| None` |
+| `task` | `task(task_id: str)` | `TaskView \| None` |
 | `tasks` | `tasks()` | `list[TaskView]` |
 | `tasks_in` | `tasks_in(phase: str)` | `list[TaskView]` |
 | `tasks_of` | `tasks_of(goal_id: str)` | `list[TaskView]` |
@@ -495,17 +496,29 @@ Each returns `Awaitable[bool]` (`False` when the id doesn't resolve) and has a `
 
 ### Creation
 
-Both return `Awaitable[int]` (the new node id) and have a `_sync` twin. All arguments after `title`
-are keyword-only.
+`create` and `create_task` return `Awaitable[int]` (the new node id). `create_view` and
+`create_task_view` take the same arguments and return the created `GoalView` / `TaskView`, which
+carries the `goal_id` / `task_id` every other method takes, including one generated because you
+omitted it. Each has a `_sync` twin. All arguments after `title` are keyword-only.
 
 ```python
 create(title, *, goal_id=None, description=None, status=None, metrics=None,
        guardrails=None, deadline: datetime | None = None, parent_goal_id=None)
+create_view(...)        # same arguments -> GoalView
 
 create_task(title, *, task_id=None, description=None, status=None,
             priority: float | None = None, goal_id=None,
             depends_on_task_id=None, subtask_of_task_id=None)
+create_task_view(...)   # same arguments -> TaskView
 ```
+
+Omitting `goal_id` / `task_id` generates a new id on every call, so two calls create two goals or
+tasks. Pass an id when you need to know it up front.
+
+Creating again with an id that already exists updates that goal or task in place: its properties
+are overwritten and it keeps a single owner, assignee and goal link, so retrying with the same id
+is safe. If only the embedding step fails, the goal or task is still stored and the `_view` forms
+return it instead of raising, so a generated id is never lost.
 
 !!! note "Valid phase strings"
     Phases are plain lowercase strings, not enums.
@@ -811,6 +824,9 @@ The `cycle` part of a `ConsolidationReport`.
 | `facts_reinforced` | `int` |
 | `facts_invalidated` | `int` |
 | `drift_alerts` | `int` |
+| `triples_requested` | `int` — Observations sent for LLM refinement; `0` without `llm_triples_alias` |
+| `triples_refined` | `int` — of those, how many were replaced by a parsed model reply; the rest kept the rule-based triple |
+| `triples_failed` | `int` — of those, how many model calls failed outright (endpoint down, timeout) |
 
 ### `MessageView`
 

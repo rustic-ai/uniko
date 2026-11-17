@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use uniko_store::id::new_id;
 use uniko_store::types::{datetime_from_value, datetime_value};
 use uniko_store::{KnowledgeBase, NodeId, UnikoError, Value};
 
@@ -113,8 +114,9 @@ pub struct GoalContext {
 /// The agent's goal/task surface.
 ///
 /// Borrows the agent's store + identity; obtain one with
-/// [`Agent::goals`](crate::Agent::goals). Reads are scoped to goals the
-/// agent owns (`OWNED_BY`) and tasks assigned to it (`ASSIGNED_TO`).
+/// [`Agent::goals`](crate::Agent::goals). Listings are scoped to goals
+/// the agent owns (`OWNED_BY`) and tasks assigned to it (`ASSIGNED_TO`);
+/// lookups by id ([`get`](Self::get), [`task`](Self::task)) are not.
 /// Transitions return `Ok(false)` when the id doesn't resolve.
 #[derive(Debug)]
 pub struct Goals<'a> {
@@ -209,6 +211,26 @@ impl<'a> Goals<'a> {
             )
             .await?;
         Ok(rows.first().map(goal_from_row))
+    }
+
+    /// Fetch one task by id. `Ok(None)` when unknown.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when the query fails.
+    pub async fn task(&self, task_id: &str) -> Result<Option<TaskView>, UnikoError> {
+        let rows = self
+            .kb
+            .query_cypher(
+                "MATCH (t:Task {task_id: $id}) \
+                 OPTIONAL MATCH (t)-[:PART_OF]->(g:Goal) \
+                 RETURN t.task_id AS task_id, t.title AS title, t.description AS description, \
+                        t.status AS status, t.priority AS priority, g.goal_id AS goal_id, \
+                        t.created_at AS created_at, t.completed_at AS completed_at LIMIT 1",
+                &str_param("id", task_id),
+            )
+            .await?;
+        Ok(rows.first().map(task_from_row))
     }
 
     /// All tasks assigned to the agent.
@@ -428,6 +450,64 @@ impl<'a> Goals<'a> {
     pub async fn create_task(&self, params: CreateTaskParams) -> Result<NodeId, UnikoError> {
         create_task(self.kb, self.agent_id, params).await
     }
+
+    /// Create a goal owned by this agent and return it as a [`GoalView`].
+    ///
+    /// Unlike [`create`](Self::create), the result carries the goal's
+    /// external id, which every other goal method takes. When
+    /// `params.goal_id` is `None` a fresh id is generated on each call; when
+    /// it is set, the goal is created under that id.
+    ///
+    /// Re-creating under an existing id overwrites the goal's properties
+    /// and keeps one link per relationship, so a retry with the same
+    /// explicit id is safe.
+    ///
+    /// If only the embedding step fails, the goal is still stored (to be
+    /// back-filled later) and this returns its view rather than the error,
+    /// so the caller never loses a generated id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when creation fails, or
+    /// [`UnikoError::Internal`] if the goal cannot be read back.
+    pub async fn create_view(&self, mut params: CreateGoalParams) -> Result<GoalView, UnikoError> {
+        let goal_id = params.goal_id.get_or_insert_with(new_id).clone();
+        keep_on_embedding_failure(create_goal(self.kb, self.agent_id, params).await, &goal_id)?;
+        self.get(&goal_id).await?.ok_or_else(|| {
+            UnikoError::Internal(format!("goal '{goal_id}' not readable after create"))
+        })
+    }
+
+    /// Create a task assigned to this agent and return it as a
+    /// [`TaskView`].
+    ///
+    /// Unlike [`create_task`](Self::create_task), the result carries the
+    /// task's external id, which every other task method takes. When
+    /// `params.task_id` is `None` a fresh id is generated on each call; when
+    /// it is set, the task is created under that id.
+    ///
+    /// Re-creating under an existing id overwrites the task's properties
+    /// and keeps one link per relationship, so a retry with the same
+    /// explicit id is safe.
+    ///
+    /// If only the embedding step fails, the task is still stored (to be
+    /// back-filled later) and this returns its view rather than the error,
+    /// so the caller never loses a generated id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when creation fails, or
+    /// [`UnikoError::Internal`] if the task cannot be read back.
+    pub async fn create_task_view(
+        &self,
+        mut params: CreateTaskParams,
+    ) -> Result<TaskView, UnikoError> {
+        let task_id = params.task_id.get_or_insert_with(new_id).clone();
+        keep_on_embedding_failure(create_task(self.kb, self.agent_id, params).await, &task_id)?;
+        self.task(&task_id).await?.ok_or_else(|| {
+            UnikoError::Internal(format!("task '{task_id}' not readable after create"))
+        })
+    }
 }
 
 /// Resolve a node by ext-id and update `props`; `Ok(false)` when unknown.
@@ -547,5 +627,22 @@ fn cell_json(row: &HashMap<String, Value>, key: &str) -> Option<JsonValue> {
     match row.get(key) {
         None | Some(Value::Null) => None,
         Some(v) => Some(value_to_json(v)),
+    }
+}
+
+/// Treat an embedding failure from `create_goal` / `create_task` as
+/// success: the node is already stored and only lacks its vector, so the
+/// caller should still get the view (and with it the id) back.
+fn keep_on_embedding_failure(
+    result: Result<NodeId, UnikoError>,
+    id: &str,
+) -> Result<(), UnikoError> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(UnikoError::Embedding(e)) => {
+            tracing::warn!(id, error = %e, "created without an embedding; returning the stored view");
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
 }

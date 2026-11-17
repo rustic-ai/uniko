@@ -176,6 +176,25 @@ def test_consolidate_reports_the_cortex_sweeps() -> None:
     assert isinstance(report.cycle, uniko.CycleStats)
     assert report.procedures.created >= 0 and report.topics.created >= 0
     assert isinstance(ConsolidationReport.from_native(report).cycle.facts_created, int)
+    # The default path asks no model to refine triples.
+    assert report.cycle.triples_requested == 0 and report.cycle.triples_refined == 0
+    assert report.cycle.triples_failed == 0
+    typed = ConsolidationReport.from_native(report)
+    assert typed.cycle.triples_requested == 0 and typed.cycle.triples_refined == 0
+    assert typed.cycle.triples_failed == 0
+
+
+def test_consolidate_rejects_unknown_triple_alias() -> None:
+    """``llm_triples_alias`` must name a registered generation model (#63)."""
+    memory = uniko.Uniko.in_memory_sync()
+    agent = memory.agent("a")
+    agent.session("s").observe_sync(uniko.Turn("alice", "I love hiking in the Alps"))
+    with pytest.raises(uniko.ConfigError, match="no-such-alias"):
+        agent.consolidate_sync(llm_triples_alias="no-such-alias")
+    typed = TypedUniko.in_memory_sync().agent("a")
+    typed.session("s").observe_sync(uniko.Turn("alice", "hello"))
+    with pytest.raises(uniko.ConfigError):
+        typed.consolidate_sync(llm_triples_alias="no-such-alias")
 
 
 def test_typed_wrappers_return_models() -> None:
@@ -238,6 +257,36 @@ def test_python_extractor_indexes_an_image() -> None:
     assert outcome.kind == "artifact" and outcome.chunk_node_ids
     assert seen and seen[0].modality == "image" and seen[0].mime == "image/png"
     view = agent.data.artifact_sync(outcome.artifact_id)
+    assert view is not None and "red zeppelin" in view.text
+
+
+def test_python_extractor_runs_for_streamed_sources() -> None:
+    """A source queued with ``submit_source`` uses the registered extractor (#62)."""
+    seen: list[uniko.ExtractRequest] = []
+
+    def caption(request: uniko.ExtractRequest) -> str:
+        seen.append(request)
+        return "a photo of a red zeppelin over the harbour"
+
+    memory = (
+        uniko.Uniko.builder()
+        .in_memory()
+        .streaming(True)
+        .extractor("image", caption)
+        .build_sync()
+    )
+    agent = memory.agent("viewer")
+    session = agent.session("photos")
+    png = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0])
+    session.submit_source_sync(
+        uniko.IngestSource.from_bytes(png).with_id("streamed-photo")
+    )
+    session.flush_sync()
+
+    assert len(seen) == 1 and seen[0].modality == "image"
+    health = memory.health()
+    assert health is not None and health.ingest.items_failed == 0
+    view = agent.data.artifact_sync("streamed-photo")
     assert view is not None and "red zeppelin" in view.text
 
 

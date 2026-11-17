@@ -192,13 +192,36 @@ canonical claim, stamping bitemporal validity, retiring contradicted beliefs —
 consolidation:
 
 ```rust
-let stats = agent.consolidate().await?;
-println!("{} observations -> {} facts", stats.observations_processed, stats.facts_created);
+let report = agent.consolidate().await?;
+println!(
+    "{} observations -> {} facts",
+    report.cycle.observations_processed, report.cycle.facts_created
+);
 ```
 
 It runs on the calling task and needs no streaming pipeline. An instance built with
 `.streaming(true)` also consolidates on its own, on a 20-observation threshold or a 15-minute
 timer, and runs the cortex sweep (procedure promotion, topic detection) afterwards.
+
+By default the cycle groups Observations by the rule-based triples extracted at ingest, with no
+model call. `consolidate_with` can refine each triple with a generation model first — one call per
+unprocessed Observation, so keep it to an offline or scheduled pass:
+
+```rust
+let report = agent
+    .consolidate_with(ConsolidateOptions::llm_triples("generate/my-llm"))
+    .await?;
+println!(
+    "{} of {} triples refined",
+    report.cycle.triples_refined, report.cycle.triples_requested
+);
+```
+
+The alias must be registered (for example with `UnikoBuilder::llm`) and be a generation model;
+otherwise `consolidate_with` returns `UnikoError::Config` before doing any work. Observations the
+model declines or answers unparseably keep their rule-based triple, as do those whose call fails;
+`report.cycle.triples_failed` counts the latter, so an unreachable endpoint shows up as
+`triples_failed == triples_requested` rather than as a silent fallback.
 
 ---
 

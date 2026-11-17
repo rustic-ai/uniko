@@ -38,6 +38,8 @@ pub use pdf::{
 pub use source::{IngestContext, IngestOutcome, ingest_source, resolve_mime};
 pub use uniko_pipes::types::{IngestData, IngestSource};
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use uniko_pipes::step::PipelineContext;
@@ -51,8 +53,27 @@ use uniko_store::UnikoError;
 ///   and calls [`atomic::ingest_message_atomic`].
 /// - `"artifact"`: deserializes [`IngestArtifact`](uniko_pipes::IngestArtifact)
 ///   and calls [`artifact::ingest_artifact`].
-#[derive(Debug)]
-pub struct IngestStep;
+/// - `"source"`: deserializes [`IngestSource`] and calls
+///   [`source::ingest_source`], routing image/audio/video through the
+///   step's [`ModalityRegistry`].
+///
+/// Build it with the same registry the direct ingest path uses
+/// ([`IngestStep::new`]) so a streamed source resolves the same
+/// extractors as an ingested one. [`IngestStep::default`] carries an empty
+/// registry, under which image/audio/video sources fail with
+/// [`UnikoError::Unsupported`].
+#[derive(Debug, Default)]
+pub struct IngestStep {
+    extractors: Arc<ModalityRegistry>,
+}
+
+impl IngestStep {
+    /// A step that resolves modality extractors from `extractors`.
+    #[must_use]
+    pub fn new(extractors: Arc<ModalityRegistry>) -> Self {
+        Self { extractors }
+    }
+}
 
 #[async_trait]
 impl uniko_pipes::Step for IngestStep {
@@ -133,10 +154,10 @@ impl uniko_pipes::Step for IngestStep {
                 let src: uniko_pipes::IngestSource =
                     deserialize_payload(&ctx.metadata, "IngestSource")?;
                 // Streamed sources aren't session-linked (same caveat as
-                // streamed turns); no registered extractors on this path.
+                // streamed turns).
                 let outcome = source::ingest_source(
                     &ctx.kb,
-                    &modality::ModalityRegistry::default(),
+                    &self.extractors,
                     src,
                     source::IngestContext::default(),
                 )

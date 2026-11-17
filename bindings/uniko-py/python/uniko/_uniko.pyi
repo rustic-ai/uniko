@@ -146,6 +146,9 @@ class CycleStats:
     facts_reinforced: int
     facts_invalidated: int
     drift_alerts: int
+    triples_requested: int
+    triples_refined: int
+    triples_failed: int
     def __repr__(self) -> str: ...
 
 @final
@@ -596,6 +599,8 @@ class Goals:
     def completed_sync(self) -> list[GoalView]: ...
     def get(self, goal_id: str) -> Awaitable[GoalView | None]: ...
     def get_sync(self, goal_id: str) -> GoalView | None: ...
+    def task(self, task_id: str) -> Awaitable[TaskView | None]: ...
+    def task_sync(self, task_id: str) -> TaskView | None: ...
     def tasks(self) -> Awaitable[list[TaskView]]: ...
     def tasks_sync(self) -> list[TaskView]: ...
     def tasks_in(self, phase: TaskPhase) -> Awaitable[list[TaskView]]: ...
@@ -670,6 +675,55 @@ class Goals:
         depends_on_task_id: str | None = ...,
         subtask_of_task_id: str | None = ...,
     ) -> int: ...
+    # Creation returning the created view (carries the generated id).
+    def create_view(
+        self,
+        title: str,
+        *,
+        goal_id: str | None = ...,
+        description: str | None = ...,
+        status: str | None = ...,
+        metrics: Any | None = ...,
+        guardrails: Any | None = ...,
+        deadline: datetime.datetime | None = ...,
+        parent_goal_id: str | None = ...,
+    ) -> Awaitable[GoalView]: ...
+    def create_view_sync(
+        self,
+        title: str,
+        *,
+        goal_id: str | None = ...,
+        description: str | None = ...,
+        status: str | None = ...,
+        metrics: Any | None = ...,
+        guardrails: Any | None = ...,
+        deadline: datetime.datetime | None = ...,
+        parent_goal_id: str | None = ...,
+    ) -> GoalView: ...
+    def create_task_view(
+        self,
+        title: str,
+        *,
+        task_id: str | None = ...,
+        description: str | None = ...,
+        status: str | None = ...,
+        priority: float | None = ...,
+        goal_id: str | None = ...,
+        depends_on_task_id: str | None = ...,
+        subtask_of_task_id: str | None = ...,
+    ) -> Awaitable[TaskView]: ...
+    def create_task_view_sync(
+        self,
+        title: str,
+        *,
+        task_id: str | None = ...,
+        description: str | None = ...,
+        status: str | None = ...,
+        priority: float | None = ...,
+        goal_id: str | None = ...,
+        depends_on_task_id: str | None = ...,
+        subtask_of_task_id: str | None = ...,
+    ) -> TaskView: ...
     def __repr__(self) -> str: ...
 
 @final
@@ -810,8 +864,12 @@ class Agent:
     def restore_source(self, source_id: str) -> Awaitable[bool]: ...
     def retire_source_sync(self, source_id: str) -> bool: ...
     def restore_source_sync(self, source_id: str) -> bool: ...
-    def consolidate(self) -> Awaitable[ConsolidationReport]: ...
-    def consolidate_sync(self) -> ConsolidationReport: ...
+    def consolidate(
+        self, *, llm_triples_alias: str | None = ...
+    ) -> Awaitable[ConsolidationReport]: ...
+    def consolidate_sync(
+        self, *, llm_triples_alias: str | None = ...
+    ) -> ConsolidationReport: ...
     def assert_fact(
         self,
         subject: str,

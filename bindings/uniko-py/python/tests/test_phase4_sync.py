@@ -82,6 +82,23 @@ def test_sync_goals() -> None:
     assert isinstance(tasks, list)
 
 
+def test_sync_create_views_return_generated_ids() -> None:
+    uni = uniko.Uniko.in_memory_sync()
+    agent = uni.agent("assistant")
+    agent.session("s1").observe_sync(uniko.Turn("assistant", "planning session"))
+
+    goal = agent.goals.create_view_sync("ship the sync API")
+    assert goal.goal_id
+    task = agent.goals.create_task_view_sync("write tests", goal_id=goal.goal_id)
+    assert task.task_id and task.goal_id == goal.goal_id
+
+    assert agent.goals.start_task_sync(task.task_id) is True
+    assert agent.goals.complete_task_sync(task.task_id) is True
+    fetched = agent.goals.task_sync(task.task_id)
+    assert fetched is not None and fetched.phase == "completed"
+    assert agent.goals.get_sync(goal.goal_id) is not None
+
+
 def test_sync_assume_rolls_back() -> None:
     uni = uniko.Uniko.in_memory_sync()
     agent = uni.agent("assistant")

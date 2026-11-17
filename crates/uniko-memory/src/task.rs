@@ -105,13 +105,8 @@ pub async fn create_task(
         .await?;
 
     // ── Mandatory ASSIGNED_TO edge (Task → Participant) ──
-    kb.create_edge(
-        edges::ASSIGNED_TO,
-        task_node,
-        participant_id,
-        &HashMap::new(),
-    )
-    .await?;
+    kb.ensure_edge(edges::ASSIGNED_TO, task_node, participant_id)
+        .await?;
 
     // ── Optional PART_OF (Task → Goal) ──
     if let Some(goal_id) = params.goal_id.as_deref() {
@@ -180,8 +175,7 @@ async fn link_best_effort(
         .await?
     {
         Some(target) => {
-            kb.create_edge(edge_type, from, target.0, &HashMap::new())
-                .await?;
+            kb.ensure_edge(edge_type, from, target.0).await?;
         }
         None => {
             tracing::debug!(

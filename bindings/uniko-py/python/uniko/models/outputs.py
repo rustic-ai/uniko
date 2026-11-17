@@ -305,6 +305,13 @@ class CycleStats(BaseModel):
     facts_reinforced: int
     facts_invalidated: int
     drift_alerts: int
+    #: Observations sent for LLM triple refinement (0 on the default path).
+    triples_requested: int = 0
+    #: Observations whose triple was replaced by a parsed LLM reply; the
+    #: rest kept the rule-based triple.
+    triples_refined: int = 0
+    #: Observations whose LLM call failed outright (endpoint down, timeout).
+    triples_failed: int = 0
 
     @classmethod
     def from_native(cls, native: Any) -> "CycleStats":

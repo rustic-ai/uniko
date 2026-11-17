@@ -204,6 +204,14 @@ class TypedGoals:
         g = self._inner.get_sync(goal_id)
         return GoalView.from_native(g) if g is not None else None
 
+    async def task(self, task_id: str) -> Optional[TaskView]:
+        t = await self._inner.task(task_id)
+        return TaskView.from_native(t) if t is not None else None
+
+    def task_sync(self, task_id: str) -> Optional[TaskView]:
+        t = self._inner.task_sync(task_id)
+        return TaskView.from_native(t) if t is not None else None
+
     async def tasks(self) -> list[TaskView]:
         return [TaskView.from_native(t) for t in await self._inner.tasks()]
 
@@ -291,6 +299,29 @@ class TypedGoals:
 
     def create_task_sync(self, spec: Any) -> int:
         return self._inner.create_task_sync(spec.title, **spec.to_create_task_kwargs())
+
+    # Creation ← specs, returning the created view (carries the generated id).
+    async def create_view(self, spec: Any) -> GoalView:
+        g = await self._inner.create_view(spec.title, **spec.to_create_kwargs())
+        return GoalView.from_native(g)
+
+    def create_view_sync(self, spec: Any) -> GoalView:
+        return GoalView.from_native(
+            self._inner.create_view_sync(spec.title, **spec.to_create_kwargs())
+        )
+
+    async def create_task_view(self, spec: Any) -> TaskView:
+        t = await self._inner.create_task_view(
+            spec.title, **spec.to_create_task_kwargs()
+        )
+        return TaskView.from_native(t)
+
+    def create_task_view_sync(self, spec: Any) -> TaskView:
+        return TaskView.from_native(
+            self._inner.create_task_view_sync(
+                spec.title, **spec.to_create_task_kwargs()
+            )
+        )
 
 
 # ── Session ────────────────────────────────────────────────────────────────
@@ -529,11 +560,17 @@ class TypedAgent:
     def delete_session_sync(self, session_id: str) -> DeletionReport:
         return DeletionReport.from_native(self._inner.delete_session_sync(session_id))
 
-    async def consolidate(self) -> ConsolidationReport:
-        return ConsolidationReport.from_native(await self._inner.consolidate())
+    async def consolidate(
+        self, *, llm_triples_alias: Optional[str] = None
+    ) -> ConsolidationReport:
+        native = await self._inner.consolidate(llm_triples_alias=llm_triples_alias)
+        return ConsolidationReport.from_native(native)
 
-    def consolidate_sync(self) -> ConsolidationReport:
-        return ConsolidationReport.from_native(self._inner.consolidate_sync())
+    def consolidate_sync(
+        self, *, llm_triples_alias: Optional[str] = None
+    ) -> ConsolidationReport:
+        native = self._inner.consolidate_sync(llm_triples_alias=llm_triples_alias)
+        return ConsolidationReport.from_native(native)
 
     # Facts, actions, episodes, observations. Keyword arguments pass
     # through unchanged; see the native methods for the full list.
