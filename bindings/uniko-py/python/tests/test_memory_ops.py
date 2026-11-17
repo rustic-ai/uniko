@@ -241,6 +241,34 @@ def test_python_extractor_indexes_an_image() -> None:
     assert view is not None and "red zeppelin" in view.text
 
 
+def test_python_extractor_runs_for_streamed_sources() -> None:
+    """A source queued with ``submit_source`` uses the registered extractor (#62)."""
+    seen: list[uniko.ExtractRequest] = []
+
+    def caption(request: uniko.ExtractRequest) -> str:
+        seen.append(request)
+        return "a photo of a red zeppelin over the harbour"
+
+    memory = (
+        uniko.Uniko.builder()
+        .in_memory()
+        .streaming(True)
+        .extractor("image", caption)
+        .build_sync()
+    )
+    agent = memory.agent("viewer")
+    session = agent.session("photos")
+    png = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0])
+    session.submit_source_sync(uniko.IngestSource.from_bytes(png).with_id("streamed-photo"))
+    session.flush_sync()
+
+    assert len(seen) == 1 and seen[0].modality == "image"
+    health = memory.health()
+    assert health is not None and health.ingest.items_failed == 0
+    view = agent.data.artifact_sync("streamed-photo")
+    assert view is not None and "red zeppelin" in view.text
+
+
 def test_extractor_errors() -> None:
     with pytest.raises(uniko.ConfigError, match="image, audio or video"):
         uniko.Uniko.builder().extractor("smell", lambda r: "")

@@ -187,6 +187,191 @@ async fn streaming_submit_source_then_flush_ingests() {
     memory.shutdown().await.expect("shutdown");
 }
 
+/// A streamed image/audio/video source resolves the same registered
+/// extractors as a directly ingested one (issue #62).
+#[tokio::test]
+async fn streaming_submit_source_uses_registered_extractors() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use uniko_pipes::content::Mime;
+
+    use crate::{Modality, TextExtractor};
+
+    let counted = |modality: Modality, text: &'static str, calls: Arc<AtomicUsize>| {
+        Arc::new(TextExtractor::new(modality, move |req| {
+            assert_eq!(req.modality, modality);
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(text.to_string())
+        }))
+    };
+    let image_calls = Arc::new(AtomicUsize::new(0));
+    let audio_calls = Arc::new(AtomicUsize::new(0));
+    let video_calls = Arc::new(AtomicUsize::new(0));
+
+    let memory = match Uniko::builder()
+        .in_memory()
+        .streaming(true)
+        .extractor(counted(
+            Modality::Image,
+            "a photo of a red zeppelin over the harbour",
+            image_calls.clone(),
+        ))
+        .extractor(counted(
+            Modality::Audio,
+            "a voice memo about the quarterly budget",
+            audio_calls.clone(),
+        ))
+        .extractor(counted(
+            Modality::Video,
+            "a screen recording of the deploy dashboard",
+            video_calls.clone(),
+        ))
+        .build()
+        .await
+    {
+        Ok(memory) => memory,
+        Err(e) => {
+            eprintln!("skipping: streaming instance unavailable: {e}");
+            return;
+        }
+    };
+    let agent = memory.agent("viewer");
+    let session = agent.session("stream-media");
+
+    for (id, mime) in [
+        ("img-1", "image/png"),
+        ("aud-1", "audio/wav"),
+        ("vid-1", "video/mp4"),
+    ] {
+        let source = IngestSource::bytes(vec![0x42; 16])
+            .with_mime(Mime::parse(mime).expect("valid mime"))
+            .with_id(id);
+        session
+            .submit_source(source)
+            .await
+            .expect("submit_source enqueues");
+    }
+    session.flush().await.expect("flush drains the pipeline");
+
+    let dead = agent
+        .kb()
+        .query_nodes(labels::DEAD_LETTER, None, None)
+        .await
+        .expect("query dead letters");
+    let errors: Vec<String> = dead
+        .iter()
+        .filter_map(|(_, props)| match props.get("error") {
+            Some(Value::String(e)) => Some(e.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        errors.iter().all(|e| !e.contains("unsupported modality")),
+        "a streamed source missed its registered extractor: {errors:?}"
+    );
+
+    // Every extractor ran exactly once, whether or not the embedder was
+    // available to finish the artifact afterwards.
+    assert_eq!(image_calls.load(Ordering::SeqCst), 1, "image extractor");
+    assert_eq!(audio_calls.load(Ordering::SeqCst), 1, "audio extractor");
+    assert_eq!(video_calls.load(Ordering::SeqCst), 1, "video extractor");
+
+    if !errors.is_empty() {
+        eprintln!("skipping artifact checks: streamed media failed downstream: {errors:?}");
+        return;
+    }
+    let health = memory.health().expect("streaming instance reports health");
+    assert_eq!(health.ingest.items_failed, 0, "no streamed source failed");
+
+    for (id, expected) in [
+        ("img-1", "red zeppelin"),
+        ("aud-1", "quarterly budget"),
+        ("vid-1", "deploy dashboard"),
+    ] {
+        let view = agent
+            .data()
+            .artifact(id)
+            .await
+            .expect("artifact read")
+            .unwrap_or_else(|| panic!("streamed {id} became an artifact"));
+        assert!(view.text.contains(expected), "{id}: {}", view.text);
+    }
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
+/// A failing extractor on the streaming path is counted and dead-lettered,
+/// never recorded as a successful extraction.
+#[tokio::test]
+async fn streaming_submit_source_surfaces_extractor_errors() {
+    use std::sync::Arc;
+
+    use uniko_pipes::content::Mime;
+
+    use crate::{Modality, TextExtractor};
+
+    let failing = TextExtractor::new(Modality::Image, |_| {
+        Err(UnikoError::Internal("captioner offline".into()))
+    });
+    let memory = match Uniko::builder()
+        .in_memory()
+        .streaming(true)
+        .extractor(Arc::new(failing))
+        .build()
+        .await
+    {
+        Ok(memory) => memory,
+        Err(e) => {
+            eprintln!("skipping: streaming instance unavailable: {e}");
+            return;
+        }
+    };
+    let agent = memory.agent("viewer");
+    let session = agent.session("stream-media-fail");
+
+    session
+        .submit_source(
+            IngestSource::bytes(vec![0x42; 16])
+                .with_mime(Mime::parse("image/png").expect("valid mime"))
+                .with_id("img-broken"),
+        )
+        .await
+        .expect("submit_source enqueues");
+    session.flush().await.expect("flush drains the pipeline");
+
+    let health = memory.health().expect("streaming instance reports health");
+    assert_eq!(health.ingest.items_failed, 1, "the failure is counted");
+
+    let dead = agent
+        .kb()
+        .query_nodes(labels::DEAD_LETTER, None, None)
+        .await
+        .expect("query dead letters");
+    assert_eq!(dead.len(), 1, "the failure is dead-lettered");
+    let error = match dead[0].1.get("error") {
+        Some(Value::String(e)) => e.clone(),
+        other => panic!("dead letter has no error: {other:?}"),
+    };
+    assert!(error.contains("captioner offline"), "{error}");
+
+    assert!(
+        agent
+            .data()
+            .artifact("img-broken")
+            .await
+            .expect("artifact read")
+            .is_none(),
+        "a failed extraction is not an artifact"
+    );
+
+    drop(session);
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+}
+
 /// Streaming `submit()` + `flush()` ingests conversation turns.
 #[tokio::test]
 async fn streaming_submit_then_flush_ingests() {
