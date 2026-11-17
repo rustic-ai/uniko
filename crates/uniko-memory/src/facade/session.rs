@@ -288,9 +288,14 @@ impl Session {
     /// Enqueue a MIME-routed blob ([`IngestSource`]) for streaming ingest.
     ///
     /// The async analogue of [`ingest`](Session::ingest): documents and PDFs
-    /// flow through the pipeline; image/audio/video require a registered
-    /// extractor (none on the streaming path → [`UnikoError::Unsupported`]
-    /// at processing time). Streamed sources are **not** session-linked, the
+    /// flow through the pipeline; image/audio/video use the modality
+    /// extractors registered on the instance
+    /// ([`UnikoBuilder::extractor`](crate::UnikoBuilder::extractor)), the
+    /// same ones [`ingest`](Session::ingest) uses. A modality with no
+    /// registered extractor fails with [`UnikoError::Unsupported`] when the
+    /// worker processes it; that failure is counted in
+    /// [`Uniko::health`](crate::Uniko::health) and dead-lettered, never
+    /// reported as an ingested artifact. Streamed sources are **not** session-linked, the
     /// same caveat as [`submit`](Session::submit). Await
     /// [`flush`](Session::flush) before a recall that must see them.
     ///

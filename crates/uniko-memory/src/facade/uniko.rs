@@ -491,9 +491,15 @@ impl UnikoBuilder {
         };
         crate::rules::register_stdlib_rules(&kb).await?;
 
+        // One registry for both paths: a source queued through the streaming
+        // pipeline resolves the same modality extractors as one ingested
+        // directly.
+        let extractors = Arc::new(self.extractors);
+
         let streaming = if self.streaming {
-            let steps: Vec<Box<dyn uniko_pipes::Step>> =
-                vec![Box::new(uniko_extract::ingest::IngestStep)];
+            let steps: Vec<Box<dyn uniko_pipes::Step>> = vec![Box::new(
+                uniko_extract::ingest::IngestStep::new(extractors.clone()),
+            )];
             let pipeline = PipelineSystem::new(pipeline_config, Arc::new(kb.clone()), steps);
             Some(Arc::new(pipeline))
         } else {
@@ -501,11 +507,7 @@ impl UnikoBuilder {
         };
 
         Ok(Uniko::from_parts(
-            kb,
-            llm_alias,
-            streaming,
-            self.scope,
-            Arc::new(self.extractors),
+            kb, llm_alias, streaming, self.scope, extractors,
         ))
     }
 }
