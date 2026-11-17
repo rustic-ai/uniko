@@ -789,6 +789,23 @@ class TypedUnikoBuilder:
         self._inner = self._inner.answer_alias(alias)
         return self
 
+    def runtime(self, runtime: Any) -> "TypedUnikoBuilder":
+        """A native ``SharedRuntime`` from ``build_runtime()``."""
+        self._inner = self._inner.runtime(runtime)
+        return self
+
+    def prefetch(self, policy: str) -> "TypedUnikoBuilder":
+        """``"eager"`` (default), ``"lazy"`` or ``"background"``."""
+        self._inner = self._inner.prefetch(policy)
+        return self
+
+    async def build_runtime(self) -> Any:
+        """A native ``SharedRuntime`` for this builder's models."""
+        return await self._inner.build_runtime()
+
+    def build_runtime_sync(self) -> Any:
+        return self._inner.build_runtime_sync()
+
     def streaming(self, on: bool) -> "TypedUnikoBuilder":
         self._inner = self._inner.streaming(on)
         return self

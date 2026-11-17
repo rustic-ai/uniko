@@ -10,7 +10,7 @@ use uniko_pipes::health::PipelineHealth;
 use uniko_store::config::{EmbeddingConfig, NlpConfig, RerankerConfig, UnikoConfig};
 use uniko_store::repository::policy::Membership;
 use uniko_store::xervo::{ModelAliasSpec, ModelTask, WarmupPolicy};
-use uniko_store::{DeletionReport, KnowledgeBase, UnikoError};
+use uniko_store::{DeletionReport, KnowledgeBase, PrefetchPolicy, SharedRuntime, UnikoError};
 
 use super::RecallScope;
 use crate::Agent;
@@ -351,6 +351,8 @@ pub struct UnikoBuilder {
     streaming: bool,
     scope: RecallScope,
     extractors: ModalityRegistry,
+    runtime: Option<SharedRuntime>,
+    prefetch: PrefetchPolicy,
 }
 
 impl UnikoBuilder {
@@ -477,28 +479,65 @@ impl UnikoBuilder {
         self
     }
 
-    /// Build the [`Uniko`] instance.
+    /// Open the store over a [`SharedRuntime`] instead of loading its own
+    /// models, so several instances load each model once.
+    ///
+    /// Build the runtime with [`build_runtime`](UnikoBuilder::build_runtime)
+    /// from a builder with the same models (embedding, reranker, NLP and
+    /// LLMs). [`build`](UnikoBuilder::build) fails with
+    /// [`UnikoError::Config`] when the runtime does not serve this
+    /// builder's models. [`prefetch`](UnikoBuilder::prefetch) does not
+    /// apply: the runtime's own policy already decided that.
+    ///
+    /// Shutting this instance down leaves the runtime loaded for the
+    /// others; it is freed when the last handle and store holding it go.
+    #[must_use]
+    pub fn runtime(mut self, runtime: SharedRuntime) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// When to load models: [`PrefetchPolicy::Eager`] (the default) loads
+    /// them all before [`build`](UnikoBuilder::build) returns, `Lazy` on
+    /// first use, and `Background` on a background task.
+    ///
+    /// With any policy, a model that fails to load is recorded (see
+    /// [`Uniko::capabilities`]) and the others still load.
+    #[must_use]
+    pub fn prefetch(mut self, policy: PrefetchPolicy) -> Self {
+        self.prefetch = policy;
+        self
+    }
+
+    /// Build a [`SharedRuntime`] for this builder's models (embedding,
+    /// reranker, NLP, catalog file and LLMs), loading them as
+    /// [`prefetch`](UnikoBuilder::prefetch) says. Pass it to
+    /// [`runtime`](UnikoBuilder::runtime) on each builder that should share
+    /// it. The store settings (path, streaming, scope, extractors) are not
+    /// used here.
     ///
     /// # Errors
     ///
-    /// - [`UnikoError::Config`] when an [`LlmSpec`] is invalid (unknown or
-    ///   non-generation provider, bad or secret-bearing options, an alias
-    ///   registered twice) or the answer alias is missing from the catalog
-    ///   or is not a generation model.
-    /// - Store-open failures (config validation, model warmup).
-    pub async fn build(self) -> Result<Uniko, UnikoError> {
-        let mut config = self.config.unwrap_or_default();
-        if let Some(embedding) = self.embedding {
-            config.embedding = embedding;
-        }
-        if let Some(reranker) = self.reranker {
-            config.reranker = reranker;
-        }
-        if let Some(nlp) = self.nlp {
-            config.nlp = nlp;
-        }
-        let pipeline_config = PipelineConfig::from_uniko_config(&config);
+    /// [`UnikoError::Config`] for an invalid config or [`LlmSpec`], as for
+    /// [`build`](UnikoBuilder::build).
+    pub async fn build_runtime(self) -> Result<SharedRuntime, UnikoError> {
+        let prefetch = self.prefetch;
+        let (config, extra_catalog) = self.models().await?;
+        SharedRuntime::build(&config, extra_catalog, prefetch).await
+    }
 
+    /// The merged config and the validated LLM catalog entries.
+    async fn models(&self) -> Result<(UnikoConfig, Vec<ModelAliasSpec>), UnikoError> {
+        let mut config = self.config.clone().unwrap_or_default();
+        if let Some(embedding) = &self.embedding {
+            config.embedding = embedding.clone();
+        }
+        if let Some(reranker) = &self.reranker {
+            config.reranker = reranker.clone();
+        }
+        if let Some(nlp) = &self.nlp {
+            config.nlp = nlp.clone();
+        }
         let mut seen = std::collections::HashSet::new();
         for spec in &self.llms {
             if !seen.insert(spec.alias.as_str()) {
@@ -509,22 +548,48 @@ impl UnikoBuilder {
             }
             spec.validate().await?;
         }
+        let extra_catalog = self
+            .llms
+            .iter()
+            .cloned()
+            .map(LlmSpec::into_alias_spec)
+            .collect();
+        Ok((config, extra_catalog))
+    }
+
+    /// Build the [`Uniko`] instance.
+    ///
+    /// # Errors
+    ///
+    /// - [`UnikoError::Config`] when an [`LlmSpec`] is invalid (unknown or
+    ///   non-generation provider, bad or secret-bearing options, an alias
+    ///   registered twice) or the answer alias is missing from the catalog
+    ///   or is not a generation model.
+    /// - Store-open failures (config validation, model warmup).
+    pub async fn build(self) -> Result<Uniko, UnikoError> {
+        let (config, extra_catalog) = self.models().await?;
+        let pipeline_config = PipelineConfig::from_uniko_config(&config);
         let llm_alias = self
             .answer_alias
             .clone()
             .or_else(|| self.llms.first().map(|l| l.alias.clone()));
-        let extra_catalog: Vec<ModelAliasSpec> = self
-            .llms
-            .into_iter()
-            .map(LlmSpec::into_alias_spec)
-            .collect();
 
-        let kb = match self.location {
-            Location::InMemory => {
-                KnowledgeBase::in_memory_with_xervo(config, extra_catalog).await?
+        let kb = match (&self.runtime, self.location) {
+            (Some(runtime), location) => {
+                check_llms_served(runtime, &extra_catalog)?;
+                match location {
+                    Location::InMemory => KnowledgeBase::in_memory_shared(config, runtime).await?,
+                    Location::Path(path) => {
+                        KnowledgeBase::open_shared(path, config, runtime).await?
+                    }
+                }
             }
-            Location::Path(path) => {
-                KnowledgeBase::open_with_xervo(path, config, extra_catalog).await?
+            (None, Location::InMemory) => {
+                KnowledgeBase::in_memory_with_prefetch(config, extra_catalog, self.prefetch).await?
+            }
+            (None, Location::Path(path)) => {
+                KnowledgeBase::open_with_prefetch(path, config, extra_catalog, self.prefetch)
+                    .await?
             }
         };
         if let Some(alias) = &llm_alias {
@@ -553,10 +618,33 @@ impl UnikoBuilder {
     }
 }
 
+/// Check that a shared runtime serves every LLM the builder registered.
+///
+/// LLMs belong to the runtime (they are part of its catalog), so a builder
+/// using one may repeat them, as long as they match what the runtime holds.
+fn check_llms_served(runtime: &SharedRuntime, llms: &[ModelAliasSpec]) -> Result<(), UnikoError> {
+    let held = runtime.model_entries();
+    for spec in llms {
+        let matches = held.iter().any(|e| {
+            e.alias == spec.alias
+                && e.provider_id == spec.provider_id
+                && e.model_id == spec.model_id
+        });
+        if !matches {
+            return Err(UnikoError::Config(format!(
+                "LLM alias '{}' is not in the shared runtime as registered; add it to \
+                 the builder that built the runtime",
+                spec.alias
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Check that the answer alias names a generation model in `kb`'s catalog.
 fn check_answer_alias(kb: &KnowledgeBase, alias: &str) -> Result<(), UnikoError> {
-    // A store always knows its catalog here: the builder never opens one
-    // over an external runtime.
+    // A store always knows its catalog here: the builder opens over its own
+    // catalog or a SharedRuntime, which carries one.
     let Some(entries) = kb.model_entries() else {
         return Ok(());
     };

@@ -5156,3 +5156,101 @@ async fn capabilities_report_models_features_and_the_answer_alias() {
     let json = serde_json::to_value(memory.capabilities().await).unwrap();
     assert_eq!(json["models"][0]["state"], "loaded", "{json}");
 }
+
+/// Two instances over one runtime keep separate memories, and shutting one
+/// down leaves the other working.
+#[tokio::test]
+async fn instances_sharing_a_runtime_keep_their_own_memory() {
+    let Ok(runtime) = Uniko::builder().build_runtime().await else {
+        eprintln!("skipping: runtime unavailable");
+        return;
+    };
+    let Some(first) = build_or_skip(Uniko::builder().runtime(runtime.clone())).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Some(second) =
+        build_or_skip(Uniko::builder().path(dir.path()).runtime(runtime.clone())).await
+    else {
+        return;
+    };
+
+    for (memory, text) in [
+        (&first, "I love hiking in the mountains every weekend"),
+        (&second, "My favourite food is a spicy ramen with extra egg"),
+    ] {
+        let agent = memory.agent("assistant");
+        let mut session = agent.session("chat-1");
+        match session.observe(Turn::new("alice", text)).await {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => return,
+            Err(e) => panic!("observe failed: {e}"),
+        }
+    }
+
+    let seen = |bundle: crate::recall::ContextBundle| {
+        bundle
+            .items
+            .iter()
+            .map(|i| i.content.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let in_second = seen(
+        second
+            .agent("assistant")
+            .recall("hiking mountains")
+            .await
+            .unwrap(),
+    );
+    assert!(!in_second.contains("hiking"), "{in_second}");
+
+    first.shutdown().await.expect("shutdown first");
+    let in_second = seen(second.agent("assistant").recall("ramen").await.unwrap());
+    assert!(in_second.contains("ramen"), "{in_second}");
+
+    let caps = second.capabilities().await;
+    assert!(
+        caps.models.is_some(),
+        "a shared runtime carries its catalog"
+    );
+    second.shutdown().await.expect("shutdown second");
+}
+
+#[tokio::test]
+async fn a_builder_over_a_runtime_rejects_an_llm_the_runtime_lacks() {
+    use crate::LlmSpec;
+
+    let Ok(runtime) = Uniko::builder()
+        .prefetch(uniko_store::PrefetchPolicy::Lazy)
+        .build_runtime()
+        .await
+    else {
+        return;
+    };
+    let err = Uniko::builder()
+        .runtime(runtime)
+        .llm(LlmSpec::llamacpp("gen/a", "stub", "http://127.0.0.1:9/v1"))
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("'gen/a'") && m.contains("shared runtime")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn lazy_prefetch_leaves_models_unloaded() {
+    use uniko_store::{ModelState, PrefetchPolicy};
+
+    let builder = Uniko::builder().prefetch(PrefetchPolicy::Lazy);
+    let Some(memory) = build_or_skip(builder).await else {
+        return;
+    };
+    let models = memory.capabilities().await.models.unwrap();
+    assert!(
+        models.iter().all(|m| m.state == ModelState::NotLoaded),
+        "{models:?}"
+    );
+}

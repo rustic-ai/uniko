@@ -190,9 +190,9 @@ flowchart TB
 
 !!! note "Sharing one model runtime across knowledge bases"
     If you open many knowledge bases in one process, you don't want each one to load its own ONNX
-    sessions. Build a shared runtime once with `KnowledgeBase::build_shared_runtime` and hand it to
-    each `KnowledgeBase::open_with_runtime` call so the model weights and activation arenas stay
-    resident exactly once.
+    sessions. Build a `SharedRuntime` once (`UnikoBuilder::build_runtime`) and pass it to each
+    builder with `.runtime(...)` (or `KnowledgeBase::open_shared` one layer down) so the model
+    weights and activation arenas stay resident exactly once.
 
 ## Advanced: Cargo feature flags
 

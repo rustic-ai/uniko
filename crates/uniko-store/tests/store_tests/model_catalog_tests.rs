@@ -237,8 +237,10 @@ async fn model_status_redacts_endpoints_and_never_shows_options() {
     kb.shutdown().await.unwrap();
 }
 
+/// The old shared-runtime path still works but knows no catalog.
 #[tokio::test]
-async fn a_store_over_a_shared_runtime_has_no_model_status() {
+#[allow(deprecated)]
+async fn a_store_over_a_bare_runtime_has_no_model_status() {
     let config = UnikoConfig::default();
     let runtime = KnowledgeBase::build_shared_runtime(&config, &[])
         .await
@@ -248,5 +250,144 @@ async fn a_store_over_a_shared_runtime_has_no_model_status() {
         .await
         .unwrap();
     assert!(kb.model_status().await.is_none());
+    kb.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn stores_over_a_shared_runtime_share_its_load_state() {
+    use uniko_store::{ModelState, PrefetchPolicy, SharedRuntime};
+
+    let config = UnikoConfig::default();
+    let runtime = SharedRuntime::build(&config, Vec::new(), PrefetchPolicy::Lazy)
+        .await
+        .unwrap();
+    let a = KnowledgeBase::in_memory_shared(config.clone(), &runtime)
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let b = KnowledgeBase::open_shared(dir.path(), config.clone(), &runtime)
+        .await
+        .unwrap();
+
+    let statuses = b
+        .model_status()
+        .await
+        .expect("a shared runtime carries its catalog");
+    assert!(
+        statuses.iter().all(|s| s.state == ModelState::NotLoaded),
+        "{statuses:?}"
+    );
+
+    a.embed("embed/default", &["hello"]).await.unwrap();
+    let statuses = b.model_status().await.unwrap();
+    assert_eq!(
+        status_of(&statuses, "embed/default").state,
+        ModelState::Loaded
+    );
+
+    // Shutting one store down leaves the runtime serving the other.
+    a.shutdown().await.unwrap();
+    b.embed("embed/default", &["still here"]).await.unwrap();
+    b.shutdown().await.unwrap();
+
+    // A persistent store reopens over the same runtime.
+    let b = KnowledgeBase::open_shared(dir.path(), config, &runtime)
+        .await
+        .unwrap();
+    b.embed("embed/default", &["reopened"]).await.unwrap();
+    b.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn open_shared_rejects_a_runtime_built_for_other_models() {
+    use uniko_store::config::EmbeddingConfig;
+    use uniko_store::{PrefetchPolicy, SharedRuntime};
+
+    let mut lean = UnikoConfig::default();
+    lean.reranker.enabled = false;
+    let runtime = SharedRuntime::build(&lean, Vec::new(), PrefetchPolicy::Lazy)
+        .await
+        .unwrap();
+
+    let mut other_embedder = lean.clone();
+    other_embedder.embedding = EmbeddingConfig::nomic_v15();
+    let err = KnowledgeBase::in_memory_shared(other_embedder, &runtime)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("'embed/default'") && m.contains("model")),
+        "{err}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let err = KnowledgeBase::open_shared(dir.path(), UnikoConfig::default(), &runtime)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("rerank/default") && m.contains("does not have")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn background_prefetch_returns_first_and_loads_later() {
+    use uniko_store::{ModelState, PrefetchPolicy, SharedRuntime};
+
+    let mut config = UnikoConfig::default();
+    config.reranker.enabled = false;
+    let runtime = SharedRuntime::build(&config, Vec::new(), PrefetchPolicy::Background)
+        .await
+        .unwrap();
+    let kb = KnowledgeBase::in_memory_shared(config, &runtime)
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let statuses = kb.model_status().await.unwrap();
+        if statuses.iter().all(|s| s.state != ModelState::NotLoaded) {
+            assert_eq!(
+                status_of(&statuses, "embed/default").state,
+                ModelState::Loaded
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "prefetch never finished: {statuses:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    kb.shutdown().await.unwrap();
+}
+
+/// The BGE-M3 hybrid alias opens and embeds over a shared runtime (a large
+/// download, so opt in with `EXPENSIVE_TESTS=1`).
+#[tokio::test]
+async fn a_hybrid_embedder_works_over_a_shared_runtime() {
+    use uniko_store::config::EmbeddingConfig;
+    use uniko_store::{PrefetchPolicy, SharedRuntime};
+
+    if std::env::var("EXPENSIVE_TESTS").as_deref() != Ok("1") {
+        eprintln!("skipping: set EXPENSIVE_TESTS=1 to load BGE-M3");
+        return;
+    }
+    let mut config = UnikoConfig {
+        embedding: EmbeddingConfig::bge_m3(),
+        ..Default::default()
+    };
+    config.reranker.enabled = false;
+    let runtime = SharedRuntime::build(&config, Vec::new(), PrefetchPolicy::Lazy)
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let kb = KnowledgeBase::open_shared(dir.path(), config.clone(), &runtime)
+        .await
+        .unwrap();
+    kb.shutdown().await.unwrap();
+    let kb = KnowledgeBase::open_shared(dir.path(), config, &runtime)
+        .await
+        .expect("a hybrid store reopens over a shared runtime");
+    let vectors = kb.embed("embed/default", &["hello"]).await.unwrap();
+    assert_eq!(vectors[0].len(), 1024);
     kb.shutdown().await.unwrap();
 }

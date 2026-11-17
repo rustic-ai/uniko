@@ -54,7 +54,7 @@ The central type is [`KnowledgeBase`](../reference/api.md), the typed handle eve
 !!! tip "Clean API boundary"
     uni-db is an implementation detail. The product crates — `uniko-{memory,extract,cortex,pipes}` — reach the graph through `uniko-store`'s typed API, and a CI grep gate enforces it by forbidding `use uni_db` in their `src/`. The few uni-db value types higher crates need (`Value`, `Transaction`, `temporal::Btic`, `xervo::{GenerationOptions, Message}`) are re-exported from `uniko-store`, so callers write `use uniko_store::Value;`. The payoff: the rest of the system is insulated from database internals.
 
-A second re-export, `ModelRuntime` (from `uni-xervo`), lets multi-KnowledgeBase workflows share one ONNX session via `KnowledgeBase::build_shared_runtime` and `open_with_runtime`.
+A second re-export, `ModelRuntime` (from `uni-xervo`), backs `SharedRuntime`, which lets multi-KnowledgeBase workflows share one ONNX session via `SharedRuntime::build` and `KnowledgeBase::open_shared`.
 
 ### uniko-pipes — pipeline infrastructure
 

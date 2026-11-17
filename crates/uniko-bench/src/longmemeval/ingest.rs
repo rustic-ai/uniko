@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use uniko_extract::ingest::atomic::ingest_message_atomic;
 use uniko_pipes::types::IngestMessage;
 use uniko_store::config::UnikoConfig;
-use uniko_store::{KnowledgeBase, ModelRuntime};
+use uniko_store::{KnowledgeBase, SharedRuntime};
 
 use super::data::LongMemEvalItem;
 
@@ -50,14 +50,14 @@ pub async fn ingest_item(
     item: &LongMemEvalItem,
     ingest_dir: &Path,
     config: UnikoConfig,
-    runtime: Arc<ModelRuntime>,
+    runtime: SharedRuntime,
     session_concurrency: usize,
 ) -> Result<(Arc<KnowledgeBase>, EvidenceMap)> {
     // Shared runtime path: every KB across `--question-concurrency`
     // reuses one ONNX/Xervo runtime instead of loading its own. At
     // q≥3 the per-KB path OOMs an 8 GB GPU; sharing keeps VRAM
     // bounded by the single session's working budget.
-    let kb = KnowledgeBase::open_with_runtime(ingest_dir, config, runtime)
+    let kb = KnowledgeBase::open_shared(ingest_dir, config, &runtime)
         .await
         .context("creating KB")?;
     let kb = Arc::new(kb);

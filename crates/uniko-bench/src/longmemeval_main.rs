@@ -183,9 +183,13 @@ async fn main() -> Result<()> {
     let token_budget = bench.lme.token_budget;
 
     // Build the ONNX/Xervo runtime once, share across every concurrent KB.
-    let shared_runtime = uniko_store::KnowledgeBase::build_shared_runtime(&config, &extra_catalog)
-        .await
-        .context("building shared Xervo runtime")?;
+    let shared_runtime = uniko_store::SharedRuntime::build(
+        &config,
+        extra_catalog.clone(),
+        uniko_store::PrefetchPolicy::Eager,
+    )
+    .await
+    .context("building shared Xervo runtime")?;
     tracing::info!(
         question_concurrency,
         "shared Xervo runtime built; all KBs in this process will reuse it"

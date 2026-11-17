@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 use uniko_api::tools::{
-    ExtractRequest, LlmSpec, Modality, RecallScope, TextExtractor, Uniko, UnikoBuilder, UnikoError,
+    ExtractRequest, LlmSpec, Modality, PrefetchPolicy, RecallScope, SharedRuntime, TextExtractor,
+    Uniko, UnikoBuilder, UnikoError,
 };
 
 use crate::agent::PyAgent;
@@ -445,6 +446,33 @@ pymethods_with_sync! {
             Ok(slf)
         }
 
+        /// Open over a `SharedRuntime` instead of loading this instance's
+        /// own models. Build it with `build_runtime()` on a builder with the
+        /// same models; `build()` raises `ConfigError` when it does not serve
+        /// them. Shutting this instance down leaves the runtime loaded.
+        fn runtime<'py>(slf: PyRef<'py, Self>, runtime: &PySharedRuntime) -> PyResult<PyRef<'py, Self>> {
+            let runtime = runtime.inner.clone();
+            slf.map(|b| b.runtime(runtime))?;
+            Ok(slf)
+        }
+
+        /// When to load models: `"eager"` (the default) before `build()`
+        /// returns, `"lazy"` on first use, or `"background"` on a task.
+        fn prefetch<'py>(slf: PyRef<'py, Self>, policy: &str) -> PyResult<PyRef<'py, Self>> {
+            let policy = match policy {
+                "eager" => PrefetchPolicy::Eager,
+                "lazy" => PrefetchPolicy::Lazy,
+                "background" => PrefetchPolicy::Background,
+                other => {
+                    return Err(to_pyerr(UnikoError::Config(format!(
+                        "prefetch '{other}': expected eager, lazy or background"
+                    ))));
+                }
+            };
+            slf.map(|b| b.prefetch(policy))?;
+            Ok(slf)
+        }
+
         /// Enable the asynchronous streaming ingest pipeline.
         fn streaming<'py>(slf: PyRef<'py, Self>, on: bool) -> PyResult<PyRef<'py, Self>> {
             slf.map(|b| b.streaming(on))?;
@@ -497,6 +525,56 @@ pymethods_with_sync! {
             }
         }
 
+        /// Build a `SharedRuntime` for this builder's models (embedding,
+        /// reranker, NLP, catalog file and LLMs), loading them as
+        /// `prefetch()` says. Consumes the builder, like `build()`.
+        fn build_runtime / build_runtime_sync(&self, py) -> PySharedRuntime {
+            prepare {
+                let builder = self
+                    .inner
+                    .lock()
+                    .expect("UnikoBuilder mutex poisoned")
+                    .take()
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "UnikoBuilder already consumed by build()",
+                        )
+                    })?;
+
+            }
+            run(_g = ()) {
+                let runtime = builder.build_runtime().await.map_err(to_pyerr)?;
+                Ok(PySharedRuntime { inner: runtime })
+
+            }
+        }
+
+    }
+}
+
+/// A model runtime several `Uniko` instances share, so each model loads
+/// once. Made by `UnikoBuilder.build_runtime()`; pass it to
+/// `UnikoBuilder.runtime()`. It stays loaded while any handle or instance
+/// holds it.
+#[pyclass(name = "SharedRuntime", module = "uniko", frozen)]
+pub struct PySharedRuntime {
+    inner: SharedRuntime,
+}
+
+#[pymethods]
+impl PySharedRuntime {
+    /// The model aliases this runtime serves, in catalog order.
+    #[getter]
+    fn aliases(&self) -> Vec<String> {
+        self.inner
+            .model_entries()
+            .into_iter()
+            .map(|e| e.alias)
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SharedRuntime(aliases={:?})", self.aliases())
     }
 }
 
