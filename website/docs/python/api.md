@@ -104,6 +104,7 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 | `add_team_to_org` | `add_team_to_org(team_id: str, org_id: str) -> Awaitable[bool]` | `add_team_to_org_sync` | Put a team in an org; its members get the org. |
 | `remove_team_from_org` | `remove_team_from_org(team_id: str, org_id: str) -> Awaitable[bool]` | `remove_team_from_org_sync` | Take it out again. |
 | `capabilities` | `capabilities() -> Awaitable[dict[str, Any]]` | `capabilities_sync` | Compiled features, extractors, each model's load state, the answer alias, OCR. Loads nothing. |
+| `check_readiness` | `check_readiness(requirements: list[Requirement], timeout: float \| None = None) -> Awaitable[list[dict[str, Any]]]` | `check_readiness_sync` | The unmet requirements, loading any required model not yet loaded (a failed one is retried each call). Never raises for an unmet one. |
 | `purge` | `purge() -> Awaitable[DeletionReport]` | `purge_sync` | Erase the whole graph (dev/test reset). |
 | `shutdown` | `shutdown() -> Awaitable[None]` | `shutdown_sync` | Drain workers and close. **Consumes the handle.** |
 
@@ -164,6 +165,8 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `answer_alias` | `answer_alias(alias: str) -> UnikoBuilder` | — (sync) | Which generation alias `answer()` uses: an `llm()` alias or one from the `catalog_path` file. `build()` raises `ConfigError` if it is missing or not a generation model. |
 | `prefetch` | `prefetch(policy: "eager" \| "lazy" \| "background") -> UnikoBuilder` | — (sync) | When models load: before `build()` returns (default), on first use, or on a background task. |
 | `runtime` | `runtime(runtime: SharedRuntime) -> UnikoBuilder` | — (sync) | Open over a runtime shared with other instances; `build()` raises `ConfigError` if it does not serve this builder's models. |
+| `require` | `require(requirements: list[Requirement]) -> UnikoBuilder` | — (sync) | Models or stages `build()` must have ready; it raises `ReadinessError` otherwise. Adds to earlier calls. |
+| `readiness_timeout` | `readiness_timeout(seconds: float \| None) -> UnikoBuilder` | — (sync) | How long `build()` waits for the required models to load; `None` or `math.inf` waits as long as loading takes. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
 | `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |
@@ -182,6 +185,32 @@ the answer alias of the builder that built the runtime (its `answer_alias()`, el
 runtime = await uniko.Uniko.builder().build_runtime()
 alice = await uniko.Uniko.builder().path("./alice").runtime(runtime).build()
 bob = await uniko.Uniko.builder().path("./bob").runtime(runtime).build()
+```
+
+### Readiness
+
+`Requirement` names what an application needs: `Requirement.alias(alias)`,
+`.embedder()`, `.reranker()`, `.nlp()`, `.ocr()`, `.generator()`,
+`.extractor("image" | "audio" | "video")` and `.accelerated(alias)`. `build()` loads each
+required model whatever the `prefetch()` policy and raises `ReadinessError`, whose `.failures` is a
+list of dicts (`requirement`, `code`, `alias`, `error`). A requirement the catalog, compiled
+features or registered extractors cannot meet fails before the store is created.
+`Uniko.check_readiness(requirements, timeout=None)` (and `check_readiness_sync`) returns the same
+list without raising, for health endpoints; `TypedUniko.check_readiness` returns
+`uniko.models.ReadinessFailure` models. The codes are listed in the
+[facade guide](../guides/facade.md#require-models-at-startup).
+
+```python
+R = uniko.Requirement
+try:
+    uni = await (uniko.Uniko.builder()
+        .prefetch("lazy")
+        .require([R.embedder(), R.nlp()])
+        .readiness_timeout(120)
+        .build())
+except uniko.ReadinessError as e:
+    for f in e.failures:
+        print(f["requirement"], f["code"], f["alias"], f["error"])
 ```
 
 ### Configuration
@@ -1081,6 +1110,7 @@ Each is an `issubclass` of `UnikoError` and carries a fixed `.kind`.
 | `UnikoTimeoutError` | `"timeout"` | An operation timed out. |
 | `ConflictError` | `"conflict"` | Transient SSI / antidependency abort — **retriable**. |
 | `UnsupportedError` | `"unsupported"` | No extractor for the modality. |
+| `ReadinessError` | `"not_ready"` | A `require()`d model or stage is unavailable; `.failures` lists each. |
 
 !!! note "`UnikoTimeoutError`, formerly `uniko.TimeoutError`"
     The class was renamed so that `from uniko import *` no longer shadows the built-in

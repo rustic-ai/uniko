@@ -86,6 +86,14 @@ fn _raise_error(kind: &str) -> PyResult<()> {
         "timeout" => UnikoError::Timeout(123),
         "conflict" => UnikoError::Conflict("demo".into()),
         "unsupported" => UnikoError::Unsupported("demo".into()),
+        "not_ready" => UnikoError::NotReady(vec![
+            uniko_api::tools::ReadinessFailure::new(
+                "embedder",
+                uniko_api::tools::ReadinessCode::LoadFailed,
+            )
+            .with_alias("embed/default")
+            .with_error("demo"),
+        ]),
         "storage" => UnikoError::Storage("demo".into()),
         "search" => UnikoError::Search("demo".into()),
         "schema" => UnikoError::Schema("demo".into()),
@@ -146,6 +154,7 @@ fn _uniko(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<facade::PyUnikoBuilder>()?;
     m.add_class::<facade::PyLlmSpec>()?;
     m.add_class::<facade::PySharedRuntime>()?;
+    m.add_class::<facade::PyRequirement>()?;
     m.add_class::<facade::PyExtractRequest>()?;
     m.add_class::<agent::PyAgent>()?;
     m.add_class::<session::PySession>()?;

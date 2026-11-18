@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 use uniko_api::tools::{
-    ExtractRequest, LlmSpec, Modality, PrefetchPolicy, RecallScope, SharedRuntime, TextExtractor,
-    Uniko, UnikoBuilder, UnikoError,
+    ExtractRequest, LlmSpec, Modality, PrefetchPolicy, RecallScope, Requirement, SharedRuntime,
+    TextExtractor, Uniko, UnikoBuilder, UnikoError,
 };
 
 use crate::agent::PyAgent;
@@ -272,6 +272,29 @@ pymethods_with_sync! {
             }
         }
 
+        /// Check `requirements` now, loading any required model that has
+        /// not loaded yet. Returns the unmet ones as dicts (`requirement`,
+        /// `code`, `alias`, `error`), empty when all are met. Never raises
+        /// for an unmet requirement. `timeout` (seconds) bounds the loading;
+        /// a model that failed before is tried again on every call.
+        #[pyo3(signature = (requirements, timeout=None))]
+        fn check_readiness / check_readiness_sync(&self, py, requirements: Vec<Py<PyRequirement>>, timeout: Option<f64>) -> Py<PyAny> {
+            prepare {
+                let uniko = self.cloned()?;
+                let requirements: Vec<Requirement> =
+                    requirements.iter().map(|r| r.get().inner.clone()).collect();
+                let timeout = seconds_to_timeout("check_readiness timeout", timeout)?;
+
+            }
+            run(instance = uniko) {
+                let failures = instance.check_readiness(&requirements, timeout).await;
+                let json = serde_json::to_value(&failures)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                Python::attach(|py| crate::convert::json_to_py(py, &json))
+
+            }
+        }
+
         /// Erase the entire graph. Intended for dev/test reset.
         fn purge / purge_sync(&self, py) -> Py<PyDeletionReport> {
             prepare {
@@ -475,6 +498,33 @@ pymethods_with_sync! {
             Ok(slf)
         }
 
+        /// Require models or stages before `build()` returns. Adds to
+        /// earlier calls. `build()` loads each required model whatever the
+        /// `prefetch()` policy and raises `ReadinessError` listing every
+        /// unmet requirement.
+        fn require<'py>(
+            slf: PyRef<'py, Self>,
+            requirements: Vec<Py<PyRequirement>>,
+        ) -> PyResult<PyRef<'py, Self>> {
+            let requirements: Vec<Requirement> =
+                requirements.iter().map(|r| r.get().inner.clone()).collect();
+            slf.map(|b| b.require(requirements))?;
+            Ok(slf)
+        }
+
+        /// How long `build()` waits, in seconds, for the required models
+        /// to load. One still loading then is reported as `timed_out`.
+        /// `None` or `math.inf` waits as long as loading takes.
+        fn readiness_timeout<'py>(
+            slf: PyRef<'py, Self>,
+            seconds: Option<f64>,
+        ) -> PyResult<PyRef<'py, Self>> {
+            let timeout = seconds_to_timeout("readiness_timeout", seconds)?
+                .unwrap_or(std::time::Duration::MAX);
+            slf.map(|b| b.readiness_timeout(timeout))?;
+            Ok(slf)
+        }
+
         /// Enable the asynchronous streaming ingest pipeline.
         fn streaming<'py>(slf: PyRef<'py, Self>, on: bool) -> PyResult<PyRef<'py, Self>> {
             slf.map(|b| b.streaming(on))?;
@@ -577,6 +627,128 @@ impl PySharedRuntime {
 
     fn __repr__(&self) -> String {
         format!("SharedRuntime(aliases={:?})", self.aliases())
+    }
+}
+
+/// Convert a timeout in seconds: `None` or infinity is no timeout; a
+/// negative or NaN value is a `ConfigError` naming `what`.
+fn seconds_to_timeout(what: &str, seconds: Option<f64>) -> PyResult<Option<std::time::Duration>> {
+    match seconds {
+        None => Ok(None),
+        Some(s) if s == f64::INFINITY => Ok(None),
+        Some(s) => std::time::Duration::try_from_secs_f64(s)
+            .map(Some)
+            .map_err(|_| {
+                to_pyerr(UnikoError::Config(format!(
+                    "{what} {s}: expected a non-negative number of seconds, or None"
+                )))
+            }),
+    }
+}
+
+/// Something an application needs before it can serve, for
+/// `UnikoBuilder.require()` and `Uniko.check_readiness()`.
+#[pyclass(name = "Requirement", module = "uniko", frozen)]
+pub struct PyRequirement {
+    inner: Requirement,
+}
+
+#[pymethods]
+impl PyRequirement {
+    /// A model alias from the catalog must load.
+    #[staticmethod]
+    fn alias(alias: String) -> Self {
+        Self {
+            inner: Requirement::alias(alias),
+        }
+    }
+
+    /// The embedding model must load (and the hybrid embedder, if any).
+    #[staticmethod]
+    fn embedder() -> Self {
+        Self {
+            inner: Requirement::Embedder,
+        }
+    }
+
+    /// The configured reranker must load.
+    #[staticmethod]
+    fn reranker() -> Self {
+        Self {
+            inner: Requirement::Reranker,
+        }
+    }
+
+    /// The NLP models must load and the NLP pipeline must start.
+    #[staticmethod]
+    fn nlp() -> Self {
+        Self {
+            inner: Requirement::Nlp,
+        }
+    }
+
+    /// OCR must be compiled in, enabled in the config, and load.
+    #[staticmethod]
+    fn ocr() -> Self {
+        Self {
+            inner: Requirement::Ocr,
+        }
+    }
+
+    /// The answer alias must be set and must load.
+    #[staticmethod]
+    fn generator() -> Self {
+        Self {
+            inner: Requirement::Generator,
+        }
+    }
+
+    /// An extractor must be registered for `modality` (`"image"`,
+    /// `"audio"` or `"video"`).
+    #[staticmethod]
+    fn extractor(modality: &str) -> PyResult<Self> {
+        let modality = match modality {
+            "image" => Modality::Image,
+            "audio" => Modality::Audio,
+            "video" => Modality::Video,
+            other => {
+                return Err(to_pyerr(UnikoError::Config(format!(
+                    "requirement extractor '{other}': expected image, audio or video"
+                ))));
+            }
+        };
+        Ok(Self {
+            inner: Requirement::Extractor(modality),
+        })
+    }
+
+    /// The alias must load on a non-CPU execution provider it asks for.
+    #[staticmethod]
+    fn accelerated(alias: String) -> Self {
+        Self {
+            inner: Requirement::accelerated(alias),
+        }
+    }
+
+    /// The requirement as reported in a failure, e.g. `"alias:gen/m"`.
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __hash__(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.inner.hash(&mut h);
+        h.finish()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Requirement({})", self.inner.name())
     }
 }
 

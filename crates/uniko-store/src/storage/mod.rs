@@ -407,7 +407,10 @@ impl KnowledgeBase {
     /// [`ModelState::Failed`](crate::ModelState::Failed) and skipped: the
     /// store still opens (catalog entries keep `required: false`) and the
     /// remaining aliases are still loaded.
-    async fn prefetch_catalog(&self, policy: PrefetchPolicy) -> Option<tokio::task::AbortHandle> {
+    pub(crate) async fn prefetch_catalog(
+        &self,
+        policy: PrefetchPolicy,
+    ) -> Option<tokio::task::AbortHandle> {
         let (Some(catalog), Some(runtime)) = (self.catalog.clone(), self.model_runtime()) else {
             return None;
         };
