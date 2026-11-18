@@ -355,6 +355,8 @@ pub struct UnikoBuilder {
     extractors: ModalityRegistry,
     runtime: Option<SharedRuntime>,
     prefetch: PrefetchPolicy,
+    requirements: Vec<super::Requirement>,
+    readiness_timeout: Option<std::time::Duration>,
 }
 
 impl UnikoBuilder {
@@ -511,6 +513,36 @@ impl UnikoBuilder {
         self
     }
 
+    /// Require models or stages before [`build`](UnikoBuilder::build)
+    /// returns. Adds to earlier calls.
+    ///
+    /// `build` loads each required alias whatever the
+    /// [`prefetch`](UnikoBuilder::prefetch) policy, and fails with
+    /// [`UnikoError::NotReady`] listing every unmet requirement. A
+    /// requirement the catalog, the compiled features or the registered
+    /// extractors cannot meet fails before the store is created. Models
+    /// that are not required are left to the prefetch policy.
+    #[must_use]
+    pub fn require(mut self, requirements: impl IntoIterator<Item = super::Requirement>) -> Self {
+        self.requirements.extend(requirements);
+        self
+    }
+
+    /// How long [`build`](UnikoBuilder::build) waits for the required
+    /// models to load. A model still loading when it runs out is reported
+    /// as `timed_out`. Without a timeout (or with [`Duration::MAX`](std::time::Duration::MAX)),
+    /// `build` waits as long as loading takes.
+    ///
+    /// The timeout covers the required models only. They load first; the
+    /// [`prefetch`](UnikoBuilder::prefetch) policy then runs for the rest,
+    /// so under the default `Eager` policy `build` still waits for those
+    /// afterwards.
+    #[must_use]
+    pub fn readiness_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.readiness_timeout = Some(timeout);
+        self
+    }
+
     /// Build a [`SharedRuntime`] for this builder's models (embedding,
     /// reranker, NLP, catalog file and LLMs), loading them as
     /// [`prefetch`](UnikoBuilder::prefetch) says. Pass it to
@@ -579,6 +611,8 @@ impl UnikoBuilder {
     ///   non-generation provider, bad or secret-bearing options, an alias
     ///   registered twice) or the answer alias is missing from the catalog
     ///   or is not a generation model.
+    /// - [`UnikoError::NotReady`] when a [`require`](UnikoBuilder::require)d
+    ///   model or stage is unavailable.
     /// - Store-open failures (config validation, model warmup).
     pub async fn build(self) -> Result<Uniko, UnikoError> {
         let (config, extra_catalog) = self.models().await?;
@@ -604,19 +638,63 @@ impl UnikoBuilder {
             check_answer_alias(&entries, alias)?;
         }
 
-        let kb = match (&self.runtime, self.location) {
+        // Readiness, static step: catalog, features and extractors only,
+        // so an unmet requirement fails before the store is created.
+        super::readiness::check_static(
+            &self.requirements,
+            &super::readiness::Context {
+                config: &config,
+                entries: &entries,
+                extractors: &self.extractors,
+                answer_alias: llm_alias.as_deref(),
+            },
+        )?;
+        let requirement_config = (!self.requirements.is_empty()).then(|| config.clone());
+        // With requirements, open without prefetching so the readiness
+        // timeout covers the required models first; the policy then runs
+        // for the rest once they are ready.
+        let open_policy = if requirement_config.is_some() {
+            PrefetchPolicy::Lazy
+        } else {
+            self.prefetch
+        };
+
+        let mut kb = match (&self.runtime, self.location) {
             (Some(runtime), location) => match location {
                 Location::InMemory => KnowledgeBase::in_memory_shared(config, runtime).await?,
                 Location::Path(path) => KnowledgeBase::open_shared(path, config, runtime).await?,
             },
             (None, Location::InMemory) => {
-                KnowledgeBase::in_memory_with_prefetch(config, extra_catalog, self.prefetch).await?
+                KnowledgeBase::in_memory_with_prefetch(config, extra_catalog, open_policy).await?
             }
             (None, Location::Path(path)) => {
-                KnowledgeBase::open_with_prefetch(path, config, extra_catalog, self.prefetch)
-                    .await?
+                KnowledgeBase::open_with_prefetch(path, config, extra_catalog, open_policy).await?
             }
         };
+        // Readiness, dynamic step: load the required aliases whatever the
+        // prefetch policy, and check how they loaded.
+        if let Some(config) = &requirement_config {
+            let cx = super::readiness::Context {
+                config,
+                entries: &entries,
+                extractors: &self.extractors,
+                answer_alias: llm_alias.as_deref(),
+            };
+            let failures =
+                super::readiness::check(&kb, &self.requirements, &cx, self.readiness_timeout).await;
+            if !failures.is_empty() {
+                // Release the store (and a persistent path's lock) before
+                // reporting. The unmet requirements are what the caller
+                // needs, so a shutdown error is only logged.
+                if let Err(e) = kb.shutdown().await {
+                    tracing::warn!(error = %e, "shutdown after a failed readiness check");
+                }
+                return Err(UnikoError::NotReady(failures));
+            }
+            if self.runtime.is_none() {
+                kb.start_prefetch(self.prefetch).await;
+            }
+        }
         crate::rules::register_stdlib_rules(&kb).await?;
 
         // One registry for both paths: a source queued through the streaming

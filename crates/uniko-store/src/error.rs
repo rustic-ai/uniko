@@ -76,6 +76,12 @@ pub enum UnikoError {
     /// the unsupported modality.
     #[error("unsupported modality: {0}")]
     Unsupported(String),
+
+    /// A required model or stage is not available: each entry names a
+    /// requirement and why it is unmet. Raised by a readiness check
+    /// (`UnikoBuilder::require`), never by best-effort paths.
+    #[error("not ready: {}", crate::readiness::describe(.0))]
+    NotReady(Vec<crate::ReadinessFailure>),
 }
 
 impl UnikoError {

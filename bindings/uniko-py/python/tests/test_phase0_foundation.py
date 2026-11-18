@@ -67,6 +67,7 @@ def test_error_mapping_subclasses_and_kind() -> None:
         "timeout": uniko.UnikoTimeoutError,
         "conflict": uniko.ConflictError,
         "unsupported": uniko.UnsupportedError,
+        "not_ready": uniko.ReadinessError,
     }
     for kind, exc_cls in cases.items():
         with pytest.raises(exc_cls) as info:

@@ -36,6 +36,7 @@ from .outputs import (
     DeletionReport,
     FinalizeReport,
     GoalContext,
+    ReadinessFailure,
     GoalView,
     IngestOutcome,
     MessageView,
@@ -799,6 +800,16 @@ class TypedUnikoBuilder:
         self._inner = self._inner.prefetch(policy)
         return self
 
+    def require(self, requirements: Sequence[Any]) -> "TypedUnikoBuilder":
+        """Native ``Requirement`` values ``build()`` must meet."""
+        self._inner = self._inner.require(list(requirements))
+        return self
+
+    def readiness_timeout(self, seconds: float | None) -> "TypedUnikoBuilder":
+        """Seconds ``build()`` waits for required models; ``None`` waits on."""
+        self._inner = self._inner.readiness_timeout(seconds)
+        return self
+
     async def build_runtime(self) -> Any:
         """A native ``SharedRuntime`` for this builder's models."""
         return await self._inner.build_runtime()
@@ -925,6 +936,18 @@ class TypedUniko:
 
     def capabilities_sync(self) -> Capabilities:
         return Capabilities.from_native(self._inner.capabilities_sync())
+
+    async def check_readiness(
+        self, requirements: Sequence[Any], timeout: float | None = None
+    ) -> list[ReadinessFailure]:
+        rows = await self._inner.check_readiness(list(requirements), timeout)
+        return [ReadinessFailure.from_native(r) for r in rows]
+
+    def check_readiness_sync(
+        self, requirements: Sequence[Any], timeout: float | None = None
+    ) -> list[ReadinessFailure]:
+        rows = self._inner.check_readiness_sync(list(requirements), timeout)
+        return [ReadinessFailure.from_native(r) for r in rows]
 
     async def purge(self) -> DeletionReport:
         return DeletionReport.from_native(await self._inner.purge())

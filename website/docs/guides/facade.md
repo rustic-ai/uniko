@@ -67,6 +67,8 @@ let memory = Uniko::builder()
 | `.answer_alias(alias)` | Which generation model `answer()` uses: an `.llm()` alias or one from the `catalog_path` file. Defaults to the first `.llm()`. |
 | `.prefetch(PrefetchPolicy)` | When models load: `Eager` (default) before `build()` returns, `Lazy` on first use, `Background` on a task. |
 | `.runtime(SharedRuntime)` | Open over a runtime shared with other instances instead of loading models again. |
+| `.require([Requirement])` | Models or stages `build()` must have ready; it fails with `UnikoError::NotReady` otherwise. See [Require models at startup](#require-models-at-startup). |
+| `.readiness_timeout(Duration)` | How long `build()` waits for the required models to load. |
 | `.streaming(bool)` | Enables the fire-and-forget `submit`/`flush` lane. |
 | `.scope_to_agent()` / `.scope(RecallScope)` | Default read visibility. |
 | `.extractor(Arc<dyn ModalityExtractor>)` | A pluggable image/audio/video extractor — implement `modality()` and `extract()` on `uniko_extract::ingest::modality::ModalityExtractor` (`Send + Sync + Debug`). Without one, image/audio/video sources return `UnikoError::Unsupported`. |
@@ -445,6 +447,71 @@ clears it. A hybrid embedder that only uni-db's auto-embedding on write has used
 text, code, markup, structured and PDF ingest are always available. Model entries never carry provider options; credentials show only as the
 `api_key_env` variable name and `base_url` loses any userinfo and query. The same per-alias report
 is available one layer down as `KnowledgeBase::model_status()`.
+
+### Require models at startup
+
+By default every model is optional: one that fails to load is recorded and the instance still
+builds. An application that cannot serve without a model says so with `.require()`, and
+`build()` then fails with `UnikoError::NotReady`, listing every unmet requirement:
+
+```rust
+use std::time::Duration;
+use uniko_memory::{PrefetchPolicy, Requirement, Uniko, UnikoError};
+
+let built = Uniko::builder()
+    .path("./memory")
+    .prefetch(PrefetchPolicy::Lazy)          // optional models load on first use
+    .require([Requirement::Embedder, Requirement::Nlp])
+    .readiness_timeout(Duration::from_secs(120))
+    .build()
+    .await;
+if let Err(UnikoError::NotReady(failures)) = &built {
+    for f in failures {
+        eprintln!("{} unmet: {} {:?} {:?}", f.requirement, f.code, f.alias, f.error);
+    }
+}
+```
+
+| Requirement | Met when |
+|---|---|
+| `Alias(alias)` | The catalog alias loads. |
+| `Embedder` | `embed/default` loads, and `embed/hybrid` when the config adds one. |
+| `Reranker` | The configured reranker loads: `rerank/default`, or for the `colbert` style the hybrid embedder. |
+| `Nlp` | `nlp/default` loads and the NLP pipeline starts (needs the `onnx` feature). |
+| `Ocr` | `pdf-ocr` is compiled in, `ocr.enabled` is set, and `ocr/default` loads. |
+| `Generator` | The answer alias is set and loads. |
+| `Extractor(modality)` | An extractor is registered for the modality. |
+| `Accelerated(alias)` | The alias loads, and a non-CPU execution provider it asks for is among its active providers. This catches a build without the accelerator: `["cuda", "cpu"]` on a build without `gpu-cuda` runs on CPU and fails as `not_accelerated`. It cannot yet catch a GPU build whose GPU is missing or broken, because uni-xervo reports the providers compiled in, not the ones that attached (rustic-ai/uni-xervo#64). Only local ONNX embedding, hybrid-embedding and reranking models report providers; any other alias fails as `not_supported`. |
+
+A requirement the catalog, the compiled features or the registered extractors cannot meet fails
+before the store is created, without contacting any provider. The rest are checked after the store
+opens: `build()` loads the required aliases first, whatever the prefetch policy, and only then runs
+the policy for the other aliases. `readiness_timeout` covers the required aliases only, so under
+the default `Eager` policy `build()` still waits for the rest afterwards. When a check fails,
+`build()` shuts the store down before returning, so a persistent path can be opened again.
+
+A remote model (an OpenAI-compatible endpoint, a hosted embedder) counts as loaded once its client
+is built and its API-key variable is set: nothing contacts the server, so readiness does not prove
+it is reachable (rustic-ai/uni-xervo#66).
+
+Each failure carries a stable `code`:
+
+| Code | Meaning |
+|---|---|
+| `not_in_catalog` | The alias is not in the model catalog. |
+| `not_configured` | The stage is off in the config (the reranker, OCR, no answer alias). |
+| `not_compiled` | The stage needs a Cargo feature this build lacks. |
+| `no_extractor` | No extractor is registered for the modality. |
+| `load_failed` | The model failed to load; `error` holds the error, with URL userinfo and query removed. |
+| `timed_out` | The model had not loaded when the timeout ran out. |
+| `nlp_unavailable` | The NLP models loaded but the pipeline could not start. |
+| `not_accelerated` | None of the accelerators the model asked for is among its active providers. |
+| `not_supported` | The check cannot be made for this model (an `Accelerated` requirement on a model that does not report providers). |
+
+`memory.check_readiness(&requirements, timeout).await` runs the same check on a built instance,
+loading what it needs, and returns the unmet requirements instead of failing, for a health or
+readiness endpoint. A model that failed to load is tried again on every call, so pass a timeout,
+and cache the result between frequent probes.
 
 ---
 

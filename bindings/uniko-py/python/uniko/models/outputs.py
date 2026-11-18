@@ -321,6 +321,33 @@ class Capabilities(BaseModel):
         return cls.model_validate(native)
 
 
+class ReadinessFailure(BaseModel):
+    """One unmet requirement, as ``check_readiness()`` returns it.
+
+    ``ReadinessError.failures`` carries the same fields as plain dicts;
+    validate one with ``ReadinessFailure.model_validate(row)``.
+    """
+
+    model_config = _OUT
+
+    requirement: str = Field(
+        description="As written, e.g. 'embedder' or 'alias:gen/m'."
+    )
+    code: str = Field(
+        description="'not_in_catalog', 'not_configured', 'not_compiled', "
+        "'no_extractor', 'load_failed', 'timed_out', 'nlp_unavailable' "
+        "or 'not_accelerated'."
+    )
+    alias: Optional[str] = None
+    error: Optional[str] = Field(
+        default=None, description="The redacted load error, for 'load_failed'."
+    )
+
+    @classmethod
+    def from_native(cls, native: Any) -> "ReadinessFailure":
+        return cls.model_validate(native)
+
+
 class FinalizeReport(BaseModel):
     """What ``Session.finalize()`` built (native ``FinalizeReport``)."""
 
