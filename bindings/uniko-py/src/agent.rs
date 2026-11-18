@@ -144,10 +144,11 @@ pymethods_with_sync! {
         /// `scope` defaults to an empty `Scope`. Each keyword left as `None`
         /// keeps the configured value. `reranker=True` needs a reranker enabled
         /// at build time; a `limit` above the reranker's `top_n` raises
-        /// `ConfigError` while it is on.
-        #[pyo3(signature = (query, scope=None, *, limit=None, token_budget=None, min_score=None, reranker=None, reference_ts=None))]
+        /// `ConfigError` while it is on. `strict=True` raises `DegradedError`
+        /// when a stage falls back or fails.
+        #[pyo3(signature = (query, scope=None, *, limit=None, token_budget=None, min_score=None, reranker=None, reference_ts=None, strict=None))]
         #[allow(clippy::too_many_arguments)]
-        fn recall_with / recall_with_sync(&self, py, query: String, scope: Option<&PyScope>, limit: Option<usize>, token_budget: Option<usize>, min_score: Option<f64>, reranker: Option<bool>, reference_ts: Option<&Bound<'_, PyAny>>) -> Py<PyContextBundle> {
+        fn recall_with / recall_with_sync(&self, py, query: String, scope: Option<&PyScope>, limit: Option<usize>, token_budget: Option<usize>, min_score: Option<f64>, reranker: Option<bool>, reference_ts: Option<&Bound<'_, PyAny>>, strict: Option<bool>) -> Py<PyContextBundle> {
             prepare {
                 let (scope, overrides) = recall_with_args(
                     scope,
@@ -156,6 +157,7 @@ pymethods_with_sync! {
                     min_score,
                     reranker,
                     reference_ts,
+                    strict,
                 )?;
 
             }
@@ -577,6 +579,7 @@ fn recall_with_args(
     min_score: Option<f64>,
     reranker: Option<bool>,
     reference_ts: Option<&Bound<'_, PyAny>>,
+    strict: Option<bool>,
 ) -> PyResult<(Scope, RecallOverrides)> {
     let scope = scope.map(PyScope::snapshot).unwrap_or_default();
     let mut overrides = RecallOverrides::default();
@@ -585,6 +588,7 @@ fn recall_with_args(
     overrides.min_score = min_score;
     overrides.reranker = reranker;
     overrides.reference_ts = reference_ts.map(convert::py_to_datetime).transpose()?;
+    overrides.strict = strict;
     Ok((scope, overrides))
 }
 

@@ -377,6 +377,7 @@ mod tests {
             phase1_only: false,
             phase2_only: false,
             coverage: 0.0,
+            diagnostics: Vec::new(),
         };
         let answer = Answer {
             text: "the deadline is Friday".into(),

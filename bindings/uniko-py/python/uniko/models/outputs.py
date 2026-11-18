@@ -78,6 +78,27 @@ class RecallItem(BaseModel):
         return cls.model_validate(native)
 
 
+class Diagnostic(BaseModel):
+    """One stage outcome of a recall or ingest (native ``Diagnostic``)."""
+
+    model_config = _OUT
+
+    stage: str = Field(description="e.g. 'query_embedding', 'rerank', 'sparse'.")
+    status: str = Field(description="'applied', 'skipped', 'fallback' or 'failed'.")
+    code: Optional[str] = Field(
+        default=None, description="Why, when the status is not 'applied'."
+    )
+    target: Optional[str] = Field(
+        default=None, description="The node label, model alias or source."
+    )
+    count: Optional[int] = None
+
+    @property
+    def degraded(self) -> bool:
+        """Whether the stage fell back or failed."""
+        return self.status in ("fallback", "failed")
+
+
 class ContextBundle(BaseModel):
     """A recall result: scored items plus coverage stats (native ``ContextBundle``)."""
 
@@ -88,6 +109,7 @@ class ContextBundle(BaseModel):
     phase1_only: bool
     phase2_only: bool
     coverage: float
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
 
     @classmethod
     def from_native(cls, native: Any) -> "ContextBundle":
@@ -144,6 +166,7 @@ class ObserveResult(BaseModel):
     extracted_observations: list[int] = Field(default_factory=list)
     attachments: list["IngestOutcome"] = Field(default_factory=list)
     tool_calls: list["ToolCallResult"] = Field(default_factory=list)
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
 
     @classmethod
     def from_native(cls, native: Any) -> "ObserveResult":
@@ -257,6 +280,7 @@ class ToolCallResult(BaseModel):
     artifact_id: Optional[str] = None
     artifact_node: Optional[int] = None
     was_replay: bool = False
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
 
     @classmethod
     def from_native(cls, native: Any) -> "ToolCallResult":
@@ -496,6 +520,7 @@ class IngestOutcome(BaseModel):
     extraction_error: Optional[str] = None
     page_node_ids: list[int] = Field(default_factory=list)
     block_node_ids: list[int] = Field(default_factory=list)
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
 
     @classmethod
     def from_native(cls, native: Any) -> "IngestOutcome":
@@ -512,6 +537,7 @@ class UnitResult(BaseModel):
 
     turns: list[ObserveResult] = Field(default_factory=list)
     was_replay: bool
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
 
     @classmethod
     def from_native(cls, native: Any) -> "UnitResult":
@@ -549,6 +575,7 @@ class WorkerHealth(BaseModel):
     items_processed: int
     items_failed: int
     avg_latency_ms: float
+    degradations: dict[str, int] = Field(default_factory=dict)
 
     @classmethod
     def from_native(cls, native: Any) -> "WorkerHealth":
@@ -634,6 +661,7 @@ class ActionResult(BaseModel):
 
     action_node: int
     overflow_artifact: Optional[int] = None
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
 
     @classmethod
     def from_native(cls, native: Any) -> "ActionResult":
@@ -709,6 +737,7 @@ __all__ = [
     "RecallSource",
     "RecallItem",
     "ContextBundle",
+    "Diagnostic",
     "Answer",
     "ObserveResult",
     "ToolCallResult",

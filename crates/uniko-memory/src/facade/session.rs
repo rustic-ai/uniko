@@ -185,6 +185,27 @@ impl Session {
     /// Returns [`UnikoError`] on any extraction or write failure. On error
     /// **nothing** from the unit persists.
     pub async fn commit_unit(&mut self, turns: Vec<Turn>) -> Result<UnitResult, UnikoError> {
+        let (result, diagnostics) =
+            uniko_store::diagnostics::collect(self.commit_unit_collecting(turns)).await;
+        let mut result = result?;
+        // A replay wrote nothing, so the work that preceded detecting it
+        // (such as re-extracting an attachment) is not reported.
+        let diagnostics = if result.was_replay {
+            Vec::new()
+        } else {
+            diagnostics
+        };
+        // A one-turn unit is `observe`: its turn carries the diagnostics too.
+        if let [only] = result.turns.as_mut_slice() {
+            only.diagnostics = diagnostics.clone();
+        }
+        result.diagnostics = diagnostics;
+        Ok(result)
+    }
+
+    /// [`commit_unit`](Self::commit_unit)'s body, run inside the
+    /// diagnostics scope.
+    async fn commit_unit_collecting(&mut self, turns: Vec<Turn>) -> Result<UnitResult, UnikoError> {
         let session_id = self.ctx.session_id.clone();
 
         // Resolve every message id and prepare every attachment BEFORE the
@@ -253,9 +274,11 @@ impl Session {
                         .get(i)
                         .map(|calls| calls.iter().map(Into::into).collect())
                         .unwrap_or_default(),
+                    diagnostics: Vec::new(),
                 })
                 .collect(),
             was_replay: result.was_replay,
+            diagnostics: Vec::new(),
         })
     }
 
@@ -345,7 +368,19 @@ impl Session {
             session_id: Some(self.ctx.session_id.clone()),
             triggered_by_message_id: None,
         };
-        ingest_source(&self.kb, &self.extractors, source, context).await
+        let (outcome, diagnostics) = uniko_store::diagnostics::collect(ingest_source(
+            &self.kb,
+            &self.extractors,
+            source,
+            context,
+        ))
+        .await;
+        let mut outcome = outcome?;
+        // A deduplicated source wrote nothing new; see `commit_unit`.
+        if outcome.newly_created_artifact().is_some() {
+            *outcome.diagnostics_mut() = diagnostics;
+        }
+        Ok(outcome)
     }
 
     /// Build (or refresh) this session's session-level retrieval surfaces.
@@ -396,6 +431,19 @@ impl Session {
     /// when the call id was already recorded with a different result, or
     /// [`UnikoError`] on any preparation or write failure.
     pub async fn observe_tool(
+        &self,
+        call: super::tool::ToolCall,
+    ) -> Result<super::tool::ToolCallResult, UnikoError> {
+        let (result, diagnostics) =
+            uniko_store::diagnostics::collect(self.observe_tool_collecting(call)).await;
+        let mut result = result?;
+        result.diagnostics = diagnostics;
+        Ok(result)
+    }
+
+    /// [`observe_tool`](Self::observe_tool)'s body, run inside the
+    /// diagnostics scope.
+    async fn observe_tool_collecting(
         &self,
         call: super::tool::ToolCall,
     ) -> Result<super::tool::ToolCallResult, UnikoError> {
@@ -596,6 +644,11 @@ pub struct ObserveResult {
     pub attachments: Vec<IngestOutcome>,
     /// One result per [`Turn::tool_call`], in the order added.
     pub tool_calls: Vec<super::tool::ToolCallResult>,
+    /// What each best-effort ingest stage did (NLP, observation
+    /// extraction, attachment extraction). Filled for [`Session::observe`];
+    /// a turn of a multi-turn unit leaves it empty, and the unit's are on
+    /// [`UnitResult::diagnostics`].
+    pub diagnostics: Vec<uniko_store::Diagnostic>,
 }
 
 /// One conversation turn to feed into a [`Session`].
@@ -853,6 +906,8 @@ pub struct UnitResult {
     /// True when the unit was already recorded verbatim, so nothing was
     /// written and no transaction was opened.
     pub was_replay: bool,
+    /// What each best-effort ingest stage did across the whole unit.
+    pub diagnostics: Vec<uniko_store::Diagnostic>,
 }
 
 impl UnitResult {

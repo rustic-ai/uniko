@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use uniko_extract::ner::rules::extract_entities_rule_based;
 use uniko_extract::observations::temporal::resolve_temporal_with_granularity;
+use uniko_store::diagnostics::{Diagnostic, DiagnosticCode, Stage, StageStatus, record};
 use uniko_store::{KnowledgeBase, UnikoError};
 
 /// Content POS tags to keep for keyword extraction.
@@ -216,15 +217,26 @@ pub async fn build_intent_at(
     variant_texts.dedup_by(|a, b| a.1 == b.1);
 
     // Embed every variant concurrently.  Failures degrade to an empty
-    // vector so downstream BM25-only paths still fire; log at debug so
-    // a silently misconfigured embedder still surfaces in traces.
+    // vector so downstream BM25-only paths still fire; the failure is
+    // logged at warn and recorded as a diagnostic on the result.
     let embed_futures = variant_texts.iter().map(|(label, text)| {
         let text = text.clone();
         async move {
             match uniko_extract::embedding::embed_query(kb, &text).await {
-                Ok(v) => v,
+                Ok(v) => {
+                    record(Diagnostic::applied(Stage::QueryEmbedding).count(1));
+                    v
+                }
                 Err(e) => {
-                    tracing::debug!(variant = label, error = %e, "embed_query failed");
+                    tracing::warn!(variant = label, error = %e, "embed_query failed");
+                    record(
+                        Diagnostic::new(
+                            Stage::QueryEmbedding,
+                            StageStatus::Failed,
+                            DiagnosticCode::EmbedFailed,
+                        )
+                        .count(1),
+                    );
                     Vec::new()
                 }
             }
@@ -517,13 +529,27 @@ async fn analyze_query(kb: &KnowledgeBase, query: &str) -> QueryAnalysis {
 /// NER in that case.
 #[cfg(feature = "onnx")]
 async fn analyze_query_onnx(kb: &KnowledgeBase, query: &str) -> Option<QueryAnalysis> {
-    let pipeline = uniko_extract::nlp::NlpPipeline::try_new(kb)
-        .await
-        .or_else(|| {
-            tracing::warn!("NLP pipeline unavailable for query analysis");
-            None
-        })?;
-    let result = pipeline.analyze(query).await.ok()?;
+    let fallback = |code| {
+        record(Diagnostic::new(
+            Stage::QueryAnalysis,
+            StageStatus::Fallback,
+            code,
+        ));
+    };
+    let Some(pipeline) = uniko_extract::nlp::NlpPipeline::try_new(kb).await else {
+        tracing::warn!("NLP pipeline unavailable for query analysis");
+        fallback(DiagnosticCode::NlpUnavailable);
+        return None;
+    };
+    let result = match pipeline.analyze(query).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "NLP query analysis failed");
+            fallback(DiagnosticCode::NlpFailed);
+            return None;
+        }
+    };
+    record(Diagnostic::applied(Stage::QueryAnalysis));
     let labels = uniko_extract::nlp::assets::label_maps();
 
     // Entity names normalized for matching against node `name`

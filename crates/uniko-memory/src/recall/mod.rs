@@ -19,6 +19,9 @@ use std::collections::HashMap;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
+use uniko_store::diagnostics::{
+    Diagnostic, DiagnosticCode as Code, Stage, StageStatus, record as record_stage,
+};
 use uniko_store::{KnowledgeBase, NodeId, UnikoError, Value};
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -251,6 +254,10 @@ pub struct ContextBundle {
     pub phase2_only: bool,
     /// Coverage score (0.0–1.0).
     pub coverage: f64,
+    /// What each requested stage did: ran, skipped, fell back or failed.
+    /// A stage that is turned off records nothing. Filled by
+    /// [`recall`]; empty on a bundle built any other way.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// How Phase 1 (Compact) results contribute to the final bundle.
@@ -516,6 +523,11 @@ pub struct RecallConfig {
     /// fused into the RRF pool. Requires a hybrid embedder (the
     /// `sparse_embedding` column). Default `false`.
     pub recall_sparse_enabled: bool,
+    /// Fail the recall with [`UnikoError::Degraded`] when a stage falls
+    /// back or fails, instead of returning a weaker bundle. Default
+    /// `false` (best-effort; the degradation is in
+    /// [`ContextBundle::diagnostics`]).
+    pub strict: bool,
     /// When > 1.0, multiplies the score of any RecallItem whose
     /// connected entities include one of `IntentProfile.expected_answer_type`.
     /// `1.0` is a no-op. Only triggers when `predict_answer_type` returns
@@ -632,6 +644,7 @@ impl Default for RecallConfig {
             reranker_apply_sigmoid: true,
             reranker_style: "cross-encoder".to_string(),
             recall_sparse_enabled: false,
+            strict: false,
             // Off by default. The naive "any connected entity matches
             // predicted type → boost" rule swamps top-K with off-target
             // hits when the predicted type is common in the corpus
@@ -732,6 +745,7 @@ impl RecallConfig {
             reranker_apply_sigmoid: cfg.reranker.apply_sigmoid,
             reranker_style: cfg.reranker.style.clone(),
             recall_sparse_enabled: cfg.recall_sparse_enabled,
+            strict: false,
             // Rationale for the 1.0 default: see `Default for RecallConfig`.
             answer_type_boost: 1.0,
             answer_type_top_n: 50,
@@ -817,10 +831,17 @@ async fn attach_provenance(kb: &KnowledgeBase, items: &mut [RecallItem]) {
                 }
             }
         }
-        Err(e) => tracing::warn!(
-            error = %e,
-            "recall: could not resolve item provenance; category/source_id left unset"
-        ),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "recall: could not resolve item provenance; category/source_id left unset"
+            );
+            record_stage(Diagnostic::new(
+                Stage::Provenance,
+                StageStatus::Failed,
+                Code::ProvenanceUnresolved,
+            ));
+        }
     }
 }
 
@@ -859,10 +880,38 @@ fn finalize_bundle(
 /// fulltext BM25, vector similarity, and graph traversal, then fuses
 /// results via RRF with tier weights.
 ///
+/// Each stage that ran, fell back or failed is listed in
+/// [`ContextBundle::diagnostics`].
+///
 /// # Errors
 ///
-/// Returns [`UnikoError::Search`] on search failure.
+/// Returns [`UnikoError::Search`] on search failure, and
+/// [`UnikoError::Degraded`] when [`RecallConfig::strict`] is set and a
+/// stage fell back or failed (provenance aside, which is metadata).
 pub async fn recall(
+    kb: &KnowledgeBase,
+    query: &str,
+    config: &RecallConfig,
+) -> Result<ContextBundle, UnikoError> {
+    let (bundle, diagnostics) =
+        uniko_store::diagnostics::collect(recall_collecting(kb, query, config)).await;
+    let mut bundle = bundle?;
+    if config.strict {
+        let degraded: Vec<Diagnostic> = diagnostics
+            .iter()
+            .filter(|d| d.status.is_degraded() && d.stage != Stage::Provenance)
+            .cloned()
+            .collect();
+        if !degraded.is_empty() {
+            return Err(UnikoError::Degraded(degraded));
+        }
+    }
+    bundle.diagnostics = diagnostics;
+    Ok(bundle)
+}
+
+/// [`recall`]'s body, run inside the diagnostics scope.
+async fn recall_collecting(
     kb: &KnowledgeBase,
     query: &str,
     config: &RecallConfig,
@@ -906,6 +955,14 @@ pub async fn recall(
     // `sources` empty rather than failing the recall.
     if let Err(e) = populate_sources(kb, &mut bundle).await {
         tracing::debug!(error = %e, "source lineage resolution failed; items keep empty sources");
+        record_stage(
+            Diagnostic::new(
+                Stage::Provenance,
+                StageStatus::Failed,
+                Code::ProvenanceUnresolved,
+            )
+            .target("sources"),
+        );
     }
     Ok(bundle)
 }
@@ -1302,12 +1359,14 @@ async fn recall_unfiltered(
         let (mut final_items, total_tokens) =
             finalize_bundle(phase1_items, config.limit, config.token_budget);
         attach_provenance(kb, &mut final_items).await;
+        not_reached(config);
         return Ok(ContextBundle {
             total_tokens,
             items: final_items,
             phase1_only: true,
             phase2_only: false,
             coverage: phase1_coverage,
+            diagnostics: Vec::new(),
         });
     }
 
@@ -1348,12 +1407,14 @@ async fn recall_unfiltered(
         let (mut final_items, total_tokens) =
             finalize_bundle(combined, config.limit, config.token_budget);
         attach_provenance(kb, &mut final_items).await;
+        not_reached(config);
         return Ok(ContextBundle {
             total_tokens,
             items: final_items,
             phase1_only: false,
             phase2_only: true,
             coverage: phase2_coverage,
+            diagnostics: Vec::new(),
         });
     }
 
@@ -1447,14 +1508,17 @@ async fn recall_unfiltered(
                 finalize_bundle(phase2_items, config.limit, config.token_budget);
             attach_provenance(kb, &mut final_items).await;
             let coverage = compute_coverage(&final_items, intent.facet_count);
+            not_reached(config);
             return Ok(ContextBundle {
                 total_tokens,
                 items: final_items,
                 phase1_only: false,
                 phase2_only: true,
                 coverage,
+                diagnostics: Vec::new(),
             });
         }
+        not_reached(config);
         return Ok(empty_bundle());
     }
 
@@ -1487,6 +1551,13 @@ async fn recall_unfiltered(
     // limit. Disabled by default — when off, this is a no-op. The
     // `"colbert"` style re-scores via late-interaction MaxSim in-process
     // (no reranker model); all other styles call the xervo cross-encoder.
+    if config.reranker_enabled && items.is_empty() {
+        record_stage(Diagnostic::new(
+            reranking_stage(config),
+            StageStatus::Skipped,
+            Code::NoCandidates,
+        ));
+    }
     if config.reranker_enabled && !items.is_empty() && config.reranker_style == "colbert" {
         colbert_rerank(kb, query, &mut items, config).await;
     } else if config.reranker_enabled && !items.is_empty() {
@@ -1497,6 +1568,10 @@ async fn recall_unfiltered(
             .await
         {
             Ok(scored) => {
+                // No count, for the same reason as ColBERT's.
+                record_stage(
+                    Diagnostic::applied(Stage::Rerank).target(uniko_store::schema::RERANK_ALIAS),
+                );
                 let mut head: Vec<RecallItem> = scored
                     .into_iter()
                     .filter_map(|(index, score)| {
@@ -1515,7 +1590,13 @@ async fn recall_unfiltered(
                 items = head;
                 crate::sort_by_score_desc(&mut items, |x| x.score);
             }
-            Err(e) => tracing::warn!(error = %e, "reranker call failed, falling back to RRF order"),
+            Err(e) => {
+                tracing::warn!(error = %e, "reranker call failed, falling back to RRF order");
+                record_stage(
+                    Diagnostic::new(Stage::Rerank, StageStatus::Fallback, Code::RerankFailed)
+                        .target(uniko_store::schema::RERANK_ALIAS),
+                );
+            }
         }
     }
 
@@ -1615,6 +1696,7 @@ async fn recall_unfiltered(
         phase1_only: false,
         phase2_only: false,
         coverage,
+        diagnostics: Vec::new(),
     })
 }
 
@@ -1638,11 +1720,19 @@ async fn colbert_rerank(
     }
     // Query-side per-token embedding; document-side vectors are auto-embedded
     // into `colbert_embedding`.
+    let colbert_fallback = |code| {
+        record_stage(Diagnostic::new(Stage::Colbert, StageStatus::Fallback, code));
+    };
     let qmulti = match uniko_extract::embedding::embed_multivector_query(kb, query).await {
         Ok(q) if !q.is_empty() => q,
-        Ok(_) => return,
+        Ok(_) => {
+            tracing::warn!("colbert query embed returned no vectors, keeping RRF order");
+            colbert_fallback(Code::QueryEmbedFailed);
+            return;
+        }
         Err(e) => {
             tracing::warn!(error = %e, "colbert query embed failed, keeping RRF order");
+            colbert_fallback(Code::QueryEmbedFailed);
             return;
         }
     };
@@ -1657,11 +1747,20 @@ async fn colbert_rerank(
     };
     let chunk_ids = ids_of(RecallKind::Chunk);
     let obs_ids = ids_of(RecallKind::Observation);
+    let skipped = || {
+        record_stage(Diagnostic::new(
+            Stage::Colbert,
+            StageStatus::Skipped,
+            Code::NoCandidates,
+        ));
+    };
     if chunk_ids.is_empty() && obs_ids.is_empty() {
+        skipped();
         return;
     }
 
     let mut maxsim: HashMap<NodeId, f64> = HashMap::new();
+    let mut maxsim_failed = false;
     for (label, content_field, ids) in [
         ("Chunk", "text", &chunk_ids),
         ("Observation", "content", &obs_ids),
@@ -1678,10 +1777,21 @@ async fn colbert_rerank(
                     maxsim.insert(r.node_id, r.score);
                 }
             }
-            Err(e) => tracing::warn!(label, error = %e, "colbert maxsim query failed"),
+            Err(e) => {
+                tracing::warn!(label, error = %e, "colbert maxsim query failed");
+                maxsim_failed = true;
+                record_stage(
+                    Diagnostic::new(Stage::Colbert, StageStatus::Fallback, Code::MaxsimFailed)
+                        .target(label),
+                );
+            }
         }
     }
     if maxsim.is_empty() {
+        // A failed query already said why nothing was rescored.
+        if !maxsim_failed {
+            skipped();
+        }
         return;
     }
 
@@ -1695,8 +1805,12 @@ async fn colbert_rerank(
         .max(f64::MIN_POSITIVE);
     let max_ms = maxsim.values().copied().fold(f64::MIN, f64::max);
     if max_ms <= 0.0 {
+        skipped();
         return;
     }
+    // No count: it would be taken before access control filters the
+    // bundle, so it could reveal how many hidden items matched.
+    record_stage(Diagnostic::applied(Stage::Colbert));
     for item in items[..top].iter_mut() {
         if let Some(&ms) = maxsim.get(&item.node_id) {
             item.score = ms / max_ms * band_ceiling;
@@ -1770,6 +1884,7 @@ async fn phase1_compact(
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(label, error = %e, "phase1 compact query failed");
+                source_failed(&format!("phase1:{label}"));
                 continue;
             }
         };
@@ -2003,7 +2118,14 @@ async fn phase2_activation<'a>(
     let has_graph = !intent.entity_refs.is_empty() && config.phase2_graph_enabled;
     // Cross-modal channels: each gated on (presence flag ∧ toggle ∧
     // query has a per-modality vec).
-    let presence = kb.read_modality_presence().await.unwrap_or_default();
+    let presence = match kb.read_modality_presence().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(error = %e, "modality presence read failed; cross-modal channels off");
+            source_failed("modality_presence");
+            Default::default()
+        }
+    };
     let qm = &intent.query_modalities;
     let fire_image =
         crate::recall::modality::image_channel_active(&presence, config.enable_image_channel)
@@ -2070,6 +2192,39 @@ fn fuse_and_score_phase2(
     items
 }
 
+/// The stage the configured reranker records under.
+fn reranking_stage(config: &RecallConfig) -> Stage {
+    if config.reranker_style == "colbert" {
+        Stage::Colbert
+    } else {
+        Stage::Rerank
+    }
+}
+
+/// Record the Phase 3 stages `config` asks for as skipped, because the
+/// cascade returned before reaching them. Without this a requested stage
+/// that never ran would look the same as one turned off.
+fn not_reached(config: &RecallConfig) {
+    if config.reranker_enabled {
+        record_stage(Diagnostic::new(
+            reranking_stage(config),
+            StageStatus::Skipped,
+            Code::NotReached,
+        ));
+    }
+    if config.recall_sparse_enabled {
+        record_stage(
+            Diagnostic::new(Stage::Sparse, StageStatus::Skipped, Code::NotReached).target("Chunk"),
+        );
+    }
+}
+
+/// Record that one candidate source of the cascade failed and contributed
+/// nothing. `name` is a stable source id such as `phase2:Episode:vector`.
+fn source_failed(name: &str) {
+    uniko_store::diagnostics::record_source_failure(name);
+}
+
 /// Run a learned-sparse channel for one label, returning RRF-ready hits.
 ///
 /// `qtxt` is auto-embedded into a sparse query vector by the hybrid embed
@@ -2099,10 +2254,17 @@ async fn run_sparse_source(
     {
         Ok(r) => r,
         Err(e) => {
-            tracing::debug!(label, error = %e, "sparse query failed");
+            tracing::warn!(label, error = %e, "sparse query failed");
+            record_stage(
+                Diagnostic::new(Stage::Sparse, StageStatus::Failed, Code::QueryFailed)
+                    .target(label),
+            );
             return Vec::new();
         }
     };
+    // No hit count: it is taken before access control filters the bundle,
+    // so it could reveal how many hidden items matched the query.
+    record_stage(Diagnostic::applied(Stage::Sparse).target(label));
     tracing::debug!(
         label,
         rows = rows.len(),
@@ -2167,6 +2329,7 @@ async fn run_lexical_source(
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(error = %e, "lexical chunk query failed");
+            source_failed("lexical:Chunk");
             return (Vec::new(), weight);
         }
     };
@@ -2224,6 +2387,7 @@ async fn run_phase2_source(
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(label, mode, error = %e, "phase2 query failed");
+            source_failed(&format!("phase2:{label}:{mode}"));
             return Vec::new();
         }
     };
@@ -2308,6 +2472,7 @@ async fn phase2_temporal(
         }
         Err(e) => {
             tracing::debug!(error = %e, "phase2_temporal unified query failed");
+            source_failed("phase2:temporal");
         }
     }
 
@@ -2362,6 +2527,7 @@ async fn phase2_graph_activation(
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(error = %e, "phase2_graph_activation PPR failed");
+            source_failed("phase2:graph_activation");
             return Vec::new();
         }
     };
@@ -2390,6 +2556,7 @@ async fn phase2_graph_activation(
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(error = %e, "phase2_graph_activation node fetch failed");
+            source_failed("phase2:graph_activation");
             return Vec::new();
         }
     };
@@ -2485,6 +2652,7 @@ async fn session_boost_signals(
             Ok(ids) => ids,
             Err(e) => {
                 tracing::debug!(error = %e, fact_id = fact.node_id, "session_boost walk failed");
+                source_failed("session_boost");
                 continue;
             }
         };
@@ -2546,6 +2714,7 @@ async fn entity_type_match(
         Ok(hit) => hit,
         Err(e) => {
             tracing::debug!(error = %e, node_id, "entity_type_match: query failed");
+            source_failed("entity_type_match");
             false
         }
     }
@@ -2645,6 +2814,7 @@ fn empty_bundle() -> ContextBundle {
         phase1_only: false,
         phase2_only: false,
         coverage: 0.0,
+        diagnostics: Vec::new(),
     }
 }
 

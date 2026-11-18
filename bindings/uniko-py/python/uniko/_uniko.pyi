@@ -47,6 +47,11 @@ class ConflictError(UnikoError): ...
 class IdConflictError(UnikoError): ...
 class UnsupportedError(UnikoError): ...
 
+class DegradedError(UnikoError):
+    """A stage fell back or failed during a strict operation."""
+
+    diagnostics: list[dict[str, Any]]
+
 class ReadinessError(UnikoError):
     """A required model or stage is unavailable."""
 
@@ -84,12 +89,22 @@ class RecallItem:
     def __repr__(self) -> str: ...
 
 @final
+class Diagnostic:
+    stage: str
+    status: Literal["applied", "skipped", "fallback", "failed"]
+    code: str | None
+    target: str | None
+    count: int | None
+    def __repr__(self) -> str: ...
+
+@final
 class ContextBundle:
     items: list[RecallItem]
     total_tokens: int
     phase1_only: bool
     phase2_only: bool
     coverage: float
+    diagnostics: list[Diagnostic]
     def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
 
@@ -115,6 +130,7 @@ class ObserveResult:
     extracted_observations: list[int]
     attachments: list[IngestOutcome]
     tool_calls: list[ToolCallResult]
+    diagnostics: list[Diagnostic]
     def __repr__(self) -> str: ...
 
 @final
@@ -124,6 +140,7 @@ class ToolCallResult:
     artifact_id: str | None
     artifact_node: int | None
     was_replay: bool
+    diagnostics: list[Diagnostic]
     def __repr__(self) -> str: ...
 
 @final
@@ -228,6 +245,7 @@ class IngestOutcome:
     extraction_error: str | None
     page_node_ids: list[int]
     block_node_ids: list[int]
+    diagnostics: list[Diagnostic]
     def __repr__(self) -> str: ...
 
 @final
@@ -263,6 +281,7 @@ class FactUpsert:
 class ActionResult:
     action_node: int
     overflow_artifact: int | None
+    diagnostics: list[Diagnostic]
     def __repr__(self) -> str: ...
 
 @final
@@ -295,6 +314,7 @@ class RuleView:
 class UnitResult:
     turns: list[ObserveResult]
     was_replay: bool
+    diagnostics: list[Diagnostic]
     def message_node_ids(self) -> list[int]: ...
     def __len__(self) -> int: ...
     def __repr__(self) -> str: ...
@@ -314,6 +334,7 @@ class WorkerHealth:
     items_processed: int
     items_failed: int
     avg_latency_ms: float
+    degradations: dict[str, int]
     def __repr__(self) -> str: ...
 
 @final
@@ -831,6 +852,7 @@ class Agent:
         min_score: float | None = None,
         reranker: bool | None = None,
         reference_ts: datetime.datetime | None = None,
+        strict: bool | None = None,
     ) -> Awaitable[ContextBundle]: ...
     def recall_with_sync(
         self,
@@ -842,6 +864,7 @@ class Agent:
         min_score: float | None = None,
         reranker: bool | None = None,
         reference_ts: datetime.datetime | None = None,
+        strict: bool | None = None,
     ) -> ContextBundle: ...
     def answer_in(self, question: str, scope: Scope) -> Awaitable[Answer]: ...
     def answer_in_sync(self, question: str, scope: Scope) -> Answer: ...
@@ -1156,6 +1179,7 @@ __all__ = [
     "RecallSource",
     "RecallItem",
     "ContextBundle",
+    "Diagnostic",
     "Answer",
     "ObserveResult",
     "ToolCallResult",
@@ -1190,4 +1214,5 @@ __all__ = [
     "IdConflictError",
     "UnsupportedError",
     "ReadinessError",
+    "DegradedError",
 ]

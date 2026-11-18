@@ -216,6 +216,33 @@ session.submit_source(IngestSource::text("notes")).await?;
 session.flush().await?;                                  // barrier: drain the pipeline
 ```
 
+A degraded stage in streamed work (see [Ingest diagnostics](#ingest-diagnostics)) has no call to
+report on, so it is counted in `memory.health()`: `ingest.degradations` maps `stage:code` to a
+count since start, over items that succeeded (a failed item goes to the dead-letter queue).
+
+### Ingest diagnostics
+
+Ingest is best-effort in the same way recall is: without the NLP model, rules extract entities
+and observations; a PDF that cannot be parsed is stored without chunks. `ObserveResult`,
+`UnitResult`, the `IngestOutcome` from `ingest` (`outcome.diagnostics()`), the `ToolCallResult`
+from `observe_tool` and the `RecordActionResult` from `record_action` carry `diagnostics` listing
+what each stage did. For a multi-turn unit they are on `UnitResult`, merged with `count` the number
+of messages; each turn's list is empty. A replayed unit or a deduplicated source wrote nothing and
+reports nothing. The free function `ingest_source` collects nothing; use `Session::ingest`.
+
+| Stage | Records |
+|---|---|
+| `nlp` | `applied`, or `fallback` / `nlp_unavailable` or `nlp_failed` (rules ran instead), or `skipped` / `not_compiled` on a build without `onnx`. From `record_action`, `target` is `action_entities` and a failure is `failed`: its entity links are skipped, with no rule fallback. |
+| `observation_model` | `applied`, or `fallback` / `rule_based` when observations came from rules. `onnx` builds only. |
+| `observation_rules` | `fallback` / `custom_rules_unloadable`: `observation_rules_path` could not be loaded, so the bundled rules ran. Recorded each time the rules are used; a failed load is retried at most once a minute, and logged at `warn` once per attempt. |
+| `pdf_extraction` | `failed` / `tiered_failed` or `extraction_failed`, with the artifact id as `target`: it is stored without (or with fewer) chunks. The id is the one the source was given (`IngestSource` `with_id`) or a generated one, so it is not a secret only if yours is not. |
+| `artifact_embedding` | `failed` / `pool_failed`: the artifact's own vector is left for the backfill migration. |
+| `extractor_post_commit` | `failed` / `post_commit_failed`, with the artifact id as `target`: a registered extractor's post-commit step failed. |
+
+Whether models loaded at startup is reported by [`capabilities()`](#9-check-what-is-available),
+not per call. To refuse to run without a stage at all, [require it at
+startup](#require-models-at-startup).
+
 ### End of conversation — `finalize`
 
 Whichever write lane you used, call `finalize()` when a conversation wraps up:
@@ -322,6 +349,53 @@ let rows   = agent.query_in("MATCH (n:Message) WHERE id(n) IN $allow RETURN n", 
 
 `recall_in`/`answer_in` apply the scope (and viewer visibility) for you; `query_in` binds the in-scope
 node-ids as `$allow` for your Cypher. Full treatment in [Recall & Retrieval](retrieval.md).
+
+---
+
+### Diagnostics and strict recall
+
+Recall is best-effort. A stage that cannot run degrades and the recall still succeeds: a
+reranker that errors keeps the fused order, a missing embedder leaves keyword search only.
+`ContextBundle::diagnostics` says what happened to each stage that was asked for. A stage that is
+turned off records nothing.
+
+```rust
+use uniko_memory::{RecallOverrides, Scope};
+
+let bundle = agent.recall("when does the deploy key rotate").await?;
+for d in &bundle.diagnostics {
+    if d.status.is_degraded() {
+        eprintln!("degraded: {d}"); // e.g. "rerank fallback rerank_failed (rerank/default)"
+    }
+}
+
+// Or refuse a weaker result outright:
+let strict = RecallOverrides::default().strict(true);
+let bundle = agent.recall_with("...", Scope::default(), &strict).await?; // UnikoError::Degraded
+```
+
+| Stage | Records |
+|---|---|
+| `query_embedding` | `applied`, with `count` the number of query variants embedded, or `failed` / `embed_failed`: vector search is skipped and recall is keyword-only. |
+| `query_analysis` | `applied`, or `fallback` / `nlp_unavailable` or `nlp_failed`: rule-based entity extraction ran instead. Recorded on `onnx` builds only. |
+| `sparse` | `applied` per label, or `failed` / `query_failed` (e.g. no hybrid embedder). Only with `recall_sparse_enabled`. |
+| `colbert` | `applied`, `skipped` / `no_candidates`, or `fallback` / `query_embed_failed` or `maxsim_failed`: the fused order is kept. |
+| `rerank` | `applied`, `skipped` / `no_candidates`, or `fallback` / `rerank_failed`: the fused order is kept. |
+| `source` | `failed` / `query_failed`, naming what contributed nothing: a candidate source (e.g. `phase2:Episode:vector`, `phase3:Chunk:Message`, `phase3:entity:Chunk`), or a ranking input (`entity_seeds`, `entity_drift`, `session_boost`, `entity_type_match`, `modality_presence`). |
+| `provenance` | `failed` / `provenance_unresolved`: items keep empty category, source or lineage fields. |
+
+The reranker, ColBERT and the Chunk sparse channel run only when the cascade reaches Phase 3. A
+recall answered by an earlier phase lists each of them that was asked for as `skipped` /
+`not_reached`, so a stage that never ran is told apart from one turned off. Applied stages after
+the first carry no counts: they are taken before access control filters the bundle, and could
+otherwise reveal how many hidden items matched.
+
+With `strict`, any `fallback` or `failed` stage other than `provenance` (which is metadata) turns
+the recall into `UnikoError::Degraded`, listing those stages. Strict is a per-call override
+(`RecallOverrides::strict`, or `RecallConfig::strict` for `recall()` directly); `recall`,
+`recall_in` and `answer` are always best-effort, and `Answer::context.diagnostics` says what their
+recall did. Diagnostics carry no query or content text, only a stage, a status, a stable code and
+at most a label, alias or source name.
 
 ---
 

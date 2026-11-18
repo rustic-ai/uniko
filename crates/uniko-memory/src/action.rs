@@ -89,6 +89,9 @@ pub struct RecordActionResult {
     pub action_node: NodeId,
     /// Externalised Artifact id when output overflowed; `None` otherwise.
     pub overflow_artifact: Option<NodeId>,
+    /// What each best-effort stage did: NLP entity linking and, for an
+    /// overflowed output, the artifact's ingest.
+    pub diagnostics: Vec<uniko_store::Diagnostic>,
 }
 
 /// Record an Action node, wire its edges, and embed it.
@@ -118,6 +121,19 @@ pub struct RecordActionResult {
 /// - [`UnikoError::IdConflict`] when `action_id` was already recorded with
 ///   a different output.
 pub async fn record_action(
+    kb: &KnowledgeBase,
+    agent_id: &str,
+    params: RecordActionParams,
+) -> Result<RecordActionResult, UnikoError> {
+    let (result, diagnostics) =
+        uniko_store::diagnostics::collect(record_action_collecting(kb, agent_id, params)).await;
+    let mut result = result?;
+    result.diagnostics = diagnostics;
+    Ok(result)
+}
+
+/// [`record_action`]'s body, run inside the diagnostics scope.
+async fn record_action_collecting(
     kb: &KnowledgeBase,
     agent_id: &str,
     params: RecordActionParams,
@@ -211,6 +227,7 @@ pub async fn record_action(
     Ok(RecordActionResult {
         action_node: outcome.action_node,
         overflow_artifact: outcome.artifact_node(),
+        diagnostics: Vec::new(),
     })
 }
 
@@ -224,17 +241,26 @@ pub async fn record_action(
 /// `count` defaults to 1; consolidation can roll counts up across
 /// MENTIONS edges later.
 async fn link_action_entities(kb: &KnowledgeBase, action_node: NodeId, text: &str) {
+    use uniko_store::{Diagnostic, DiagnosticCode, Stage, StageStatus};
+    let skipped = |code| {
+        uniko_store::diagnostics::record(
+            Diagnostic::new(Stage::Nlp, StageStatus::Failed, code).target("action_entities"),
+        );
+    };
     let Some(pipeline) = NlpPipeline::try_new(kb).await else {
         tracing::debug!("Kniv NLP unavailable; Action MENTIONS edges skipped");
+        skipped(DiagnosticCode::NlpUnavailable);
         return;
     };
     let result = match pipeline.analyze(text).await {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!(error = %e, "Kniv analyze failed; Action MENTIONS skipped");
+            skipped(DiagnosticCode::NlpFailed);
             return;
         }
     };
+    uniko_store::diagnostics::record(Diagnostic::applied(Stage::Nlp).target("action_entities"));
 
     for span in result.entities {
         let entity_id = stable_entity_id(&span.text, span.entity_type);

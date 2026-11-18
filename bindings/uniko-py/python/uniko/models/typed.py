@@ -504,6 +504,7 @@ class TypedAgent:
         min_score: Optional[float] = None,
         reranker: Optional[bool] = None,
         reference_ts: Optional[datetime.datetime] = None,
+        strict: Optional[bool] = None,
     ) -> ContextBundle:
         return ContextBundle.from_native(
             await self._inner.recall_with(
@@ -514,6 +515,7 @@ class TypedAgent:
                 min_score=min_score,
                 reranker=reranker,
                 reference_ts=reference_ts,
+                strict=strict,
             )
         )
 
@@ -527,6 +529,7 @@ class TypedAgent:
         min_score: Optional[float] = None,
         reranker: Optional[bool] = None,
         reference_ts: Optional[datetime.datetime] = None,
+        strict: Optional[bool] = None,
     ) -> ContextBundle:
         return ContextBundle.from_native(
             self._inner.recall_with_sync(
@@ -537,6 +540,7 @@ class TypedAgent:
                 min_score=min_score,
                 reranker=reranker,
                 reference_ts=reference_ts,
+                strict=strict,
             )
         )
 

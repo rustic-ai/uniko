@@ -236,6 +236,10 @@ pub struct ToolCallResult {
     pub artifact_node: Option<NodeId>,
     /// The call was already recorded with the same result: nothing written.
     pub was_replay: bool,
+    /// What each best-effort ingest stage did for the result artifact.
+    /// Filled by [`Session::observe_tool`](super::Session::observe_tool);
+    /// empty for a call recorded as part of a turn.
+    pub diagnostics: Vec<uniko_store::Diagnostic>,
 }
 
 impl From<&ToolCallOutcome> for ToolCallResult {
@@ -246,6 +250,7 @@ impl From<&ToolCallOutcome> for ToolCallResult {
             artifact_id: o.artifact_id().map(str::to_string),
             artifact_node: o.artifact_node(),
             was_replay: o.was_replay,
+            diagnostics: Vec::new(),
         }
     }
 }
