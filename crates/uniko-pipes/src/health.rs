@@ -1,5 +1,6 @@
 //! Worker health tracking and status classification.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,11 @@ pub struct WorkerHealth {
     pub items_failed: u64,
     /// Exponential moving average latency in milliseconds.
     pub avg_latency_ms: f64,
+    /// Lifetime count of degraded stages (fell back or failed) in items
+    /// that still succeeded, keyed `stage:code` (e.g. `nlp:nlp_unavailable`).
+    /// Streaming ingest returns no per-call result, so this is where its
+    /// stage diagnostics surface.
+    pub degradations: BTreeMap<String, u64>,
 }
 
 /// Aggregated health of the entire pipeline.
@@ -60,6 +66,7 @@ pub struct HealthTracker {
     items_failed: u64,
     last_processed_at: Option<Instant>,
     avg_latency_ms: f64,
+    degradations: BTreeMap<String, u64>,
 }
 
 /// EMA smoothing factor — higher values weight recent samples more.
@@ -77,6 +84,7 @@ impl HealthTracker {
             items_failed: 0,
             last_processed_at: None,
             avg_latency_ms: 0.0,
+            degradations: BTreeMap::new(),
         }
     }
 
@@ -85,6 +93,21 @@ impl HealthTracker {
         self.items_processed += 1;
         self.last_processed_at = Some(Instant::now());
         self.avg_latency_ms = EMA_ALPHA * latency_ms + (1.0 - EMA_ALPHA) * self.avg_latency_ms;
+    }
+
+    /// Count the degraded (fallback or failed) stages among `diagnostics`.
+    pub fn record_degradations(&mut self, diagnostics: &[uniko_store::Diagnostic]) {
+        for d in diagnostics.iter().filter(|d| d.status.is_degraded()) {
+            let stage = serde_json::to_value(d.stage)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+            let code = d.code.map_or("unknown", |c| c.as_str());
+            *self
+                .degradations
+                .entry(format!("{stage}:{code}"))
+                .or_insert(0) += 1;
+        }
     }
 
     /// Record a failed item.
@@ -113,6 +136,7 @@ impl HealthTracker {
             items_processed: self.items_processed,
             items_failed: self.items_failed,
             avg_latency_ms: self.avg_latency_ms,
+            degradations: self.degradations.clone(),
         }
     }
 }

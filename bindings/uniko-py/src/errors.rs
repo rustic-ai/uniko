@@ -55,6 +55,18 @@ create_exception!(
 );
 create_exception!(
     _uniko,
+    ReadinessError,
+    UnikoError,
+    "A required model or stage is unavailable. `.failures` lists each unmet requirement."
+);
+create_exception!(
+    _uniko,
+    DegradedError,
+    UnikoError,
+    "A stage fell back or failed during a strict operation. `.diagnostics` lists them."
+);
+create_exception!(
+    _uniko,
     UnsupportedError,
     UnikoError,
     "The content modality has no registered extractor."
@@ -73,6 +85,16 @@ create_exception!(
 pub fn to_pyerr(err: CoreError) -> PyErr {
     let msg = err.to_string();
     let (pyerr, kind) = match err {
+        CoreError::NotReady(failures) => {
+            let err = ReadinessError::new_err(msg);
+            attach_json(&err, "failures", &failures);
+            (err, "not_ready")
+        }
+        CoreError::Degraded(diagnostics) => {
+            let err = DegradedError::new_err(msg);
+            attach_json(&err, "diagnostics", &diagnostics);
+            (err, "degraded")
+        }
         CoreError::Config(_) => (ConfigError::new_err(msg), "config"),
         CoreError::Llm(_) => (LlmError::new_err(msg), "llm"),
         CoreError::Timeout(_) => (UnikoTimeoutError::new_err(msg), "timeout"),
@@ -88,6 +110,19 @@ pub fn to_pyerr(err: CoreError) -> PyErr {
         CoreError::Internal(_) => (UnikoError::new_err(msg), "internal"),
     };
     attach_kind(pyerr, kind)
+}
+
+/// Attach `value` as attribute `name`, converted through JSON to plain
+/// Python data. A failure is suppressed, as in [`attach_kind`].
+fn attach_json(err: &PyErr, name: &str, value: &impl serde::Serialize) {
+    let Ok(json) = serde_json::to_value(value) else {
+        return;
+    };
+    Python::attach(|py| {
+        if let Ok(obj) = crate::convert::json_to_py(py, &json) {
+            let _ = err.value(py).setattr(name, obj);
+        }
+    });
 }
 
 /// Attach a `kind` attribute to an error value. A failure to set the attribute
@@ -117,5 +152,7 @@ pub fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add("ConflictError", py.get_type::<ConflictError>())?;
     m.add("IdConflictError", py.get_type::<IdConflictError>())?;
     m.add("UnsupportedError", py.get_type::<UnsupportedError>())?;
+    m.add("ReadinessError", py.get_type::<ReadinessError>())?;
+    m.add("DegradedError", py.get_type::<DegradedError>())?;
     Ok(())
 }

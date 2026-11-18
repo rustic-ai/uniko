@@ -155,7 +155,9 @@ impl IngestWorker {
             populate_ingest_metadata(&task, &mut ctx);
 
             metrics::emit_ingest_item();
-            let result = run_step_chain(&steps, &mut ctx, &dlq, dlq_max).await;
+            let (result, diagnostics) =
+                uniko_store::diagnostics::collect(run_step_chain(&steps, &mut ctx, &dlq, dlq_max))
+                    .await;
             let elapsed_ms = start.elapsed().as_millis() as f64;
 
             // Tell the consolidation worker that new Observations landed, so
@@ -178,6 +180,7 @@ impl IngestWorker {
             // Update health tracker.
             let mut tracker = health.lock().unwrap();
             if result.steps_failed.is_empty() {
+                tracker.record_degradations(&diagnostics);
                 tracker.record_success(elapsed_ms);
             } else {
                 tracker.record_failure();

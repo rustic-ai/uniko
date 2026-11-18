@@ -33,6 +33,9 @@ pub struct RecallOverrides {
     /// Anchor relative time expressions ("yesterday") to this instant
     /// instead of now.
     pub reference_ts: Option<DateTime<Utc>>,
+    /// Fail with [`UnikoError::Degraded`] when a stage falls back or fails
+    /// (see [`RecallConfig::strict`](crate::RecallConfig::strict)).
+    pub strict: Option<bool>,
 }
 
 impl RecallOverrides {
@@ -68,6 +71,13 @@ impl RecallOverrides {
     #[must_use]
     pub fn reference_ts(mut self, ts: DateTime<Utc>) -> Self {
         self.reference_ts = Some(ts);
+        self
+    }
+
+    /// Fail the recall when a stage falls back or fails.
+    #[must_use]
+    pub fn strict(mut self, on: bool) -> Self {
+        self.strict = Some(on);
         self
     }
 
@@ -116,6 +126,9 @@ impl RecallOverrides {
                 ));
             }
             config.reranker_enabled = on;
+        }
+        if let Some(on) = self.strict {
+            config.strict = on;
         }
         if let Some(ts) = self.reference_ts {
             config.reference_ts = Some(ts);

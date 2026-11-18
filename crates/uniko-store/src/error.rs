@@ -76,6 +76,18 @@ pub enum UnikoError {
     /// the unsupported modality.
     #[error("unsupported modality: {0}")]
     Unsupported(String),
+
+    /// A required model or stage is not available: each entry names a
+    /// requirement and why it is unmet. Raised by a readiness check
+    /// (`UnikoBuilder::require`), never by best-effort paths.
+    #[error("not ready: {}", crate::readiness::describe(.0))]
+    NotReady(Vec<crate::ReadinessFailure>),
+
+    /// A stage degraded (fell back or failed) during an operation run in
+    /// strict mode, e.g. a recall with `strict` set. Each entry names the
+    /// stage and why; best-effort mode returns these on the result instead.
+    #[error("degraded: {}", crate::diagnostics::describe(.0))]
+    Degraded(Vec<crate::Diagnostic>),
 }
 
 impl UnikoError {

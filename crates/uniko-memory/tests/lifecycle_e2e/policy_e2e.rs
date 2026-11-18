@@ -62,6 +62,7 @@ fn bundle_with(items: Vec<RecallItem>) -> ContextBundle {
         phase1_only: false,
         phase2_only: false,
         coverage: 0.0,
+        diagnostics: Vec::new(),
     }
 }
 

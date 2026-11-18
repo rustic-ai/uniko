@@ -30,6 +30,7 @@
 mod capabilities;
 mod data;
 mod goals;
+mod readiness;
 mod session;
 mod sources;
 #[cfg(test)]
@@ -40,6 +41,7 @@ mod uniko;
 pub use capabilities::Capabilities;
 pub use data::{ArtifactView, Data, MessageView};
 pub use goals::{GoalContext, GoalPhase, GoalView, Goals, TaskPhase, TaskView};
+pub use readiness::Requirement;
 pub use session::{
     FinalizeReport, ObserveResult, Session, SummarizeReport, Turn, TurnUnit, UnitResult,
 };

@@ -20,6 +20,7 @@
 
 pub mod blob_store;
 pub mod config;
+pub mod diagnostics;
 pub mod error;
 pub mod id;
 pub mod locks;
@@ -27,6 +28,7 @@ pub mod locy;
 pub mod model;
 mod model_state;
 pub mod operations;
+mod readiness;
 pub mod repository;
 pub mod schema;
 pub mod search;
@@ -35,10 +37,12 @@ pub mod storage;
 pub mod text;
 pub mod types;
 
+pub use diagnostics::{Diagnostic, DiagnosticCode, Stage, StageStatus};
 pub use error::{Result, UnikoError};
 #[doc(inline)]
 pub use model::{GENERATION_PROVIDERS, ModelEntry};
 pub use model_state::{ModelState, ModelStatus};
+pub use readiness::{ReadinessCode, ReadinessFailure};
 pub use shared_runtime::{PrefetchPolicy, SharedRuntime};
 pub use storage::KnowledgeBase;
 #[doc(inline)]

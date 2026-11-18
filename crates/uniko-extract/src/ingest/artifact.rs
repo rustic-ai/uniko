@@ -24,6 +24,9 @@ pub struct ArtifactIngestResult {
     pub chunk_node_ids: Vec<NodeId>,
     /// Whether this artifact was a duplicate (skipped chunking).
     pub was_deduplicated: bool,
+    /// What each best-effort ingest stage did. Filled by the facade's
+    /// `Session::ingest`; empty when built any other way.
+    pub diagnostics: Vec<uniko_store::Diagnostic>,
 }
 
 /// Node ids the caller has already resolved for an artifact's provenance
@@ -297,6 +300,7 @@ pub async fn ingest_artifact_in_tx(
             },
             chunk_node_ids: Vec::new(),
             was_deduplicated: true,
+            diagnostics: Vec::new(),
         });
     }
 
@@ -326,6 +330,7 @@ pub async fn ingest_artifact_in_tx(
                 artifact_id: prep.artifact_id.clone(),
                 chunk_node_ids: Vec::new(),
                 was_deduplicated: true,
+                diagnostics: Vec::new(),
             });
         }
     } else if let Some((existing_id, existing_props)) = kb
@@ -346,6 +351,7 @@ pub async fn ingest_artifact_in_tx(
             artifact_id: existing_ext_id,
             chunk_node_ids: Vec::new(),
             was_deduplicated: true,
+            diagnostics: Vec::new(),
         });
     }
 
@@ -490,6 +496,7 @@ pub async fn ingest_artifact_in_tx(
         artifact_id: prep.artifact_id.clone(),
         chunk_node_ids: chunk_nids,
         was_deduplicated: false,
+        diagnostics: Vec::new(),
     })
 }
 
@@ -507,6 +514,14 @@ pub async fn pool_artifact_embeddings_post_commit(kb: &KnowledgeBase, artifact_n
                 error = %e,
                 artifact_nid = nid,
                 "mean_pool_artifact_text_embedding failed; leaving NULL for backfill"
+            );
+            uniko_store::diagnostics::record(
+                uniko_store::Diagnostic::new(
+                    uniko_store::Stage::ArtifactEmbedding,
+                    uniko_store::StageStatus::Failed,
+                    uniko_store::DiagnosticCode::PoolFailed,
+                )
+                .count(1),
             );
         }
     }

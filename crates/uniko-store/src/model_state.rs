@@ -149,11 +149,11 @@ pub struct ModelStatus {
     pub requested_execution_providers: Option<Vec<String>>,
     /// Execution providers the loaded session reports, when known.
     ///
-    /// Only local ONNX embedding and reranking models report these, and
-    /// only once loaded. uni-xervo reports the requested providers minus
-    /// any not compiled into this build, not the ones that attached, so
-    /// `["cuda", "cpu"]` here does not prove the GPU is in use. `None`
-    /// means unknown.
+    /// Only local ONNX embedding, hybrid-embedding and reranking models
+    /// report these, and only once loaded. uni-xervo reports the requested
+    /// providers minus any not compiled into this build, not the ones that
+    /// attached (rustic-ai/uni-xervo#64), so `["cuda", "cpu"]` here does not
+    /// prove the GPU is in use. `None` means unknown.
     pub active_execution_providers: Option<Vec<String>>,
 }
 
@@ -228,7 +228,8 @@ impl KnowledgeBase {
     }
 }
 
-/// Active EPs off the cached handle of a loaded embed or rerank alias.
+/// Active EPs off the cached handle of a loaded embed, hybrid-embed or
+/// rerank alias.
 async fn active_eps(rt: &crate::ModelRuntime, spec: &ModelAliasSpec) -> Option<Vec<String>> {
     let eps = match spec.task {
         ModelTask::Embed => rt
@@ -241,6 +242,13 @@ async fn active_eps(rt: &crate::ModelRuntime, spec: &ModelAliasSpec) -> Option<V
             .await
             .ok()?
             .active_execution_providers(),
+        ModelTask::EmbedHybrid => rt
+            .hybrid_embedder(&spec.alias)
+            .await
+            .ok()?
+            .active_execution_providers(),
+        // uni-xervo's NLP and OCR models do not report their providers yet
+        // (rustic-ai/uni-xervo#65).
         _ => return None,
     };
     (!eps.is_empty()).then_some(eps)

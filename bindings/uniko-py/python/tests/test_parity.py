@@ -39,7 +39,7 @@ TYPED_EXCEPTIONS: dict[str, set[str]] = {}
 INPUT_CLASSES = {"Viewer", "ExtractRequest"}
 
 # Opaque native handles passed back to the native layer, not read as data.
-OPAQUE_CLASSES = {"SharedRuntime"}
+OPAQUE_CLASSES = {"SharedRuntime", "Requirement"}
 
 # Methods a result class may carry besides its fields.
 RESULT_METHODS = {"citations", "message_node_ids"}
