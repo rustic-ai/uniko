@@ -25,17 +25,21 @@ pub mod id;
 pub mod locks;
 pub mod locy;
 pub mod model;
+mod model_state;
 pub mod operations;
 pub mod repository;
 pub mod schema;
 pub mod search;
+mod shared_runtime;
 pub mod storage;
 pub mod text;
 pub mod types;
 
 pub use error::{Result, UnikoError};
 #[doc(inline)]
-pub use model::ModelEntry;
+pub use model::{GENERATION_PROVIDERS, ModelEntry};
+pub use model_state::{ModelState, ModelStatus};
+pub use shared_runtime::{PrefetchPolicy, SharedRuntime};
 pub use storage::KnowledgeBase;
 #[doc(inline)]
 pub use storage::deletion::DeletionReport;
@@ -86,3 +90,11 @@ pub mod xervo {
     pub use uni_db::xervo::{GenerationOptions, Message};
     pub use uni_db::{ModelAliasSpec, ModelTask, WarmupPolicy};
 }
+
+/// Cargo features of this crate and whether this build compiled them in.
+pub const COMPILED_FEATURES: &[(&str, bool)] = &[
+    ("batch-record", cfg!(feature = "batch-record")),
+    ("candle", cfg!(feature = "candle")),
+    ("gpu-cuda", cfg!(feature = "gpu-cuda")),
+    ("gpu-metal", cfg!(feature = "gpu-metal")),
+];

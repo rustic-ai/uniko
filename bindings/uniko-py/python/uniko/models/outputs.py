@@ -280,6 +280,47 @@ class DeletionReport(BaseModel):
         return cls.model_validate(native)
 
 
+class ModelStatus(BaseModel):
+    """One model alias and its load state (an entry of :class:`Capabilities`).
+
+    Provider options are never included. ``api_key_env`` is the variable
+    name only, and ``base_url`` has userinfo and query removed.
+    """
+
+    model_config = _OUT
+
+    alias: str
+    task: str
+    provider_id: str
+    model_id: str
+    revision: Optional[str] = None
+    state: str = Field(description="'not_loaded', 'loaded' or 'failed'.")
+    error: Optional[str] = Field(
+        default=None, description="Set when state is 'failed'."
+    )
+    api_key_env: Optional[str] = None
+    base_url: Optional[str] = None
+    requested_execution_providers: Optional[list[str]] = None
+    active_execution_providers: Optional[list[str]] = None
+
+
+class Capabilities(BaseModel):
+    """What a build and instance can do (``Uniko.capabilities()``)."""
+
+    model_config = _OUT
+
+    compiled_features: dict[str, bool]
+    extractors: list[str]
+    models: Optional[list[ModelStatus]] = None
+    answer_alias: Optional[str] = None
+    ocr_compiled: bool
+    ocr_configured: bool
+
+    @classmethod
+    def from_native(cls, native: Any) -> "Capabilities":
+        return cls.model_validate(native)
+
+
 class FinalizeReport(BaseModel):
     """What ``Session.finalize()`` built (native ``FinalizeReport``)."""
 

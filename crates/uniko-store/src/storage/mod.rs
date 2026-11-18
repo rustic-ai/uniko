@@ -55,6 +55,7 @@ use crate::schema::constants::{edges as edge_consts, labels};
 use crate::schema::{
     EMBED_ALIAS, HYBRID_EMBED_ALIAS, NLP_ALIAS, OCR_ALIAS, RERANK_ALIAS, register_schema,
 };
+use crate::shared_runtime::{PrefetchPolicy, SharedRuntime};
 pub use edges::{Direction, EdgeRecord};
 pub use filter::Filter;
 
@@ -113,13 +114,19 @@ pub struct KnowledgeBase {
     /// elsewhere ([`KnowledgeBase::open_with_runtime`]), whose catalog
     /// this store never saw.
     pub(crate) catalog: Option<Arc<[ModelAliasSpec]>>,
+    /// Per-alias load state for [`KnowledgeBase::model_status`]. Empty
+    /// when the catalog is unknown.
+    pub(crate) model_states: crate::model_state::ModelStates,
+    /// The store's own background prefetch, cancelled at shutdown.
+    pub(crate) prefetch_task: Option<tokio::task::AbortHandle>,
 }
 
 impl KnowledgeBase {
     /// Create an in-memory knowledge base for testing or ephemeral use.
     ///
-    /// Registers the full schema on creation and eagerly warms xervo
-    /// models via [`prefetch_all`](uni_db::api::xervo::UniXervo::prefetch_all).
+    /// Registers the full schema on creation and eagerly warms each xervo
+    /// model in the catalog; see [`model_status`](Self::model_status) for
+    /// which ones loaded.
     ///
     /// # Errors
     ///
@@ -143,22 +150,38 @@ impl KnowledgeBase {
         config: UnikoConfig,
         extra_catalog: Vec<ModelAliasSpec>,
     ) -> Result<Self> {
+        Self::in_memory_with_prefetch(config, extra_catalog, PrefetchPolicy::Eager).await
+    }
+
+    /// [`in_memory_with_xervo`](Self::in_memory_with_xervo), loading models
+    /// as `prefetch` says instead of always before returning.
+    ///
+    /// # Errors
+    ///
+    /// As [`in_memory_with_xervo`](Self::in_memory_with_xervo).
+    pub async fn in_memory_with_prefetch(
+        config: UnikoConfig,
+        extra_catalog: Vec<ModelAliasSpec>,
+        prefetch: PrefetchPolicy,
+    ) -> Result<Self> {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
+        let model_states = crate::model_state::new_states(&kept);
         let db = Uni::in_memory().xervo_catalog(catalog).build().await?;
         apply_schema(&db, &config).await?;
-        prefetch_models(&db).await;
-        Self {
+        let mut kb = Self {
             db: Arc::new(db),
             config,
             kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
-        }
-        .finalize_init()
-        .await
+            model_states,
+            prefetch_task: None,
+        };
+        kb.prefetch_task = kb.prefetch_catalog(prefetch).await;
+        kb.finalize_init().await
     }
 
     /// Open or create a persistent knowledge base at `path`.
@@ -187,7 +210,7 @@ impl KnowledgeBase {
         config: UnikoConfig,
         extra_catalog: Vec<ModelAliasSpec>,
     ) -> Result<Self> {
-        Self::open_with_xervo_inner(path, config, extra_catalog, true).await
+        Self::open_with_prefetch(path, config, extra_catalog, PrefetchPolicy::Eager).await
     }
 
     /// Open a KB without pre-warming any xervo models.
@@ -201,18 +224,26 @@ impl KnowledgeBase {
         config: UnikoConfig,
         extra_catalog: Vec<ModelAliasSpec>,
     ) -> Result<Self> {
-        Self::open_with_xervo_inner(path, config, extra_catalog, false).await
+        Self::open_with_prefetch(path, config, extra_catalog, PrefetchPolicy::Lazy).await
     }
 
-    async fn open_with_xervo_inner(
+    /// [`open_with_xervo`](Self::open_with_xervo), loading models as
+    /// `prefetch` says. Prefetch starts only after the store has been
+    /// checked against the config, so a mismatched reopen fails first.
+    ///
+    /// # Errors
+    ///
+    /// As [`open_with_xervo`](Self::open_with_xervo).
+    pub async fn open_with_prefetch(
         path: impl AsRef<Path>,
         config: UnikoConfig,
         extra_catalog: Vec<ModelAliasSpec>,
-        prefetch: bool,
+        prefetch: PrefetchPolicy,
     ) -> Result<Self> {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
+        let model_states = crate::model_state::new_states(&kept);
         let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_catalog(catalog);
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
@@ -229,61 +260,100 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
+            model_states,
+            prefetch_task: None,
         }
         .finalize_init()
         .await?;
-        if prefetch {
-            prefetch_models(&kb.db).await;
-        }
+        let mut kb = kb;
+        kb.prefetch_task = kb.prefetch_catalog(prefetch).await;
         Ok(kb)
     }
 
-    /// Build a single ONNX/Xervo runtime that multiple KBs can share.
+    /// Create an in-memory store over a [`SharedRuntime`] instead of
+    /// loading its own models.
     ///
-    /// At `--question-concurrency N` the bench opens N persistent KBs;
-    /// without sharing, each opens its own `ModelRuntime`, which loads
-    /// its own ONNX sessions (the per-session BFC arena dominates GPU
-    /// VRAM). Sharing one runtime keeps weights and the activation
-    /// arena resident exactly once.
-    ///
-    /// Implementation note: uni-db's `UniBuilder::xervo_runtime` takes
-    /// a pre-built `Arc<ModelRuntime>`, but the runtime's provider
-    /// registration is gated by `#[cfg(feature = "provider-*")]`
-    /// inside uni-db — reproducing that gating outside the crate is
-    /// fragile. Instead, we bootstrap by opening a tiny
-    /// `Uni::in_memory()` with the catalog (which goes through all
-    /// the provider-registration gates correctly), extract the
-    /// resulting `Arc<ModelRuntime>`, and drop the bootstrap `Uni`.
-    /// The model warmup runs once here, so callers get a hot runtime
-    /// they can hand to many [`KnowledgeBase::open_with_runtime`]
-    /// calls.
+    /// The runtime must serve every model `config` names, with the same
+    /// provider, model, revision and options (execution providers aside);
+    /// build it from the same config. It may hold more aliases than that.
+    /// The store does not prefetch: the runtime's own
+    /// [`PrefetchPolicy`] already decided that.
     ///
     /// # Errors
     ///
-    /// Returns [`UnikoError::Config`] if catalog validation fails,
-    /// or [`UnikoError::Storage`] if the bootstrap `Uni` cannot be
-    /// opened (the in-memory backend should not fail in practice).
-    /// Returns [`UnikoError::Internal`] if the bootstrap `Uni`
-    /// somehow finishes without registering an xervo runtime.
+    /// [`UnikoError::Config`] when the config is invalid or the runtime
+    /// does not serve its models; [`UnikoError::Storage`] if the database
+    /// cannot be created.
+    pub async fn in_memory_shared(config: UnikoConfig, runtime: &SharedRuntime) -> Result<Self> {
+        config.validate()?;
+        runtime.check_serves(&config)?;
+        let db = Uni::in_memory()
+            .xervo_runtime(runtime.runtime.clone())
+            .build()
+            .await?;
+        Self::over_shared(db, config, runtime).await
+    }
+
+    /// Open or create a persistent store over a [`SharedRuntime`].
+    ///
+    /// The same requirements as [`in_memory_shared`](Self::in_memory_shared)
+    /// apply. Each store keeps its own graph at `path`; only inference is
+    /// shared, and shutting this store down leaves the runtime loaded.
+    ///
+    /// # Errors
+    ///
+    /// [`UnikoError::Config`] when the config is invalid or the runtime
+    /// does not serve its models; [`UnikoError::Storage`] if the database
+    /// cannot be opened.
+    pub async fn open_shared(
+        path: impl AsRef<Path>,
+        config: UnikoConfig,
+        runtime: &SharedRuntime,
+    ) -> Result<Self> {
+        config.validate()?;
+        runtime.check_serves(&config)?;
+        let mut builder =
+            Uni::open(path.as_ref().to_string_lossy()).xervo_runtime(runtime.runtime.clone());
+        if let Some(uni_cfg) = apply_perf_knobs_from_env() {
+            builder = builder.config(uni_cfg);
+        }
+        let db = builder.build().await?;
+        Self::over_shared(db, config, runtime).await
+    }
+
+    async fn over_shared(db: Uni, config: UnikoConfig, runtime: &SharedRuntime) -> Result<Self> {
+        apply_schema(&db, &config).await?;
+        Self {
+            db: Arc::new(db),
+            config,
+            kb_stats_lock: Arc::new(tokio::sync::Mutex::new(())),
+            rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
+            setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
+            catalog: Some(runtime.catalog.clone()),
+            model_states: runtime.states.clone(),
+            prefetch_task: None,
+        }
+        .finalize_init()
+        .await
+    }
+
+    /// Build a single model runtime that multiple KBs can share.
+    ///
+    /// Superseded by [`SharedRuntime::build`], whose handle also carries the
+    /// catalog, so stores over it can be checked against their config and
+    /// report [`model_status`](Self::model_status).
+    ///
+    /// # Errors
+    ///
+    /// As [`SharedRuntime::build`].
+    #[deprecated(note = "use SharedRuntime::build and KnowledgeBase::open_shared")]
     pub async fn build_shared_runtime(
         config: &UnikoConfig,
         extra_catalog: &[ModelAliasSpec],
     ) -> Result<Arc<uni_xervo::runtime::ModelRuntime>> {
-        config.validate()?;
-        let catalog = load_catalog(config, extra_catalog)?;
-        let bootstrap = Uni::in_memory().xervo_catalog(catalog).build().await?;
-        let runtime = bootstrap.xervo().raw_runtime().cloned().ok_or_else(|| {
-            UnikoError::Internal(
-                "bootstrap Uni did not register an xervo runtime (was the catalog empty?)".into(),
-            )
-        })?;
-        // Warm every alias up front so the first inference per KB
-        // doesn't pay the cold-start latency.
-        prefetch_models(&bootstrap).await;
-        // Dropping the bootstrap Uni at the end of scope is fine —
-        // the runtime is held by the returned `Arc`.
-        drop(bootstrap);
-        Ok(runtime)
+        SharedRuntime::build(config, extra_catalog.to_vec(), PrefetchPolicy::Eager)
+            .await
+            .map(|rt| rt.model_runtime())
     }
 
     /// Open a persistent KB that **shares** the supplied `ModelRuntime`.
@@ -300,6 +370,9 @@ impl KnowledgeBase {
     ///
     /// Returns [`UnikoError::Config`] if validation fails, or
     /// [`UnikoError::Storage`] if the database cannot be opened.
+    #[deprecated(
+        note = "use KnowledgeBase::open_shared, which checks the runtime serves the config"
+    )]
     pub async fn open_with_runtime(
         path: impl AsRef<Path>,
         config: UnikoConfig,
@@ -322,9 +395,25 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: None,
+            model_states: Arc::default(),
+            prefetch_task: None,
         }
         .finalize_init()
         .await
+    }
+
+    /// Load this store's catalog models as `policy` says. A model that
+    /// fails is logged at `warn`, recorded as
+    /// [`ModelState::Failed`](crate::ModelState::Failed) and skipped: the
+    /// store still opens (catalog entries keep `required: false`) and the
+    /// remaining aliases are still loaded.
+    async fn prefetch_catalog(&self, policy: PrefetchPolicy) -> Option<tokio::task::AbortHandle> {
+        let (Some(catalog), Some(runtime)) = (self.catalog.clone(), self.model_runtime()) else {
+            return None;
+        };
+        policy
+            .run(catalog, self.model_states.clone(), runtime)
+            .await
     }
 
     /// Run post-construction init steps. Currently:
@@ -592,6 +681,10 @@ impl KnowledgeBase {
     /// Returns [`UnikoError::Internal`] if other `Arc` references still
     /// exist, or [`UnikoError::Storage`] if shutdown fails.
     pub async fn shutdown(self) -> Result<()> {
+        // Stop loading models nobody will use; a no-op once it finished.
+        if let Some(task) = &self.prefetch_task {
+            task.abort();
+        }
         let db = Arc::try_unwrap(self.db).map_err(|_| {
             UnikoError::Internal("cannot shutdown: outstanding references exist".into())
         })?;
@@ -621,7 +714,10 @@ async fn retry_backoff(opts: &uni_db::RetryOptions, attempt: u32) {
 ///
 /// When `config.catalog_path` is set, reads from that file and appends
 /// `extra`. Otherwise builds the default catalog from config + `extra`.
-fn load_catalog(config: &UnikoConfig, extra: &[ModelAliasSpec]) -> Result<Vec<ModelAliasSpec>> {
+pub(crate) fn load_catalog(
+    config: &UnikoConfig,
+    extra: &[ModelAliasSpec],
+) -> Result<Vec<ModelAliasSpec>> {
     let mut catalog = if let Some(path) = &config.catalog_path {
         uni_db::xervo_catalog_from_file(path)
             .map_err(|e| UnikoError::Config(format!("catalog {}: {e}", path.display())))?
@@ -649,32 +745,6 @@ fn reject_duplicate_aliases(catalog: &[ModelAliasSpec]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Eagerly download and warm every xervo model in the catalog.
-///
-/// `prefetch_all()` materializes each artifact into the repo snapshot
-/// and loads the model into memory, so the first inference call hits a
-/// pre-warmed runner.  Errors are surfaced at `warn` level (we keep
-/// `required: false` so the KB still opens; failures are operationally
-/// important to see).
-async fn prefetch_models(db: &Uni) {
-    let started = std::time::Instant::now();
-    match db.xervo().prefetch_all().await {
-        Ok(()) => {
-            tracing::info!(
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "xervo prefetch_all complete"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "xervo prefetch_all failed — models may load lazily on first use"
-            );
-        }
-    }
 }
 
 /// Apply the schema from a JSON file or the builder-based registration.

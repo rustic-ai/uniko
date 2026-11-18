@@ -38,6 +38,9 @@ TYPED_EXCEPTIONS: dict[str, set[str]] = {}
 # output model even though their public members are all fields.
 INPUT_CLASSES = {"Viewer", "ExtractRequest"}
 
+# Opaque native handles passed back to the native layer, not read as data.
+OPAQUE_CLASSES = {"SharedRuntime"}
+
 # Methods a result class may carry besides its fields.
 RESULT_METHODS = {"citations", "message_node_ids"}
 
@@ -84,7 +87,7 @@ def test_every_native_result_class_has_a_model() -> None:
     def is_result(cls: object) -> bool:
         if not isinstance(cls, type) or issubclass(cls, BaseException):
             return False
-        if cls.__name__ in INPUT_CLASSES:
+        if cls.__name__ in INPUT_CLASSES | OPAQUE_CLASSES:
             return False
         fields = native_fields(cls)
         return bool(fields) and fields >= public_members(cls) - RESULT_METHODS

@@ -4941,3 +4941,440 @@ async fn backfill_search_text_restores_lexical_search() {
     drop((agent, session));
     memory.shutdown().await.expect("shutdown");
 }
+
+// ── Several LLMs and the answer alias (issue #58) ──
+
+/// Build an instance or skip when its models are unavailable. A config
+/// error is a test bug, so it panics.
+async fn build_or_skip(builder: crate::UnikoBuilder) -> Option<Uniko> {
+    match builder.build().await {
+        Ok(memory) => Some(memory),
+        Err(e @ UnikoError::Config(_)) => panic!("rejected: {e}"),
+        Err(e) => {
+            eprintln!("skipping: instance unavailable: {e}");
+            None
+        }
+    }
+}
+
+#[tokio::test]
+async fn answer_uses_the_chosen_alias_among_several_llms() {
+    use std::sync::atomic::Ordering;
+
+    use crate::LlmSpec;
+
+    let (url_a, hits_a) = spawn_chat_stub("from the first model").await;
+    let (url_b, hits_b) = spawn_chat_stub("from the second model").await;
+    let builder = Uniko::builder()
+        .in_memory()
+        .llm(LlmSpec::llamacpp("gen/a", "stub", url_a.as_str()))
+        .llm(LlmSpec::llamacpp("gen/b", "stub", url_b.as_str()))
+        .answer_alias("gen/b");
+    let Some(memory) = build_or_skip(builder).await else {
+        return;
+    };
+
+    let entries = memory
+        .agent("a")
+        .kb()
+        .model_entries()
+        .expect("catalog is known");
+    for alias in ["gen/a", "gen/b"] {
+        assert!(
+            entries.iter().any(|e| e.alias == alias),
+            "{alias} was registered: a later .llm() must not replace an earlier one"
+        );
+    }
+
+    match memory.agent("a").answer("what happened?").await {
+        Ok(answer) => assert_eq!(answer.text, "from the second model"),
+        Err(e) if is_model_unavailable(&e) => {
+            eprintln!("skipping: embeddings unavailable");
+            return;
+        }
+        Err(e) => panic!("answer failed: {e}"),
+    }
+    assert_eq!(hits_a.load(Ordering::SeqCst), 0);
+    assert_eq!(hits_b.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn answer_defaults_to_the_first_llm() {
+    use std::sync::atomic::Ordering;
+
+    use crate::LlmSpec;
+
+    let (url_a, hits_a) = spawn_chat_stub("first").await;
+    let (url_b, hits_b) = spawn_chat_stub("second").await;
+    let builder = Uniko::builder()
+        .in_memory()
+        .llm(LlmSpec::llamacpp("gen/a", "stub", url_a.as_str()))
+        .llm(LlmSpec::llamacpp("gen/b", "stub", url_b.as_str()));
+    let Some(memory) = build_or_skip(builder).await else {
+        return;
+    };
+    match memory.agent("a").answer("q").await {
+        Ok(answer) => assert_eq!(answer.text, "first"),
+        Err(e) if is_model_unavailable(&e) => return,
+        Err(e) => panic!("answer failed: {e}"),
+    }
+    assert_eq!(hits_a.load(Ordering::SeqCst), 1);
+    assert_eq!(hits_b.load(Ordering::SeqCst), 0);
+}
+
+/// A generation alias that only exists in a `catalog_path` file can be
+/// chosen to answer.
+#[tokio::test]
+async fn answer_alias_can_select_a_catalog_file_model() {
+    use std::sync::atomic::Ordering;
+
+    use uniko_store::storage::embed_catalog;
+    use uniko_store::xervo::{ModelAliasSpec, ModelTask, WarmupPolicy};
+
+    let (url, hits) = spawn_chat_stub("from the catalog").await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = UnikoConfig::default();
+    let mut catalog = embed_catalog(&config);
+    catalog.push(ModelAliasSpec {
+        alias: "catalog/gen".into(),
+        task: ModelTask::Generate,
+        provider_id: "remote/llamacpp".into(),
+        model_id: "stub".into(),
+        revision: None,
+        warmup: WarmupPolicy::Lazy,
+        required: false,
+        timeout: None,
+        load_timeout: None,
+        retry: None,
+        options: serde_json::json!({ "base_url": url }),
+    });
+    let path = dir.path().join("catalog.json");
+    std::fs::write(&path, serde_json::to_string(&catalog).unwrap()).unwrap();
+    config.catalog_path = Some(path);
+
+    let builder = Uniko::builder()
+        .in_memory()
+        .raw_config(config)
+        .answer_alias("catalog/gen");
+    let Some(memory) = build_or_skip(builder).await else {
+        return;
+    };
+    match memory.agent("a").answer("q").await {
+        Ok(answer) => assert_eq!(answer.text, "from the catalog"),
+        Err(e) if is_model_unavailable(&e) => return,
+        Err(e) => panic!("answer failed: {e}"),
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn build_rejects_an_llm_alias_registered_twice() {
+    use crate::LlmSpec;
+
+    let err = Uniko::builder()
+        .in_memory()
+        .llm(LlmSpec::llamacpp(
+            "generate/x",
+            "a",
+            "http://127.0.0.1:9/v1",
+        ))
+        .llm(LlmSpec::llamacpp(
+            "generate/x",
+            "b",
+            "http://127.0.0.1:9/v1",
+        ))
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("'generate/x'")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn build_rejects_an_answer_alias_that_cannot_answer() {
+    for (alias, expect) in [
+        ("missing/alias", "not in the model catalog"),
+        ("embed/default", "not a generation model"),
+    ] {
+        match Uniko::builder()
+            .in_memory()
+            .answer_alias(alias)
+            .build()
+            .await
+        {
+            Err(UnikoError::Config(m)) => assert!(m.contains(expect) && m.contains(alias), "{m}"),
+            Err(e) => {
+                eprintln!("skipping: instance unavailable: {e}");
+                return;
+            }
+            Ok(_) => panic!("answer alias '{alias}' was accepted"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn capabilities_report_models_features_and_the_answer_alias() {
+    use uniko_store::ModelState;
+
+    use crate::LlmSpec;
+
+    let builder = Uniko::builder().in_memory().llm(LlmSpec::llamacpp(
+        "gen/a",
+        "stub",
+        "http://127.0.0.1:9/v1",
+    ));
+    let Some(memory) = build_or_skip(builder).await else {
+        return;
+    };
+    let caps = memory.capabilities().await;
+
+    assert_eq!(caps.answer_alias.as_deref(), Some("gen/a"));
+    for feature in [
+        "pdf-ocr",
+        "onnx",
+        "code-parse",
+        "gpu-cuda",
+        "gpu-metal",
+        "candle",
+        "llm",
+    ] {
+        assert!(caps.compiled_features.contains_key(feature), "{feature}");
+    }
+    assert_eq!(caps.ocr_compiled, caps.compiled_features["pdf-ocr"]);
+    assert!(!caps.ocr_configured, "OCR is off by default");
+    assert!(caps.extractors.is_empty(), "{:?}", caps.extractors);
+
+    let models = caps.models.expect("the builder's store knows its catalog");
+    let embed = models.iter().find(|m| m.alias == "embed/default").unwrap();
+    assert_eq!(embed.state, ModelState::Loaded);
+    let generator = models.iter().find(|m| m.alias == "gen/a").unwrap();
+    assert_eq!(generator.provider_id, "remote/llamacpp");
+    assert_eq!(generator.base_url.as_deref(), Some("http://127.0.0.1:9/v1"));
+
+    let json = serde_json::to_value(memory.capabilities().await).unwrap();
+    assert_eq!(json["models"][0]["state"], "loaded", "{json}");
+}
+
+/// Two instances over one runtime keep separate memories, and shutting one
+/// down leaves the other working.
+#[tokio::test]
+async fn instances_sharing_a_runtime_keep_their_own_memory() {
+    let Ok(runtime) = Uniko::builder().build_runtime().await else {
+        eprintln!("skipping: runtime unavailable");
+        return;
+    };
+    let Some(first) = build_or_skip(Uniko::builder().runtime(runtime.clone())).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let Some(second) =
+        build_or_skip(Uniko::builder().path(dir.path()).runtime(runtime.clone())).await
+    else {
+        return;
+    };
+
+    for (memory, text) in [
+        (&first, "I love hiking in the mountains every weekend"),
+        (&second, "My favourite food is a spicy ramen with extra egg"),
+    ] {
+        let agent = memory.agent("assistant");
+        let mut session = agent.session("chat-1");
+        match session.observe(Turn::new("alice", text)).await {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => return,
+            Err(e) => panic!("observe failed: {e}"),
+        }
+    }
+
+    let seen = |bundle: crate::recall::ContextBundle| {
+        bundle
+            .items
+            .iter()
+            .map(|i| i.content.clone())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let in_second = seen(
+        second
+            .agent("assistant")
+            .recall("hiking mountains")
+            .await
+            .unwrap(),
+    );
+    assert!(!in_second.contains("hiking"), "{in_second}");
+
+    first.shutdown().await.expect("shutdown first");
+    let in_second = seen(second.agent("assistant").recall("ramen").await.unwrap());
+    assert!(in_second.contains("ramen"), "{in_second}");
+
+    let caps = second.capabilities().await;
+    assert!(
+        caps.models.is_some(),
+        "a shared runtime carries its catalog"
+    );
+    second.shutdown().await.expect("shutdown second");
+}
+
+#[tokio::test]
+async fn a_builder_over_a_runtime_rejects_an_llm_the_runtime_lacks() {
+    use crate::LlmSpec;
+
+    let Ok(runtime) = Uniko::builder()
+        .prefetch(uniko_store::PrefetchPolicy::Lazy)
+        .build_runtime()
+        .await
+    else {
+        return;
+    };
+    let err = Uniko::builder()
+        .runtime(runtime)
+        .llm(LlmSpec::llamacpp("gen/a", "stub", "http://127.0.0.1:9/v1"))
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("'gen/a'") && m.contains("shared runtime")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn lazy_prefetch_leaves_models_unloaded() {
+    use uniko_store::{ModelState, PrefetchPolicy};
+
+    let builder = Uniko::builder().prefetch(PrefetchPolicy::Lazy);
+    let Some(memory) = build_or_skip(builder).await else {
+        return;
+    };
+    let models = memory.capabilities().await.models.unwrap();
+    assert!(
+        models.iter().all(|m| m.state == ModelState::NotLoaded),
+        "{models:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_builder_over_a_runtime_rejects_an_llm_with_other_options() {
+    use crate::LlmSpec;
+
+    let Ok(runtime) = Uniko::builder()
+        .prefetch(uniko_store::PrefetchPolicy::Lazy)
+        .llm(LlmSpec::llamacpp(
+            "gen/a",
+            "stub",
+            "http://127.0.0.1:9/tenant-a",
+        ))
+        .build_runtime()
+        .await
+    else {
+        return;
+    };
+    let err = Uniko::builder()
+        .runtime(runtime)
+        .llm(LlmSpec::llamacpp(
+            "gen/a",
+            "stub",
+            "http://127.0.0.1:9/tenant-b",
+        ))
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("'gen/a'") && m.contains("options")),
+        "{err}"
+    );
+    assert!(!err.to_string().contains("tenant-a"), "{err}");
+}
+
+/// Over a shared runtime the LLMs belong to the runtime, so its first
+/// generation model answers without repeating `.llm()`.
+#[tokio::test]
+async fn answer_defaults_to_the_runtimes_generation_model() {
+    use std::sync::atomic::Ordering;
+
+    use crate::LlmSpec;
+
+    let (url, hits) = spawn_chat_stub("from the runtime").await;
+    let Ok(runtime) = Uniko::builder()
+        .llm(LlmSpec::llamacpp("gen/a", "stub", url.as_str()))
+        .build_runtime()
+        .await
+    else {
+        return;
+    };
+    let Some(memory) = build_or_skip(Uniko::builder().runtime(runtime)).await else {
+        return;
+    };
+    match memory.agent("a").answer("q").await {
+        Ok(answer) => assert_eq!(answer.text, "from the runtime"),
+        Err(e) if is_model_unavailable(&e) => return,
+        Err(e) => panic!("answer failed: {e}"),
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+/// A bad answer alias fails before the store is created.
+#[tokio::test]
+async fn a_bad_answer_alias_fails_before_opening_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb");
+    let err = Uniko::builder()
+        .path(&path)
+        .answer_alias("generate/typo")
+        .build()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("generate/typo")),
+        "{err}"
+    );
+    assert!(!path.exists(), "the store was created before the check");
+}
+
+/// The answer alias chosen on the builder that built a runtime carries to
+/// every instance over it.
+#[tokio::test]
+async fn the_runtimes_answer_alias_carries_to_its_instances() {
+    use std::sync::atomic::Ordering;
+
+    use crate::LlmSpec;
+
+    let (judge_url, judge_hits) = spawn_chat_stub("from the judge").await;
+    let (answer_url, answer_hits) = spawn_chat_stub("from the answerer").await;
+    let Ok(runtime) = Uniko::builder()
+        .llm(LlmSpec::llamacpp("gen/judge", "stub", judge_url.as_str()))
+        .llm(LlmSpec::llamacpp("gen/answer", "stub", answer_url.as_str()))
+        .answer_alias("gen/answer")
+        .build_runtime()
+        .await
+    else {
+        return;
+    };
+    assert_eq!(runtime.answer_alias(), Some("gen/answer"));
+    let Some(memory) = build_or_skip(Uniko::builder().runtime(runtime)).await else {
+        return;
+    };
+    match memory.agent("a").answer("q").await {
+        Ok(answer) => assert_eq!(answer.text, "from the answerer"),
+        Err(e) if is_model_unavailable(&e) => return,
+        Err(e) => panic!("answer failed: {e}"),
+    }
+    assert_eq!(judge_hits.load(Ordering::SeqCst), 0);
+    assert_eq!(answer_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn build_runtime_rejects_an_answer_alias_it_cannot_answer_with() {
+    let err = Uniko::builder()
+        .prefetch(uniko_store::PrefetchPolicy::Lazy)
+        .answer_alias("embed/default")
+        .build_runtime()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("not a generation model")),
+        "{err}"
+    );
+}

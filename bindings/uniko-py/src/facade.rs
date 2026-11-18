@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 use uniko_api::tools::{
-    ExtractRequest, LlmSpec, Modality, RecallScope, TextExtractor, Uniko, UnikoBuilder, UnikoError,
+    ExtractRequest, LlmSpec, Modality, PrefetchPolicy, RecallScope, SharedRuntime, TextExtractor,
+    Uniko, UnikoBuilder, UnikoError,
 };
 
 use crate::agent::PyAgent;
@@ -251,6 +252,26 @@ pymethods_with_sync! {
             }
         }
 
+        /// What this build and instance can do, as a dict: compiled
+        /// features, registered extractors, each model alias with its load
+        /// state, the answer alias, and whether OCR is compiled and enabled.
+        ///
+        /// Loads nothing. Model entries carry no provider options; an API
+        /// key appears only as its environment-variable name.
+        fn capabilities / capabilities_sync(&self, py) -> Py<PyAny> {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                let report = instance.capabilities().await;
+                let json = serde_json::to_value(&report)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+                Python::attach(|py| crate::convert::json_to_py(py, &json))
+
+            }
+        }
+
         /// Erase the entire graph. Intended for dev/test reset.
         fn purge / purge_sync(&self, py) -> Py<PyDeletionReport> {
             prepare {
@@ -308,7 +329,9 @@ impl PyUnikoBuilder {
     fn map(&self, f: impl FnOnce(UnikoBuilder) -> UnikoBuilder) -> PyResult<()> {
         let mut guard = self.inner.lock().expect("UnikoBuilder mutex poisoned");
         let builder = guard.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("UnikoBuilder already consumed by build()")
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "UnikoBuilder already consumed by build() or build_runtime()",
+            )
         })?;
         *guard = Some(f(builder));
         Ok(())
@@ -409,9 +432,46 @@ pymethods_with_sync! {
         }
 
         /// Register an LLM, enabling `Agent.answer`.
+        ///
+        /// Each call adds one more generation model; the first answers
+        /// unless `answer_alias` names another.
         fn llm<'py>(slf: PyRef<'py, Self>, spec: &PyLlmSpec) -> PyResult<PyRef<'py, Self>> {
             let spec = spec.spec();
             slf.map(|b| b.llm(spec))?;
+            Ok(slf)
+        }
+
+        /// Choose which generation alias `Agent.answer` uses: an `llm()`
+        /// alias or one from the `catalog_path` file.
+        fn answer_alias<'py>(slf: PyRef<'py, Self>, alias: String) -> PyResult<PyRef<'py, Self>> {
+            slf.map(|b| b.answer_alias(alias))?;
+            Ok(slf)
+        }
+
+        /// Open over a `SharedRuntime` instead of loading this instance's
+        /// own models. Build it with `build_runtime()` on a builder with the
+        /// same models; `build()` raises `ConfigError` when it does not serve
+        /// them. Shutting this instance down leaves the runtime loaded.
+        fn runtime<'py>(slf: PyRef<'py, Self>, runtime: &PySharedRuntime) -> PyResult<PyRef<'py, Self>> {
+            let runtime = runtime.inner.clone();
+            slf.map(|b| b.runtime(runtime))?;
+            Ok(slf)
+        }
+
+        /// When to load models: `"eager"` (the default) before `build()`
+        /// returns, `"lazy"` on first use, or `"background"` on a task.
+        fn prefetch<'py>(slf: PyRef<'py, Self>, policy: &str) -> PyResult<PyRef<'py, Self>> {
+            let policy = match policy {
+                "eager" => PrefetchPolicy::Eager,
+                "lazy" => PrefetchPolicy::Lazy,
+                "background" => PrefetchPolicy::Background,
+                other => {
+                    return Err(to_pyerr(UnikoError::Config(format!(
+                        "prefetch '{other}': expected eager, lazy or background"
+                    ))));
+                }
+            };
+            slf.map(|b| b.prefetch(policy))?;
             Ok(slf)
         }
 
@@ -455,7 +515,7 @@ pymethods_with_sync! {
                     .take()
                     .ok_or_else(|| {
                         pyo3::exceptions::PyRuntimeError::new_err(
-                            "UnikoBuilder already consumed by build()",
+                            "UnikoBuilder already consumed by build() or build_runtime()",
                         )
                     })?;
 
@@ -467,13 +527,64 @@ pymethods_with_sync! {
             }
         }
 
+        /// Build a `SharedRuntime` for this builder's models (embedding,
+        /// reranker, NLP, catalog file and LLMs), loading them as
+        /// `prefetch()` says. Consumes the builder, like `build()`.
+        fn build_runtime / build_runtime_sync(&self, py) -> PySharedRuntime {
+            prepare {
+                let builder = self
+                    .inner
+                    .lock()
+                    .expect("UnikoBuilder mutex poisoned")
+                    .take()
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "UnikoBuilder already consumed by build() or build_runtime()",
+                        )
+                    })?;
+
+            }
+            run(_g = ()) {
+                let runtime = builder.build_runtime().await.map_err(to_pyerr)?;
+                Ok(PySharedRuntime { inner: runtime })
+
+            }
+        }
+
+    }
+}
+
+/// A model runtime several `Uniko` instances share, so each model loads
+/// once. Made by `UnikoBuilder.build_runtime()`; pass it to
+/// `UnikoBuilder.runtime()`. It stays loaded while any handle or instance
+/// holds it.
+#[pyclass(name = "SharedRuntime", module = "uniko", frozen)]
+pub struct PySharedRuntime {
+    inner: SharedRuntime,
+}
+
+#[pymethods]
+impl PySharedRuntime {
+    /// The model aliases this runtime serves, in catalog order.
+    #[getter]
+    fn aliases(&self) -> Vec<String> {
+        self.inner
+            .model_entries()
+            .into_iter()
+            .map(|e| e.alias)
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("SharedRuntime(aliases={:?})", self.aliases())
     }
 }
 
 /// An LLM registration for `Agent.answer`.
 ///
 /// Construct via a provider helper (`LlmSpec.openai`,
-/// `LlmSpec.llamacpp`).
+/// `LlmSpec.llamacpp`) or, for any other compiled generation provider,
+/// `LlmSpec.new`.
 #[pyclass(name = "LlmSpec", module = "uniko")]
 pub struct PyLlmSpec {
     inner: LlmSpec,
@@ -488,6 +599,34 @@ impl PyLlmSpec {
 
 #[pymethods]
 impl PyLlmSpec {
+    /// A generation model served by any compiled provider, such as
+    /// `remote/anthropic`, `remote/mistral` or `remote/gemini`.
+    ///
+    /// `options` are provider options (never credentials: name the
+    /// credential's environment variable with `api_key_env`). The builder
+    /// validates provider and options when it builds.
+    #[staticmethod]
+    #[pyo3(signature = (alias, provider, model_id, options=None, api_key_env=None))]
+    fn new(
+        alias: String,
+        provider: String,
+        model_id: String,
+        options: Option<&Bound<'_, pyo3::types::PyDict>>,
+        api_key_env: Option<String>,
+    ) -> PyResult<Self> {
+        let mut spec = LlmSpec::new(alias, provider, model_id);
+        if let Some(options) = options {
+            for (key, value) in options.iter() {
+                let key: String = key.extract()?;
+                spec = spec.option(key, crate::convert::py_to_json(&value)?);
+            }
+        }
+        if let Some(var) = api_key_env {
+            spec = spec.api_key_env(var);
+        }
+        Ok(Self { inner: spec })
+    }
+
     /// An OpenAI-compatible chat model (key read from `OPENAI_API_KEY`).
     #[staticmethod]
     #[pyo3(signature = (alias, model_id, base_url=None))]
@@ -532,8 +671,14 @@ impl PyLlmSpec {
         }
     }
 
+    /// The alias this model registers under.
+    #[getter]
+    fn alias(&self) -> &str {
+        self.inner.alias()
+    }
+
     fn __repr__(&self) -> String {
-        "LlmSpec(...)".to_string()
+        format!("LlmSpec(alias={:?})", self.inner.alias())
     }
 }
 

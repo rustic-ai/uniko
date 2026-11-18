@@ -18,3 +18,10 @@ pub mod ner;
 #[cfg(feature = "onnx")]
 pub mod nlp;
 pub mod observations;
+
+/// Cargo features of this crate and whether this build compiled them in.
+pub const COMPILED_FEATURES: &[(&str, bool)] = &[
+    ("code-parse", cfg!(feature = "code-parse")),
+    ("onnx", cfg!(feature = "onnx")),
+    ("pdf-ocr", cfg!(feature = "pdf-ocr")),
+];

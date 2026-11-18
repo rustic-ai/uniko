@@ -39,9 +39,9 @@ Build a `Uniko` instance, observe a `Turn`, and run your first recall — end to
 
 !!! tip "One runtime, many knowledge bases"
     A single `KnowledgeBase` is enough to follow the Quick Start. When you scale to many
-    KnowledgeBases in one process, they share a single ONNX `ModelRuntime` via
-    `KnowledgeBase::build_shared_runtime` and `open_with_runtime` — model weights stay resident
-    exactly once, so VRAM use stays flat as you add tenants.
+    KnowledgeBases in one process, they share a single model runtime: build a `SharedRuntime`
+    (`UnikoBuilder::build_runtime`, or `SharedRuntime::build` one layer down) and pass it to each
+    instance — model weights stay resident exactly once, so VRAM use stays flat as you add tenants.
 
 ## Where to go next
 

@@ -1173,10 +1173,10 @@ pub struct KnowledgeBase {
 |---|---|
 | `in_memory(cfg)` / `in_memory_with_xervo(cfg, extra)` | Ephemeral KB (tests, benches) |
 | `open(path, cfg)` | Persistent KB |
-| `open_with_xervo[_no_prefetch]` | Persistent + explicit catalog |
-| `build_shared_runtime(cfg, specs)` + `open_with_runtime(...)` | Share ONE `Arc<ModelRuntime>` (one ONNX session / VRAM arena) across many KBs |
+| `open_with_xervo[_no_prefetch]` / `open_with_prefetch(.., PrefetchPolicy)` | Persistent + explicit catalog |
+| `SharedRuntime::build(cfg, specs, policy)` + `in_memory_shared` / `open_shared` | Share ONE model runtime (one ONNX session / VRAM arena) across many KBs |
 
-`build_shared_runtime` bootstraps a throwaway in-memory `Uni` just to run `uni-db`'s `#[cfg(provider-*)]` gates, extracts the `Arc<ModelRuntime>`, and hands it to many `open_with_runtime` KBs. This is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`, and it is the only open path that lets a BGE-M3 hybrid KB reopen (the catalog-open path rejects non-`Embed` vector-index aliases, `uni-db #130`) (`mod.rs:214-299`).
+`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and shares the runtime's per-alias load state, so `model_status()` works on every store over it. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`. (It was also once the only open path that let a BGE-M3 hybrid KB reopen, uni-db #130; uni-db 5.2.1's catalog-open path now checks embedding capability instead, so both paths reopen one.) (`mod.rs:214-299`).
 
 Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`mod.rs:27-50, 196-198`).
 
@@ -1506,7 +1506,7 @@ use uniko_memory::{Uniko, Turn, LlmSpec, Scope};
 
 let memory = Uniko::builder()
     .path("./agent-memory")                       // or .in_memory()
-    .llm(LlmSpec::openai("answerer", "gpt-4o-mini", None))  // enables answer()
+    .llm(LlmSpec::openai("generate/answer", "gpt-4o-mini", None))  // enables answer()
     .scope_to_agent()                             // recall filtered by viewer
     .streaming(true)                              // wire the async pipeline
     .build().await?;
@@ -2455,7 +2455,7 @@ uni.agent("a").session("s1").observe_sync(uniko.Turn("alice", "hi"))
 **Builder with an LLM and answer:**
 
 ```python
-spec = uniko.LlmSpec.openai("gpt", "gpt-4o-mini")           # alias, model_id, base_url?
+spec = uniko.LlmSpec.openai("generate/gpt", "gpt-4o-mini")         # alias, model_id, base_url?
 uni  = await uniko.Uniko.builder().path("/data/kb").llm(spec).streaming(True).build()
 ans  = await uni.agent("a").answer("where does alice like to hike?")
 print(ans.text, ans.citations())
@@ -2645,7 +2645,7 @@ reject_retired_flags(argv)              # migration errors before clap
   → data::load_locomo → filter by --conversations / --categories
   → UnikoConfig::default() + bench_cfg.apply_to_uniko_config    (:214)
   → build_catalog_specs
-  → KnowledgeBase::build_shared_runtime                          (:234)   ← ONE xervo runtime
+  → SharedRuntime::build                                         (:234)   ← ONE xervo runtime
   → load Pricing + open EventWriter
   for each conversation:
       parse_sessions
@@ -2660,7 +2660,7 @@ reject_retired_flags(argv)              # migration errors before clap
       shutdown_kb + checkpoint write_json_with_pricing    (aggregate :506, checkpoint write :508)
 ```
 
-Two structural details matter. First, the **shared `ModelRuntime`** (`main.rs:234`) is built once and passed to every per-conversation KB so N conversations reuse one set of ONNX sessions instead of OOMing an 8 GB GPU — and it is the *only* open path that lets a bge-m3 hybrid KB reopen (the catalog-open path rejects non-`Embed` vector-index aliases per uni-db #130). Second, the **per-conversation checkpoint** (`write_json_with_pricing`) is written after each conversation completes, so a `SIGKILL` mid-run preserves finished conversations — the checkpoint-batch discipline the project follows for all long jobs.
+Two structural details matter. First, the **shared `ModelRuntime`** (`main.rs:234`) is built once and passed to every per-conversation KB so N conversations reuse one set of ONNX sessions instead of OOMing an 8 GB GPU. Second, the **per-conversation checkpoint** (`write_json_with_pricing`) is written after each conversation completes, so a `SIGKILL` mid-run preserves finished conversations — the checkpoint-batch discipline the project follows for all long jobs.
 
 `RecallConfig` is derived from `kb.config()` via `RecallConfig::from_uniko_config` (`query.rs:100`), so the bench honors the reranker/recall knobs set at ingest rather than falling back to `RecallConfig::default()`.
 
@@ -2979,8 +2979,8 @@ Aliases used throughout the schema and search code are consts in `schema/mod.rs`
 
 Two catalog subtleties from the benchmark harness generalize to any embedded use:
 
-- A **shared `ModelRuntime`** (built via `KnowledgeBase::build_shared_runtime`, then passed to `open_with_runtime`) lets many KBs share one set of ONNX sessions / one VRAM arena. This is mandatory at concurrency ≥ 3 on an 8 GB GPU to avoid per-KB ONNX OOM.
-- The prebuilt-runtime open path is the **only** way a `bge-m3` hybrid KB reopens — the catalog-open path rejects non-`Embed` vector-index aliases (a uni-db limitation, `#130`).
+- A **shared `ModelRuntime`** (built via `SharedRuntime::build`, then passed to `KnowledgeBase::open_shared`) lets many KBs share one set of ONNX sessions / one VRAM arena. This is mandatory at concurrency ≥ 3 on an 8 GB GPU to avoid per-KB ONNX OOM.
+- Before uni-db 5.2.1, the prebuilt-runtime open path was the only way a `bge-m3` hybrid KB reopened (uni-db #130); the catalog-open path now checks embedding capability and reopens one too.
 
 #### 10.1.4 The installed-schema snapshot (`config/schema.json`) and count drift
 
@@ -3404,7 +3404,7 @@ Because uniko sits on a live, evolving embedded engine, `uniko-store` carries a 
 | **#145 FOLD-alias returns 0.0** | A value-aggregate `FOLD` that is `YIELD`-renamed returns 0.0. | Compute `mean_importance` / `mean_episode_importance` in Rust; only trust `COUNT` in Locy FOLDs (`execution.rs`, `stdlib.rs`, cortex `procedures.rs`). |
 | **RC12 — rule invocation** | Handing a bare rule name to `execute_rule` fails to parse; `$param` in a post-FOLD `HAVING` doesn't resolve. | Invoke registered rules by name via `query_rule` (builds `QUERY <name> RETURN ...`); push threshold filters into the Rust consumer (`upsert_procedure` applies `promote_threshold`, not the rule). |
 | **`max(DateTime)` aggregate** | Serialized as LargeBinary, breaks readback. | `close_inactive_sessions` avoids the Cypher aggregate. |
-| **#130 — catalog-open rejects non-Embed vector aliases** | A bge-m3 hybrid KB (sparse/ColBERT aliases) won't reopen via the catalog path. | Reopen only via the prebuilt-runtime path (`build_shared_runtime` + `open_with_runtime`). |
+| **#130 — catalog-open rejected non-Embed vector aliases** | Before uni-db 5.2.1, a bge-m3 hybrid KB (sparse/ColBERT aliases) would not reopen via the catalog path. | Fixed upstream in 5.2.1 (capability check); the prebuilt-runtime path (`SharedRuntime::build` + `open_shared`) also works. |
 | **Bulk API doesn't return EIDs** | `bulk_insert_vertices/edges` skip the Cypher executor (~980× faster/row) but don't surface allocated EIDs or re-validate property names. | Callers validate keys up front; the `return_ids` arm falls back to UNWIND-Cypher (`batch.rs`, `edges.rs`). |
 | **Multi-target edge label-filter leak** | Same-type edges to different labels can leak the wrong target under load. | Match by endpoint id, not label. |
 | **`datetime_value` vs string coercion** | Writing DateTime as a string coerces poorly. | Prefer `datetime_value` for DateTime writes. |
@@ -3499,7 +3499,7 @@ All performance and accuracy claims trace to `crates/uniko-bench` (`publish = fa
 
 Benchmark numbers of record (LoCoMo10, gemini-3.1 judge, Mem0's verbatim judge prompt, 2026-05-26, on 22-core CPU + 8 GB GPU): LLM-judge **0.8117**, retrieval hit **0.8555**, F1 **0.321**, ingest 5,882 turns in **7.5 min at $0** (~76 ms/turn), mean Q&A latency **4.04 s**. Two caveats travel with these figures and must not be conflated: the 0.8117 judge score is the full **1,986-q** set, while the KTH cost/latency tables use the **1,540-q non-adversarial** subset; and these are self-measured internal-harness numbers, not a third-party leaderboard. Adversarial questions are excluded from the LLM judge and scored only by a negation-phrase whitelist.
 
-Two bench-specific gotchas worth carrying into any perf investigation: **a shared `ModelRuntime` is mandatory for concurrency** (per-KB ONNX sessions OOM an 8 GB GPU at question-concurrency ≥ 3, and the prebuilt-runtime open path is the only way a bge-m3 hybrid KB reopens — uni-db #130); and **LoCoMo ingests turns sequentially while LME ingests sessions concurrently**, so per-turn milliseconds are not comparable across the two harnesses — always re-measure per config rather than quoting a single "ingest is N ms/turn" number.
+Two bench-specific gotchas worth carrying into any perf investigation: **a shared `ModelRuntime` is mandatory for concurrency** (per-KB ONNX sessions OOM an 8 GB GPU at question-concurrency ≥ 3); and **LoCoMo ingests turns sequentially while LME ingests sessions concurrently**, so per-turn milliseconds are not comparable across the two harnesses — always re-measure per config rather than quoting a single "ingest is N ms/turn" number.
 
 ---
 

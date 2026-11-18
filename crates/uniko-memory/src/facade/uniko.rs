@@ -10,7 +10,9 @@ use uniko_pipes::health::PipelineHealth;
 use uniko_store::config::{EmbeddingConfig, NlpConfig, RerankerConfig, UnikoConfig};
 use uniko_store::repository::policy::Membership;
 use uniko_store::xervo::{ModelAliasSpec, ModelTask, WarmupPolicy};
-use uniko_store::{DeletionReport, KnowledgeBase, UnikoError};
+use uniko_store::{
+    DeletionReport, KnowledgeBase, ModelEntry, PrefetchPolicy, SharedRuntime, UnikoError,
+};
 
 use super::RecallScope;
 use crate::Agent;
@@ -42,11 +44,11 @@ use crate::pipeline::PipelineSystem;
 /// ```
 #[derive(Clone)]
 pub struct Uniko {
-    kb: KnowledgeBase,
-    llm_alias: Option<String>,
+    pub(super) kb: KnowledgeBase,
+    pub(super) llm_alias: Option<String>,
     streaming: Option<Arc<PipelineSystem>>,
     scope: RecallScope,
-    extractors: Arc<ModalityRegistry>,
+    pub(super) extractors: Arc<ModalityRegistry>,
 }
 
 impl fmt::Debug for Uniko {
@@ -331,7 +333,7 @@ enum Location {
 /// let memory = Uniko::builder()
 ///     .path("./agent-memory")
 ///     .embedding(EmbeddingConfig::nomic_v15())
-///     .llm(LlmSpec::openai("answerer", "gpt-4o-mini", None))
+///     .llm(LlmSpec::openai("generate/answer", "gpt-4o-mini", None))
 ///     .scope_to_agent()
 ///     .build()
 ///     .await?;
@@ -346,10 +348,13 @@ pub struct UnikoBuilder {
     embedding: Option<EmbeddingConfig>,
     reranker: Option<RerankerConfig>,
     nlp: Option<NlpConfig>,
-    llm: Option<LlmSpec>,
+    llms: Vec<LlmSpec>,
+    answer_alias: Option<String>,
     streaming: bool,
     scope: RecallScope,
     extractors: ModalityRegistry,
+    runtime: Option<SharedRuntime>,
+    prefetch: PrefetchPolicy,
 }
 
 impl UnikoBuilder {
@@ -399,9 +404,28 @@ impl UnikoBuilder {
     }
 
     /// Register an LLM, enabling [`Agent::answer`](crate::Agent::answer).
+    ///
+    /// Chainable: each call registers one more generation model. The first
+    /// one answers unless [`answer_alias`](UnikoBuilder::answer_alias)
+    /// names another. Registering the same alias twice fails
+    /// [`build`](UnikoBuilder::build).
     #[must_use]
     pub fn llm(mut self, spec: LlmSpec) -> Self {
-        self.llm = Some(spec);
+        self.llms.push(spec);
+        self
+    }
+
+    /// Choose which generation alias [`Agent::answer`](crate::Agent::answer)
+    /// uses.
+    ///
+    /// The alias may come from [`llm`](UnikoBuilder::llm) or from the
+    /// catalog file in [`UnikoConfig::catalog_path`]. Defaults to the first
+    /// [`llm`](UnikoBuilder::llm). [`build`](UnikoBuilder::build) fails with
+    /// [`UnikoError::Config`] when the alias is not in the catalog or is
+    /// not a generation model.
+    #[must_use]
+    pub fn answer_alias(mut self, alias: impl Into<String>) -> Self {
+        self.answer_alias = Some(alias.into());
         self
     }
 
@@ -457,36 +481,140 @@ impl UnikoBuilder {
         self
     }
 
+    /// Open the store over a [`SharedRuntime`] instead of loading its own
+    /// models, so several instances load each model once.
+    ///
+    /// Build the runtime with [`build_runtime`](UnikoBuilder::build_runtime)
+    /// from a builder with the same models (embedding, reranker, NLP and
+    /// LLMs). [`build`](UnikoBuilder::build) fails with
+    /// [`UnikoError::Config`] when the runtime does not serve this
+    /// builder's models. [`prefetch`](UnikoBuilder::prefetch) does not
+    /// apply: the runtime's own policy already decided that.
+    ///
+    /// Shutting this instance down leaves the runtime loaded for the
+    /// others; it is freed when the last handle and store holding it go.
+    #[must_use]
+    pub fn runtime(mut self, runtime: SharedRuntime) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// When to load models: [`PrefetchPolicy::Eager`] (the default) loads
+    /// them all before [`build`](UnikoBuilder::build) returns, `Lazy` on
+    /// first use, and `Background` on a background task.
+    ///
+    /// With any policy, a model that fails to load is recorded (see
+    /// [`Uniko::capabilities`]) and the others still load.
+    #[must_use]
+    pub fn prefetch(mut self, policy: PrefetchPolicy) -> Self {
+        self.prefetch = policy;
+        self
+    }
+
+    /// Build a [`SharedRuntime`] for this builder's models (embedding,
+    /// reranker, NLP, catalog file and LLMs), loading them as
+    /// [`prefetch`](UnikoBuilder::prefetch) says. Pass it to
+    /// [`runtime`](UnikoBuilder::runtime) on each builder that should share
+    /// it. The store settings (path, streaming, scope, extractors) are not
+    /// used here.
+    ///
+    /// # Errors
+    ///
+    /// [`UnikoError::Config`] for an invalid config or [`LlmSpec`], as for
+    /// [`build`](UnikoBuilder::build).
+    pub async fn build_runtime(self) -> Result<SharedRuntime, UnikoError> {
+        let prefetch = self.prefetch;
+        let answer_alias = self.default_answer_alias();
+        let (config, extra_catalog) = self.models().await?;
+        let runtime = SharedRuntime::build(&config, extra_catalog, prefetch).await?;
+        match answer_alias {
+            Some(alias) => runtime.with_answer_alias(alias),
+            None => Ok(runtime),
+        }
+    }
+
+    /// `answer_alias`, else the first `.llm()`.
+    fn default_answer_alias(&self) -> Option<String> {
+        self.answer_alias
+            .clone()
+            .or_else(|| self.llms.first().map(|l| l.alias.clone()))
+    }
+
+    /// The merged config and the validated LLM catalog entries.
+    async fn models(&self) -> Result<(UnikoConfig, Vec<ModelAliasSpec>), UnikoError> {
+        let mut config = self.config.clone().unwrap_or_default();
+        if let Some(embedding) = &self.embedding {
+            config.embedding = embedding.clone();
+        }
+        if let Some(reranker) = &self.reranker {
+            config.reranker = reranker.clone();
+        }
+        if let Some(nlp) = &self.nlp {
+            config.nlp = nlp.clone();
+        }
+        let mut seen = std::collections::HashSet::new();
+        for spec in &self.llms {
+            if !seen.insert(spec.alias.as_str()) {
+                return Err(UnikoError::Config(format!(
+                    "LLM alias '{}' is registered more than once",
+                    spec.alias
+                )));
+            }
+            spec.validate().await?;
+        }
+        let extra_catalog = self
+            .llms
+            .iter()
+            .cloned()
+            .map(LlmSpec::into_alias_spec)
+            .collect();
+        Ok((config, extra_catalog))
+    }
+
     /// Build the [`Uniko`] instance.
     ///
     /// # Errors
     ///
-    /// Propagates store-open failures (config validation, model warmup).
+    /// - [`UnikoError::Config`] when an [`LlmSpec`] is invalid (unknown or
+    ///   non-generation provider, bad or secret-bearing options, an alias
+    ///   registered twice) or the answer alias is missing from the catalog
+    ///   or is not a generation model.
+    /// - Store-open failures (config validation, model warmup).
     pub async fn build(self) -> Result<Uniko, UnikoError> {
-        let mut config = self.config.unwrap_or_default();
-        if let Some(embedding) = self.embedding {
-            config.embedding = embedding;
-        }
-        if let Some(reranker) = self.reranker {
-            config.reranker = reranker;
-        }
-        if let Some(nlp) = self.nlp {
-            config.nlp = nlp;
-        }
+        let (config, extra_catalog) = self.models().await?;
         let pipeline_config = PipelineConfig::from_uniko_config(&config);
-
-        let llm_alias = self.llm.as_ref().map(|l| l.alias.clone());
-        let extra_catalog: Vec<ModelAliasSpec> = self
-            .llm
-            .map(|l| vec![l.into_alias_spec()])
-            .unwrap_or_default();
-
-        let kb = match self.location {
-            Location::InMemory => {
-                KnowledgeBase::in_memory_with_xervo(config, extra_catalog).await?
+        // Check the answer alias against the catalog the store will have,
+        // before opening it: a typo should not first create the store and
+        // load every model.
+        let entries = match &self.runtime {
+            Some(runtime) => {
+                check_llms_served(runtime, &extra_catalog)?;
+                runtime.model_entries()
             }
-            Location::Path(path) => {
-                KnowledgeBase::open_with_xervo(path, config, extra_catalog).await?
+            None => KnowledgeBase::catalog_entries(&config, &extra_catalog)?,
+        };
+        // Over a shared runtime the LLMs belong to the runtime, so the
+        // answer alias recorded when it was built applies by default.
+        let llm_alias = self.default_answer_alias().or_else(|| {
+            self.runtime
+                .as_ref()
+                .and_then(|r| r.answer_alias().map(str::to_string))
+        });
+        if let Some(alias) = &llm_alias {
+            check_answer_alias(&entries, alias)?;
+        }
+
+        let kb = match (&self.runtime, self.location) {
+            (Some(runtime), location) => match location {
+                Location::InMemory => KnowledgeBase::in_memory_shared(config, runtime).await?,
+                Location::Path(path) => KnowledgeBase::open_shared(path, config, runtime).await?,
+            },
+            (None, Location::InMemory) => {
+                KnowledgeBase::in_memory_with_prefetch(config, extra_catalog, self.prefetch).await?
+            }
+            (None, Location::Path(path)) => {
+                KnowledgeBase::open_with_prefetch(path, config, extra_catalog, self.prefetch)
+                    .await?
             }
         };
         crate::rules::register_stdlib_rules(&kb).await?;
@@ -512,12 +640,66 @@ impl UnikoBuilder {
     }
 }
 
+/// Check that a shared runtime serves every LLM the builder registered.
+///
+/// LLMs belong to the runtime (they are part of its catalog), so a builder
+/// using one may repeat them, as long as they match what the runtime holds.
+fn check_llms_served(runtime: &SharedRuntime, llms: &[ModelAliasSpec]) -> Result<(), UnikoError> {
+    for spec in llms {
+        runtime.check_spec(spec).map_err(|e| {
+            let detail = match e {
+                UnikoError::Config(m) => m,
+                other => other.to_string(),
+            };
+            UnikoError::Config(format!(
+                "{detail}; register LLM alias '{}' the same way on the builder that \
+                 built the runtime",
+                spec.alias
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Check that the answer alias names a generation model in `entries`.
+fn check_answer_alias(entries: &[ModelEntry], alias: &str) -> Result<(), UnikoError> {
+    match entries.iter().find(|e| e.alias == alias) {
+        None => Err(UnikoError::Config(format!(
+            "answer alias '{alias}' is not in the model catalog"
+        ))),
+        Some(e) if e.task != ModelTask::Generate => Err(UnikoError::Config(format!(
+            "answer alias '{alias}' is a {:?} model, not a generation model",
+            e.task
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
+/// Option keys that would carry a credential inline. Credentials are named
+/// by environment variable instead ([`LlmSpec::api_key_env`]), so the
+/// secret never sits in the catalog, logs or `Debug` output.
+const SECRET_OPTION_KEYS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "key",
+    "token",
+    "access_token",
+    "bearer_token",
+    "password",
+    "secret",
+    "client_secret",
+    "authorization",
+];
+
 /// An LLM registration for [`Agent::answer`](crate::Agent::answer).
 ///
 /// Construct via a provider helper ([`LlmSpec::openai`],
-/// [`LlmSpec::llamacpp`]); the `alias` is the handle the answer path
-/// generates under.
-#[derive(Debug, Clone)]
+/// [`LlmSpec::llamacpp`]) or, for any other compiled generation provider,
+/// [`LlmSpec::new`]. The `alias` is the handle the answer path generates
+/// under.
+///
+/// `Debug` shows the alias, provider and model, and only the option *keys*.
+#[derive(Clone)]
 pub struct LlmSpec {
     alias: String,
     provider_id: String,
@@ -525,7 +707,104 @@ pub struct LlmSpec {
     options: serde_json::Value,
 }
 
+impl fmt::Debug for LlmSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let keys: Vec<&str> = self
+            .options
+            .as_object()
+            .map(|m| m.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        f.debug_struct("LlmSpec")
+            .field("alias", &self.alias)
+            .field("provider_id", &self.provider_id)
+            .field("model_id", &self.model_id)
+            .field("option_keys", &keys)
+            .finish()
+    }
+}
+
 impl LlmSpec {
+    /// A generation model served by any compiled provider, such as
+    /// `remote/anthropic`, `remote/mistral` or `remote/gemini`
+    /// ([`uniko_store::GENERATION_PROVIDERS`] lists them).
+    ///
+    /// Add provider options with [`option`](LlmSpec::option) and the
+    /// credential's environment variable with
+    /// [`api_key_env`](LlmSpec::api_key_env). Nothing is checked here;
+    /// [`UnikoBuilder::build`] validates the provider and options before
+    /// opening the store.
+    pub fn new(
+        alias: impl Into<String>,
+        provider_id: impl Into<String>,
+        model_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            alias: alias.into(),
+            provider_id: provider_id.into(),
+            model_id: model_id.into(),
+            options: serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    /// Set one provider option (e.g. `base_url`, `anthropic_version`).
+    ///
+    /// Do not pass a credential here: keys such as `api_key` or `token`
+    /// are rejected at build. Use [`api_key_env`](LlmSpec::api_key_env).
+    #[must_use]
+    pub fn option(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
+        if !self.options.is_object() {
+            self.options = serde_json::Value::Object(serde_json::Map::new());
+        }
+        self.options[key.into()] = value.into();
+        self
+    }
+
+    /// Read the provider credential from environment variable `var` at
+    /// call time.
+    #[must_use]
+    ///
+    /// Sets the provider's credential option: `api_token_env` for
+    /// `remote/vertexai`, `api_key_env` for every other provider.
+    pub fn api_key_env(self, var: impl Into<String>) -> Self {
+        let var: String = var.into();
+        let key = if self.provider_id == "remote/vertexai" {
+            "api_token_env"
+        } else {
+            "api_key_env"
+        };
+        self.option(key, var)
+    }
+
+    /// The alias this model registers under.
+    #[must_use]
+    pub fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    /// Validate provider, credentials and options without loading.
+    async fn validate(&self) -> Result<(), UnikoError> {
+        if !uniko_store::GENERATION_PROVIDERS.contains(&self.provider_id.as_str()) {
+            return Err(UnikoError::Config(format!(
+                "LLM alias '{}': provider '{}' cannot serve generation in this build \
+                 (available: {})",
+                self.alias,
+                self.provider_id,
+                uniko_store::GENERATION_PROVIDERS.join(", ")
+            )));
+        }
+        if let Some(map) = self.options.as_object()
+            && let Some(key) = map
+                .keys()
+                .find(|k| SECRET_OPTION_KEYS.contains(&k.to_ascii_lowercase().as_str()))
+        {
+            return Err(UnikoError::Config(format!(
+                "LLM alias '{}': option '{key}' would hold a credential inline; \
+                 name its environment variable with api_key_env instead",
+                self.alias
+            )));
+        }
+        KnowledgeBase::validate_model_spec(&self.clone().into_alias_spec()).await
+    }
     /// An OpenAI-compatible chat model (optionally at a custom `base_url`).
     ///
     /// The API key is read at call time from the `OPENAI_API_KEY`
@@ -626,6 +905,20 @@ impl LlmSpec {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn api_key_env_uses_vertexais_token_option() {
+        let spec = LlmSpec::new("generate/v", "remote/vertexai", "gemini-x")
+            .api_key_env("VERTEX_TOKEN")
+            .option("project_id", "p")
+            .option("location", "us-central1");
+        spec.validate()
+            .await
+            .expect("vertexai accepts its token option");
+        let options = spec.into_alias_spec().options;
+        assert_eq!(options["api_token_env"], "VERTEX_TOKEN");
+        assert!(options.get("api_key_env").is_none());
+    }
+
     /// `remote/llamacpp` rejects unknown option keys and requires
     /// `base_url`, so the lowered alias must carry exactly that key and
     /// nothing else when no token env is named.
@@ -656,6 +949,81 @@ mod tests {
                 "base_url": "http://host:8080/v1",
                 "api_key_env": "LLAMA_TOKEN",
             })
+        );
+    }
+
+    #[test]
+    fn new_lowers_provider_options_and_key_env() {
+        let spec = LlmSpec::new("claude", "remote/anthropic", "claude-x")
+            .option("anthropic_version", "2023-06-01")
+            .api_key_env("ANTHROPIC_API_KEY")
+            .into_alias_spec();
+
+        assert_eq!(spec.provider_id, "remote/anthropic");
+        assert_eq!(spec.task, ModelTask::Generate);
+        assert_eq!(
+            spec.options,
+            serde_json::json!({
+                "anthropic_version": "2023-06-01",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            })
+        );
+    }
+
+    #[test]
+    fn debug_shows_option_keys_not_values() {
+        let spec = LlmSpec::openai("gen", "gpt", Some("https://user:pw@example.test/v1"));
+        let shown = format!("{spec:?}");
+        assert!(shown.contains("base_url"), "{shown}");
+        assert!(!shown.contains("user:pw"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_inline_credentials() {
+        let err = LlmSpec::new("gen/m", "remote/mistral", "mistral-small")
+            .option("api_key", "sk-123")
+            .validate()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, UnikoError::Config(m) if m.contains("'api_key'") && !m.contains("sk-123")),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_non_generation_providers() {
+        for provider in ["remote/voyageai", "local/onnx", "remote/nope"] {
+            let err = LlmSpec::new("gen/m", provider, "x")
+                .validate()
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, UnikoError::Config(m) if m.contains(provider) && m.contains("'gen/m'")),
+                "{err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_a_well_formed_provider_spec() {
+        LlmSpec::new("gen/m", "remote/mistral", "mistral-small")
+            .api_key_env("MISTRAL_API_KEY")
+            .validate()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_maps_bad_options_to_config() {
+        let err = LlmSpec::new("gen/m", "remote/anthropic", "claude-x")
+            .option("temperature_typo", 1)
+            .validate()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, UnikoError::Config(m) if m.contains("'gen/m'") && m.contains("temperature_typo")),
+            "{err}"
         );
     }
 }

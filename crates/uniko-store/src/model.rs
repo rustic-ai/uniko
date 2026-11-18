@@ -54,7 +54,68 @@ impl From<&ModelAliasSpec> for ModelEntry {
     }
 }
 
+/// Provider ids compiled into this build that can serve
+/// [`ModelTask::Generate`].
+///
+/// Follows the `provider-*` features the workspace enables on uni-db, and
+/// each provider's declared capabilities in uni-xervo. uni-xervo has no
+/// public provider registry to read this from, so a test checks that every
+/// entry is actually registered (`model_catalog_tests`).
+pub const GENERATION_PROVIDERS: &[&str] = &[
+    "remote/anthropic",
+    "remote/azure-openai",
+    "remote/cohere",
+    "remote/gemini",
+    "remote/llamacpp",
+    "remote/mistral",
+    "remote/openai",
+    "remote/vertexai",
+];
+
 impl KnowledgeBase {
+    /// Check one catalog entry the way opening a store would, without
+    /// opening one or loading the model.
+    ///
+    /// Builds a throwaway model runtime holding only `spec` (forced to
+    /// lazy warmup), so uni-xervo validates the provider id and its
+    /// options. No model is downloaded and no remote endpoint is called.
+    ///
+    /// # Errors
+    ///
+    /// [`UnikoError::Config`] naming the alias when the provider is not
+    /// compiled in or the options are invalid for it.
+    pub async fn validate_model_spec(spec: &ModelAliasSpec) -> Result<()> {
+        let mut probe = spec.clone();
+        probe.warmup = uni_db::WarmupPolicy::Lazy;
+        uni_db::xervo::build_model_runtime(vec![probe])
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                UnikoError::Config(format!(
+                    "model alias '{}' (provider '{}') is invalid: {e}",
+                    spec.alias, spec.provider_id
+                ))
+            })
+    }
+
+    /// The catalog a store opened with `config` and `extra_catalog` would
+    /// register, without opening one: the built-in aliases (or the
+    /// `catalog_path` file) followed by the extras.
+    ///
+    /// # Errors
+    ///
+    /// [`UnikoError::Config`] when the catalog file cannot be read or an
+    /// alias is defined twice.
+    pub fn catalog_entries(
+        config: &crate::config::UnikoConfig,
+        extra_catalog: &[ModelAliasSpec],
+    ) -> Result<Vec<ModelEntry>> {
+        Ok(crate::storage::load_catalog(config, extra_catalog)?
+            .iter()
+            .map(ModelEntry::from)
+            .collect())
+    }
+
     /// The model aliases this store registered, in catalog order.
     ///
     /// Reflects the catalog the store built at open: the built-in aliases
@@ -109,10 +170,12 @@ impl KnowledgeBase {
                 "Xervo embedding runtime not available".into(),
             ));
         }
-        xervo
+        let vectors = xervo
             .embed(alias, texts)
             .await
-            .map_err(|e| UnikoError::Embedding(e.to_string()))
+            .map_err(|e| UnikoError::Embedding(e.to_string()))?;
+        self.mark_model_loaded(alias);
+        Ok(vectors)
     }
 
     /// Embed `texts` into per-token multi-vectors (ColBERT) under `alias`,
@@ -137,10 +200,12 @@ impl KnowledgeBase {
                 "Xervo embedding runtime not available".into(),
             ));
         }
-        xervo
+        let vectors = xervo
             .embed_multivector(alias, texts)
             .await
-            .map_err(|e| UnikoError::Embedding(e.to_string()))
+            .map_err(|e| UnikoError::Embedding(e.to_string()))?;
+        self.mark_model_loaded(alias);
+        Ok(vectors)
     }
 
     /// Generate a completion for `messages` under model `alias`, returning
@@ -162,6 +227,7 @@ impl KnowledgeBase {
             .generate(alias, messages, options)
             .await
             .map_err(|e| UnikoError::Llm(e.to_string()))?;
+        self.mark_model_loaded(alias);
         Ok(result.text)
     }
 
@@ -186,6 +252,7 @@ impl KnowledgeBase {
             .rerank(alias, query, docs)
             .await
             .map_err(|e| UnikoError::Search(e.to_string()))?;
+        self.mark_model_loaded(alias);
         Ok(scored.into_iter().map(|s| (s.index, s.score)).collect())
     }
 
@@ -242,21 +309,22 @@ impl KnowledgeBase {
                 spec.task
             )));
         }
-        runtime
-            .generator(alias)
-            .await
-            .map(|_| ())
-            .map_err(|e| match e {
-                E::Config(_)
-                | E::AliasNotFound { .. }
-                | E::ProviderNotFound(_)
-                | E::CapabilityMismatch(_)
-                | E::ProviderCapabilityMissing { .. } => UnikoError::Config(format!(
-                    "alias '{alias}' is not a usable generation model: {e}"
-                )),
-                other => UnikoError::Llm(format!(
-                    "generation alias '{alias}' failed to load: {other}"
-                )),
-            })
+        let loaded = runtime.generator(alias).await;
+        match &loaded {
+            Ok(_) => self.mark_model_loaded(alias),
+            Err(e) => self.mark_model_failed(alias, &e.to_string()),
+        }
+        loaded.map(|_| ()).map_err(|e| match e {
+            E::Config(_)
+            | E::AliasNotFound { .. }
+            | E::ProviderNotFound(_)
+            | E::CapabilityMismatch(_)
+            | E::ProviderCapabilityMissing { .. } => UnikoError::Config(format!(
+                "alias '{alias}' is not a usable generation model: {e}"
+            )),
+            other => UnikoError::Llm(format!(
+                "generation alias '{alias}' failed to load: {other}"
+            )),
+        })
     }
 }

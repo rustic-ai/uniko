@@ -31,6 +31,7 @@ from .outputs import (
     AbductionResult,
     Answer,
     ArtifactView,
+    Capabilities,
     ContextBundle,
     DeletionReport,
     FinalizeReport,
@@ -784,6 +785,27 @@ class TypedUnikoBuilder:
         self._inner = self._inner.llm(_native_arg(spec))
         return self
 
+    def answer_alias(self, alias: str) -> "TypedUnikoBuilder":
+        self._inner = self._inner.answer_alias(alias)
+        return self
+
+    def runtime(self, runtime: Any) -> "TypedUnikoBuilder":
+        """A native ``SharedRuntime`` from ``build_runtime()``."""
+        self._inner = self._inner.runtime(runtime)
+        return self
+
+    def prefetch(self, policy: str) -> "TypedUnikoBuilder":
+        """``"eager"`` (default), ``"lazy"`` or ``"background"``."""
+        self._inner = self._inner.prefetch(policy)
+        return self
+
+    async def build_runtime(self) -> Any:
+        """A native ``SharedRuntime`` for this builder's models."""
+        return await self._inner.build_runtime()
+
+    def build_runtime_sync(self) -> Any:
+        return self._inner.build_runtime_sync()
+
     def streaming(self, on: bool) -> "TypedUnikoBuilder":
         self._inner = self._inner.streaming(on)
         return self
@@ -897,6 +919,12 @@ class TypedUniko:
 
     def backfill_search_text_sync(self) -> int:
         return self._inner.backfill_search_text_sync()
+
+    async def capabilities(self) -> Capabilities:
+        return Capabilities.from_native(await self._inner.capabilities())
+
+    def capabilities_sync(self) -> Capabilities:
+        return Capabilities.from_native(self._inner.capabilities_sync())
 
     async def purge(self) -> DeletionReport:
         return DeletionReport.from_native(await self._inner.purge())

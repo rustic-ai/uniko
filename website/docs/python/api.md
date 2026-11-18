@@ -83,7 +83,7 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
         .config({"recall_limit": 10, "recall_token_budget": 4096})
         .embedding("bge-small")
         .reranker(None)
-        .llm(uniko.LlmSpec.openai("answerer", "gpt-4o-mini"))
+        .llm(uniko.LlmSpec.openai("generate/answer", "gpt-4o-mini"))
         .streaming(True)
         .scope_to_agent()
         .build())
@@ -103,6 +103,7 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 | `remove_org_member` | `remove_org_member(participant_id: str, org_id: str) -> Awaitable[bool]` | `remove_org_member_sync` | Remove it. |
 | `add_team_to_org` | `add_team_to_org(team_id: str, org_id: str) -> Awaitable[bool]` | `add_team_to_org_sync` | Put a team in an org; its members get the org. |
 | `remove_team_from_org` | `remove_team_from_org(team_id: str, org_id: str) -> Awaitable[bool]` | `remove_team_from_org_sync` | Take it out again. |
+| `capabilities` | `capabilities() -> Awaitable[dict[str, Any]]` | `capabilities_sync` | Compiled features, extractors, each model's load state, the answer alias, OCR. Loads nothing. |
 | `purge` | `purge() -> Awaitable[DeletionReport]` | `purge_sync` | Erase the whole graph (dev/test reset). |
 | `shutdown` | `shutdown() -> Awaitable[None]` | `shutdown_sync` | Drain workers and close. **Consumes the handle.** |
 
@@ -111,6 +112,26 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 `UnikoBuilder.config()` accepts, so you can read it, change a value and build with it.
 `embedding.provider_options` is shown as `"<redacted>"` when set, because it can hold API keys.
 The fields and their defaults are listed in the [configuration guide](../guides/configuration.md).
+
+`capabilities()` reports what this build and instance can do:
+
+- `compiled_features`: each optional engine feature (`pdf-ocr`, `onnx`, `code-parse`, `gpu-cuda`,
+  `gpu-metal`, `candle`, `llm`, `batch-record`) and whether this build has it;
+- `extractors`: the modalities with a registered extractor;
+- `models`: one entry per catalog alias, with `alias`, `task`, `provider_id`, `model_id`,
+  `revision`, `state` (`"not_loaded"`, `"loaded"` or `"failed"`, with `error` when failed),
+  `api_key_env`, `base_url`, and the requested and active ONNX execution providers;
+- `answer_alias`, `ocr_compiled` and `ocr_configured`.
+
+Prefetch at open (with the default `prefetch("eager")`) tries every model and keeps going past one
+that fails, so a single bad alias shows up here as `"failed"` instead of stopping the others
+loading; a later successful use clears it. `extractors` lists only extractors registered with
+`extractor()`; built-in text, code, markup, structured and PDF ingest are always available. Model entries never include
+provider options; an API key appears only as its environment-variable name, and `base_url` has
+any userinfo and query string removed. `active_execution_providers` is only known for loaded
+local ONNX embedding and reranking models, and lists the providers requested minus those not
+compiled in, not proof that a GPU attached. `TypedUniko.capabilities()` returns the same as a
+`Capabilities` Pydantic model.
 
 !!! warning "`shutdown` needs sole ownership"
     `shutdown` consumes the handle and requires that all derived `Agent`/`Session` objects are
@@ -139,12 +160,29 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `embedding` | `embedding(embedding: str \| dict) -> UnikoBuilder` | — (sync) | Embedding model: a preset name or an `embedding` section. |
 | `reranker` | `reranker(reranker: str \| dict \| None) -> UnikoBuilder` | — (sync) | Reranker: `"bge-base"`, `"minilm"`, a `reranker` section, or `None` for off. |
 | `nlp` | `nlp(nlp: str \| dict) -> UnikoBuilder` | — (sync) | NLP model for entity and observation extraction: `"v1"` (default), a kniv v7 size (`"v7-tiny"`, `"v7-small"`, `"v7-medium"`, `"v7-large"`, `"v7-xlarge"`, `"v7-xlarge-d"`), or an `nlp` section. Wins over `config()` in either order. |
-| `llm` | `llm(spec: LlmSpec) -> UnikoBuilder` | — (sync) | Generation model — **required for `answer()`**. |
+| `llm` | `llm(spec: LlmSpec) -> UnikoBuilder` | — (sync) | Generation model — **required for `answer()`**. Each call adds one; the first answers by default. |
+| `answer_alias` | `answer_alias(alias: str) -> UnikoBuilder` | — (sync) | Which generation alias `answer()` uses: an `llm()` alias or one from the `catalog_path` file. `build()` raises `ConfigError` if it is missing or not a generation model. |
+| `prefetch` | `prefetch(policy: "eager" \| "lazy" \| "background") -> UnikoBuilder` | — (sync) | When models load: before `build()` returns (default), on first use, or on a background task. |
+| `runtime` | `runtime(runtime: SharedRuntime) -> UnikoBuilder` | — (sync) | Open over a runtime shared with other instances; `build()` raises `ConfigError` if it does not serve this builder's models. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
 | `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |
 | `extractor` | `extractor(modality: str, extract: Callable[[ExtractRequest], str]) -> UnikoBuilder` | — (sync) | Index `"image"`, `"audio"` or `"video"` sources as the text `extract` returns. |
 | `build` | `build() -> Awaitable[Uniko]` | `build_sync` | Terminal: produce the `Uniko` instance. |
+| `build_runtime` | `build_runtime() -> Awaitable[SharedRuntime]` | `build_runtime_sync` | Terminal: a `SharedRuntime` for this builder's models, loaded as `prefetch()` says. |
+
+To run several instances without loading each model several times, build one runtime and pass it
+to each builder. Each instance keeps its own graph, and shutting one down leaves the runtime loaded
+for the others. The LLMs belong to the runtime, so the instance builders need not repeat `llm()`:
+the answer alias of the builder that built the runtime (its `answer_alias()`, else its first
+`llm()`) answers unless `answer_alias()` names another.
+`SharedRuntime.aliases` lists the aliases it serves.
+
+```python
+runtime = await uniko.Uniko.builder().build_runtime()
+alice = await uniko.Uniko.builder().path("./alice").runtime(runtime).build()
+bob = await uniko.Uniko.builder().path("./bob").runtime(runtime).build()
+```
 
 ### Configuration
 
@@ -201,11 +239,23 @@ and synchronous.
 | `openai` | `@staticmethod openai(alias: str, model_id: str, base_url: str \| None = None)` | Key read from `OPENAI_API_KEY`. |
 | `openai_with_key_env` | `@staticmethod openai_with_key_env(alias: str, model_id: str, key_env: str, base_url: str \| None = None)` | Key read from the named env var. |
 | `llamacpp` | `@staticmethod llamacpp(alias: str, model_id: str, base_url: str, key_env: str \| None = None)` | A model held by a llama.cpp `llama-server`. `base_url` includes `/v1`; pass `key_env` only if the server runs with `--api-key`. |
+| `new` | `@staticmethod new(alias: str, provider: str, model_id: str, options: dict[str, Any] \| None = None, api_key_env: str \| None = None)` | Any compiled generation provider: `remote/anthropic`, `remote/azure-openai`, `remote/cohere`, `remote/gemini`, `remote/llamacpp`, `remote/mistral`, `remote/openai`, `remote/vertexai`. `options` are provider options; credentials go only through `api_key_env` (for `remote/vertexai` it sets `api_token_env`). |
+
+`alias` is a read-only property. Aliases take the `task/name` form. `build()` checks every spec
+before opening the store and raises `ConfigError` naming the alias for a provider that cannot
+generate, an option the provider rejects, an inline credential (`api_key`, `token`, ...), or an
+alias registered twice. `repr()` shows only the alias.
 
 ```python
-spec = uniko.LlmSpec.openai("answerer", "gpt-4o-mini")
-uni = await uniko.Uniko.builder().llm(spec).build()
+spec = uniko.LlmSpec.openai("generate/answer", "gpt-4o-mini")
+claude = uniko.LlmSpec.new(
+    "generate/claude", "remote/anthropic", "claude-sonnet-4-5", api_key_env="ANTHROPIC_API_KEY"
+)
+uni = await uniko.Uniko.builder().llm(spec).llm(claude).answer_alias("generate/claude").build()
 ```
+
+The Pydantic layer's `LlmSpecModel` takes the same spec as `{"provider": "generic", "alias": ...,
+"provider_id": ..., "model_id": ..., "options": ..., "api_key_env": ...}`.
 
 ---
 

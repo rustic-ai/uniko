@@ -54,8 +54,8 @@ pub use consolidation::{CycleStats, TripleSource};
 pub use episode::{RecordEpisodeParams, record_episode};
 #[doc(inline)]
 pub use facade::{
-    ArtifactView, Data, FinalizeReport, GoalContext, GoalPhase, GoalView, Goals, LlmSpec,
-    MessageView, ObserveResult, Outline, OutlineEntry, ReadRange, ReadResult, RecallScope,
+    ArtifactView, Capabilities, Data, FinalizeReport, GoalContext, GoalPhase, GoalView, Goals,
+    LlmSpec, MessageView, ObserveResult, Outline, OutlineEntry, ReadRange, ReadResult, RecallScope,
     SearchHit, SearchOptions, Session, SourceRef, Sources, SummarizeReport, TaskPhase, TaskView,
     ToolCall, ToolCallResult, ToolCallView, ToolOutput, Turn, TurnUnit, Uniko, UnikoBuilder,
     UnitResult,
@@ -98,7 +98,9 @@ pub use uniko_store::operations::facts::{FactUpsert, fact_id_for, fact_id_for_sc
 // method signature, surfaced so callers handle errors / name ids without
 // reaching into `uniko_store`.
 #[doc(no_inline)]
-pub use uniko_store::{DeletionReport, NodeId, UnikoError};
+pub use uniko_store::{
+    DeletionReport, ModelState, ModelStatus, NodeId, PrefetchPolicy, SharedRuntime, UnikoError,
+};
 // Logic / query surface: `Agent::query` / `run_rule` / `abduce` return
 // these; `Value` is the graph value type for query params and rows.
 #[doc(no_inline)]

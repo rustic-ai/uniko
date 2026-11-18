@@ -52,7 +52,7 @@ use uniko_memory::{EmbeddingConfig, LlmSpec, Uniko};
 let memory = Uniko::builder()
     .path("./agent-memory")
     .embedding(EmbeddingConfig::bge_small_en_v15())          // swap the embedder
-    .llm(LlmSpec::openai("answerer", "gpt-4o-mini", None))   // enables answer()
+    .llm(LlmSpec::openai("generate/answer", "gpt-4o-mini", None))   // enables answer()
     .streaming(true)                                         // enables submit()/flush()
     .scope_to_agent()                                        // reads default to the agent's visibility
     .build()
@@ -63,7 +63,10 @@ let memory = Uniko::builder()
 |---|---|
 | `.path(p)` / `.in_memory()` | Where the store lives. |
 | `.embedding(EmbeddingConfig)` | The embedder (vector search). |
-| `.llm(LlmSpec)` | A generation model — **required for `answer()`**. |
+| `.llm(LlmSpec)` | A generation model — **required for `answer()`**. Call it once per model; each call adds one. |
+| `.answer_alias(alias)` | Which generation model `answer()` uses: an `.llm()` alias or one from the `catalog_path` file. Defaults to the first `.llm()`. |
+| `.prefetch(PrefetchPolicy)` | When models load: `Eager` (default) before `build()` returns, `Lazy` on first use, `Background` on a task. |
+| `.runtime(SharedRuntime)` | Open over a runtime shared with other instances instead of loading models again. |
 | `.streaming(bool)` | Enables the fire-and-forget `submit`/`flush` lane. |
 | `.scope_to_agent()` / `.scope(RecallScope)` | Default read visibility. |
 | `.extractor(Arc<dyn ModalityExtractor>)` | A pluggable image/audio/video extractor — implement `modality()` and `extract()` on `uniko_extract::ingest::modality::ModalityExtractor` (`Send + Sync + Debug`). Without one, image/audio/video sources return `UnikoError::Unsupported`. |
@@ -71,7 +74,62 @@ let memory = Uniko::builder()
 
 **`LlmSpec`** picks the generation model: `openai(alias, model, base_url)` (reads `OPENAI_API_KEY`),
 `openai_with_key_env(...)` for a custom key var, or `llamacpp(alias, model, base_url)` for a
-llama.cpp `llama-server` you run yourself.
+llama.cpp `llama-server` you run yourself. Any other compiled generation provider goes through
+`new(alias, provider, model)`, with `.option(key, value)` for provider options and
+`.api_key_env(var)` for the credential (for `remote/vertexai` it sets that provider's
+`api_token_env` option):
+
+```rust
+let claude = LlmSpec::new("generate/claude", "remote/anthropic", "claude-sonnet-4-5")
+    .api_key_env("ANTHROPIC_API_KEY");
+let memory = Uniko::builder()
+    .llm(LlmSpec::openai("generate/answer", "gpt-4o-mini", None))
+    .llm(claude)
+    .answer_alias("generate/claude")
+    .build()
+    .await?;
+```
+
+The compiled generation providers are `remote/anthropic`, `remote/azure-openai`, `remote/cohere`,
+`remote/gemini`, `remote/llamacpp`, `remote/mistral`, `remote/openai` and `remote/vertexai`
+(`uniko_store::GENERATION_PROVIDERS`). Aliases take the `task/name` form. `build()` checks every
+`LlmSpec` before it opens the store, and fails with `UnikoError::Config` naming the alias on:
+
+- a provider that is not compiled in or cannot generate;
+- an option the provider does not accept;
+- a credential passed inline (`api_key`, `token`, ...) instead of through `api_key_env`;
+- the same alias registered twice;
+- an `answer_alias` that is not in the catalog or is not a generation model.
+
+A spec's `Debug` output shows the option keys, never their values. Remote endpoints are not called
+until the first request, so a wrong key or URL still surfaces then.
+
+### Sharing models between instances
+
+Each instance loads its own models by default. To run several (one store per user, say) without
+loading every model several times, build one `SharedRuntime` and open each instance over it:
+
+```rust
+let runtime = Uniko::builder().build_runtime().await?;       // loads the default models once
+let alice = Uniko::builder().path("./alice").runtime(runtime.clone()).build().await?;
+let bob = Uniko::builder().path("./bob").runtime(runtime.clone()).build().await?;
+```
+
+Each instance keeps its own graph; only inference is shared. `build_runtime()` uses the builder's
+model settings (embedding, reranker, NLP, catalog file and `.llm()` specs) and its `.prefetch()`
+policy. A builder using `.runtime()` must name the same models: `build()` fails with
+`UnikoError::Config` naming the alias when the runtime lacks one or holds a different model, provider,
+revision or options for it (execution providers may differ). LLMs belong to the runtime: the
+builder need not repeat its `.llm()` specs, and the answer alias of the builder that built the
+runtime (its `.answer_alias()`, else its first `.llm()`) answers unless `.answer_alias()` names
+another. A repeated spec must match the runtime's exactly, options included.
+Shutting one instance down leaves the runtime loaded for the others, and
+the load state in `capabilities()` is shared across them.
+
+One layer down, `SharedRuntime::build(&config, extra, policy)` with
+`KnowledgeBase::in_memory_shared` / `open_shared` does the same. `build_shared_runtime` and
+`open_with_runtime` are deprecated: they skip that check, and `model_status()` returns `None` for
+a store opened that way.
 
 !!! note "Capabilities, not wiring"
     You never construct a `KnowledgeBase`, a pipeline, or a model catalog. The builder is the only
@@ -364,7 +422,33 @@ supporting evidence it's soft-invalidated with a recorded reason, not silently d
 
 ---
 
-## 9. Shut down
+## 9. Check what is available
+
+`memory.capabilities().await` returns a `Capabilities` report without loading anything:
+
+- the optional engine features this build compiled in;
+- the modalities with a registered extractor;
+- each catalog model alias with its load state (`NotLoaded`, `Loaded` or `Failed` with the error);
+- the answer alias, and whether OCR is compiled in and enabled.
+
+```rust
+let caps = memory.capabilities().await;
+for model in caps.models.unwrap_or_default() {
+    println!("{} ({:?}) via {}: {:?}", model.alias, model.task, model.provider_id, model.state);
+}
+```
+
+Prefetch at open (with the default `PrefetchPolicy::Eager`) loads each alias in turn and keeps
+going past a failure, which it logs at `warn` and records as `Failed`; a later successful use
+clears it. A hybrid embedder that only uni-db's auto-embedding on write has used reads as
+`NotLoaded` until the first recall. `extractors` lists only extractors you registered; built-in
+text, code, markup, structured and PDF ingest are always available. Model entries never carry provider options; credentials show only as the
+`api_key_env` variable name and `base_url` loses any userinfo and query. The same per-alias report
+is available one layer down as `KnowledgeBase::model_status()`.
+
+---
+
+## 10. Shut down
 
 ```rust
 drop(session);
@@ -389,7 +473,7 @@ use uniko_memory::{CreateGoalParams, IngestSource, LlmSpec, Turn, Uniko};
 async fn main() -> anyhow::Result<()> {
     let memory = Uniko::builder()
         .in_memory()
-        .llm(LlmSpec::openai("answerer", "gpt-4o-mini", None))
+        .llm(LlmSpec::openai("generate/answer", "gpt-4o-mini", None))
         .build()
         .await?;
     let agent = memory.agent("assistant");
