@@ -1110,7 +1110,7 @@ L3's behavior is gated by Cargo features:
 |---|---|---|
 | `code-parse` | on | tree-sitter code AST NER + code chunking (python/rust/js/ts) |
 | `onnx` | off* | the NLP cascade + ONNX NER (`NlpPipeline`, `entities_from_nlp_result`) |
-| `pdf-ocr` | off | tiered Native+OCR PDF doc-IR (`uni-xervo-pdf`) |
+| `pdf-ocr` | off (on in every Python wheel) | tiered Native+OCR PDF doc-IR (`uni-xervo-pdf`) |
 
 \* Note the layering subtlety: uni-db's `provider-onnx` is statically linked regardless, so the embedding/NLP *runtime* is always present; the `onnx` feature only adds uniko-extract's ort-backed extraction adapters. Without `onnx`, `NlpPipeline::try_new` returns `None` and extraction falls back to rules.
 
@@ -1508,7 +1508,7 @@ succeed, counts degraded ones in `HealthTracker::record_degradations`
 | `nlp` | `uniko-extract/src/ingest/atomic.rs:75` (`nlp_diagnostic`, one count per message), called at `:451`, `:462`, `:468`, `:476`; `uniko-memory/src/action.rs:246`, `:263` (`record_action`, target `action_entities`) |
 | `observation_model` | `uniko-extract/src/observations/mod.rs:407` (`onnx` only) |
 | `observation_rules` | `uniko-extract/src/observations/mod.rs:68` (failed loads are cached and retried after 60 s) |
-| `pdf_extraction` | `uniko-extract/src/ingest/pdf/mod.rs:197`, `:224` |
+| `pdf_extraction` | `uniko-extract/src/ingest/pdf/mod.rs:214`, `:241` (failed); `:187` (`fallback` / `not_compiled`: `ocr.enabled` in a build without `pdf-ocr`) |
 | `artifact_embedding` | `uniko-extract/src/ingest/artifact.rs:518` |
 | `extractor_post_commit` | `uniko-extract/src/ingest/source.rs:198` |
 
@@ -3097,7 +3097,7 @@ Feature flags forward straight down the stack (facade features on `uniko-api` re
 |---|---|---|---|
 | `onnx` | off (facade) | uniko-extract, uniko-memory | ONNX NLP cascade + ONNX NER; declarative recall variant; abstractive answer path plumbing |
 | `code-parse` | **on** (uniko-extract default) | uniko-extract | tree-sitter code AST entity extraction + code chunking |
-| `pdf-ocr` | off | uniko-extract | tiered Native+OCR PDF doc-IR (`:Page`/`:Block`) |
+| `pdf-ocr` | off (on in every Python wheel) | uniko-extract, uniko-memory, uniko-api | tiered Native+OCR PDF doc-IR (`:Page`/`:Block`); runs only with `ocr.enabled` |
 | `llm` | off | uniko-memory, uniko-cortex | LLM abstractive summaries; LLM topic naming |
 | `gpu-cuda` | off | uniko-store (+ down) | forward CUDA GPU to uni-db |
 | `gpu-metal` | off | uniko-store (+ down) | forward Metal GPU to uni-db |

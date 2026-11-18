@@ -36,6 +36,9 @@ tempfile = "3"
 
 [features]
 onnx = ["uniko-extract/onnx"]
+# Tiered Native+OCR PDF extraction (`uni-xervo-pdf`). Still needs
+# `ocr.enabled = true` at runtime; without it PDFs stay text-only.
+pdf-ocr = ["uniko-extract/pdf-ocr"]
 # Enable the abstractive (LLM-rewritten) path for F59 summaries. When
 # absent, summary generation stays deterministic/extractive and offline.
 llm = ["uniko-cortex/llm"]

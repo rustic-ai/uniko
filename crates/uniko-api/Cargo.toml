@@ -24,6 +24,10 @@ uniko-memory = { workspace = true }
 # is already statically linked via uni-db's default `provider-onnx`; this only
 # adds uniko-extract's own ort-backed extraction adapters.
 onnx = ["uniko-memory/onnx"]
+# Forward tiered Native+OCR PDF extraction through the facade
+# (uniko-memory -> uniko-extract). Every Python wheel enables it; OCR still
+# runs only when `ocr.enabled = true`.
+pdf-ocr = ["uniko-memory/pdf-ocr"]
 # Forward GPU acceleration through the facade to uni-db
 # (uniko-memory -> uniko-store -> uni-db). Consumed by the `uniko-cuda` /
 # `uniko-metal` wheel variants. `gpu-cuda` needs the CUDA toolkit at build

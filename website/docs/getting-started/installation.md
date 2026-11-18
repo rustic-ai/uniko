@@ -217,6 +217,7 @@ uniko-extract = { path = "../uniko/crates/uniko-extract", features = ["onnx"] }
 | Feature | Default | Effect |
 |---------|---------|--------|
 | `onnx` | off | Forwards to `uniko-extract/onnx`. |
+| `pdf-ocr` | off | Forwards to `uniko-extract/pdf-ocr`. |
 | `llm` | off | Enables the abstractive (LLM-rewritten) path for session Summary generation. When absent, summary generation stays **deterministic / extractive and fully offline**. |
 | `gpu-cuda`, `gpu-metal` | off | Forward to the matching `uniko-store` feature. |
 | `candle` | off | Forwards to the matching `uniko-store` feature. |
@@ -232,8 +233,12 @@ uniko-extract = { path = "../uniko/crates/uniko-extract", features = ["onnx"] }
 
 ### `uniko-api`
 
-The facade forwards exactly four features: `onnx`, `gpu-cuda`, `gpu-metal`, and `candle`. It does **not** forward `llm` or `pdf-ocr` — enable those on `uniko-memory` and
-`uniko-extract` directly if you need them.
+The facade forwards five features: `onnx`, `pdf-ocr`, `gpu-cuda`, `gpu-metal`, and `candle`. It does
+**not** forward `llm`; enable that on `uniko-memory` directly if you need it.
+
+Every Python wheel (`uniko`, `uniko-cuda`, `uniko-metal`) is built with `onnx` and `pdf-ocr`. OCR
+still runs only when the config sets `ocr.enabled = true`; see
+[OCR for scanned PDFs](../guides/configuration.md#ocr-for-scanned-pdfs).
 
 !!! warning "GPU features are build-time"
     `gpu-cuda` and `gpu-metal` are passthrough features that flip the corresponding uni-db

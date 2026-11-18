@@ -619,14 +619,25 @@ flat text dump.
 | `normalization` | `siglip` | `"imagenet"` or `"siglip"`; the PP-OCRv5 export expects `siglip`. |
 | `execution_providers` | `None` | ONNX execution providers; `None` is the feature-aware default. |
 
-!!! warning "Not reachable through the facade today"
-    Tiered PDF extraction needs **all three** of: the `pdf-ocr` Cargo feature,
-    `ocr.enabled = true`, and a live model runtime. `pdf-ocr` is declared only
-    on `uniko-extract` and is **not forwarded** by `uniko-memory`, `uniko-api`,
-    or the Python wheels — so setting `ocr.enabled` alone changes nothing
-    unless you depend on `uniko-extract` directly and enable the feature there.
-    Without the tiered path, PDFs still ingest via the pure-Rust, text-only
-    extractor.
+Tiered PDF extraction needs **all three** of: the `pdf-ocr` Cargo feature,
+`ocr.enabled = true`, and a live model runtime.
+
+- **Python:** every wheel is built with `pdf-ocr`, so setting
+  `{"ocr": {"enabled": True}}` is enough. The first OCR ingest downloads the
+  `monkt/paddleocr-onnx` detection and recognition models.
+- **Rust:** enable `pdf-ocr` on `uniko-api`, `uniko-memory` or
+  `uniko-extract`. The rasterizer (hayro) and OCR pipeline are pure Rust on
+  top of the ONNX Runtime already linked for embeddings, so there are no extra
+  system libraries. It adds about 2.6 MiB to a release wheel.
+- **Without OCR:** with `ocr.enabled` off, PDFs ingest through the pure-Rust,
+  text-only extractor, whether or not the feature is compiled in. A build
+  without `pdf-ocr` that sets `ocr.enabled` warns, ingests the PDF as text,
+  and reports a `pdf_extraction` diagnostic with status `fallback` and code
+  `not_compiled`. `capabilities()` reports `ocr_compiled`, and the `Ocr`
+  readiness requirement fails with `not_compiled` before the store opens.
+
+A scanned page has no text layer, so text-only extraction finds nothing on
+it; only the OCR tier makes it searchable.
 
 ---
 
@@ -642,15 +653,16 @@ offline build stays lean. Enable them per crate.
 | `uniko-extract`  | `code-parse`  | **on**  | tree-sitter AST chunking for Python, Rust, JavaScript, TypeScript. |
 | `uniko-extract`  | `onnx`        | off     | ONNX runtime (`ort` + `tokenizers` + `ndarray`) for the embedder / NLP cascade adapter. |
 | `uniko-memory`   | `onnx`        | off     | Pass-through that enables `uniko-extract/onnx`. |
+| `uniko-memory`   | `pdf-ocr`     | off     | Pass-through that enables `uniko-extract/pdf-ocr`. |
 | `uniko-memory`   | `llm`         | off     | Adds an LLM-rewritten abstractive path for F59 Summaries. By default, summaries are deterministic, extractive, and fully offline. |
 | `uniko-cortex`   | `llm`         | off     | Backs `uniko-memory/llm`. |
-| `uniko-extract`  | `pdf-ocr`     | off     | Tiered PDF/OCR extraction via `uni-xervo-pdf`. Not forwarded by any higher crate — see [OCR](#ocr-for-scanned-pdfs). |
+| `uniko-extract`  | `pdf-ocr`     | off     | Tiered PDF/OCR extraction via `uni-xervo-pdf`. On in every Python wheel — see [OCR](#ocr-for-scanned-pdfs). |
 | `uniko-store`    | `candle`      | off     | uni-db's candle provider, for in-process LLM inference. |
 | `uniko-store`    | `batch-record`| off     | Diagnostic only: captures bulk-write batches for benchmark replay. Never enable in production. |
 
-`uniko-api` forwards exactly four features — `onnx`, `gpu-cuda`, `gpu-metal`,
-`candle`. It does **not** forward `llm` or `pdf-ocr`; enable those
-on `uniko-memory` / `uniko-extract` directly.
+`uniko-api` forwards five features — `onnx`, `pdf-ocr`, `gpu-cuda`,
+`gpu-metal`, `candle`. It does **not** forward `llm`; enable that on
+`uniko-memory` directly.
 
 !!! tip
     The `execution_providers` field on `EmbeddingConfig`, `NlpConfig`,

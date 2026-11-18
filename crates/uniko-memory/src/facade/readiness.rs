@@ -109,7 +109,7 @@ fn reports_providers(entry: &ModelEntry) -> bool {
         )
 }
 
-fn compiled(feature: &str) -> bool {
+pub(crate) fn compiled(feature: &str) -> bool {
     uniko_extract::COMPILED_FEATURES
         .iter()
         .any(|(name, on)| *name == feature && *on)
