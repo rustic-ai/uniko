@@ -130,3 +130,91 @@ async fn tiered_ingest_builds_doc_ir_graph() {
 
     kb.shutdown().await.unwrap();
 }
+
+/// A scanned (image-only) page has no text layer, so it must resolve on the
+/// OCR tier and still come out searchable, with page and block provenance
+/// (issue #55).
+///
+/// The text assertions fail on uni-xervo 0.19.2, which drops spaces
+/// (rustic-ai/uni-xervo#68) and cuts long lines short (#69); tracked in #75.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scanned_pdf_is_ocr_extracted_with_provenance() {
+    if !should_run_expensive() {
+        eprintln!("skipping: set EXPENSIVE_TESTS=1 to run the tiered OCR path");
+        return;
+    }
+
+    let mut config = UnikoConfig::default();
+    config.ocr.enabled = true;
+    let kb = KnowledgeBase::in_memory(config)
+        .await
+        .expect("in-memory KB with OCR enabled");
+
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/scanned.pdf"
+    ))
+    .expect("read scanned.pdf fixture");
+
+    let opts = PdfIngestOptions {
+        artifact_id: "pdf-scanned-1".into(),
+        caller_supplied_id: true,
+        extractor: None,
+        source_path: Some("tests/fixtures/scanned.pdf".into()),
+        session_id: None,
+        triggered_by_message_id: None,
+        category: None,
+        source_id: None,
+        revision_id: None,
+    };
+    let result = ingest_pdf(&kb, PdfInput::Bytes(bytes), opts)
+        .await
+        .expect("tiered ingest_pdf");
+    assert!(
+        result.extraction_failure.is_none(),
+        "{:?}",
+        result.extraction_failure
+    );
+    assert_eq!(result.page_count, 1);
+    assert!(!result.block_node_ids.is_empty(), "OCR must produce blocks");
+
+    let session = kb.db().session();
+    let rows = session
+        .query(
+            "MATCH (a:Artifact {artifact_id: 'pdf-scanned-1'})-[:HAS_PAGE]->(p:Page) \
+             -[:CONTAINS]->(b:Block) \
+             RETURN p.page_number AS page, b.produced_by AS tier, b.text AS text, \
+                    b.confidence_kind AS conf, b.bbox_x0 AS x0 \
+             ORDER BY b.reading_order",
+        )
+        .await
+        .expect("query blocks");
+    assert!(!rows.rows().is_empty(), "expected OCR blocks");
+    let mut text = String::new();
+    for r in rows.rows() {
+        assert_eq!(r.get::<i64>("page").unwrap(), 1);
+        assert_eq!(r.get::<String>("tier").unwrap(), "ocr");
+        assert!(!r.get::<String>("conf").unwrap().is_empty());
+        assert!(r.get::<f64>("x0").is_ok(), "OCR blocks carry a bbox");
+        text.push_str(&r.get::<String>("text").unwrap());
+        text.push('\n');
+    }
+    let lower = text.to_lowercase();
+    assert!(
+        lower.contains("pump") && lower.contains("okafor"),
+        "OCR text should contain the scanned words, got: {text}"
+    );
+
+    let recalled = kb
+        .recall_chunk_and_entity_scoped(&[], "north pump replaced", &[], 10, 0.0, 1.0, None)
+        .await;
+    assert!(
+        recalled
+            .iter()
+            .any(|r| r.content.to_lowercase().contains("pump")),
+        "OCR text should be recallable, got: {:?}",
+        recalled.iter().map(|r| &r.content).collect::<Vec<_>>()
+    );
+
+    kb.shutdown().await.unwrap();
+}

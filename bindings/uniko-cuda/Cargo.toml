@@ -30,7 +30,7 @@ path = "../uniko-py/src/lib.rs"
 # `candle-*?/cuda` forwards fire, so candle compiles CUDA kernels — this
 # REQUIRES the CUDA toolkit (nvcc) at build time (see
 # .github/workflows/release.yml `build-cuda-linux`, CUDA_COMPUTE_CAP=80).
-uniko-api = { workspace = true, features = ["onnx", "gpu-cuda", "candle"] }
+uniko-api = { workspace = true, features = ["onnx", "pdf-ocr", "gpu-cuda", "candle"] }
 pyo3 = { workspace = true, features = ["abi3-py310"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 tokio = { workspace = true }

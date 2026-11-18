@@ -5877,6 +5877,39 @@ mod ingest_diagnostics {
         );
     }
 
+    /// Asking for OCR in a build without `pdf-ocr` still ingests the PDF as
+    /// text, and the outcome says OCR was not available (issue #55).
+    #[tokio::test]
+    async fn ocr_without_the_feature_is_reported() {
+        if crate::facade::readiness::compiled("pdf-ocr") {
+            eprintln!("skipping: this build has pdf-ocr; the tiered test covers it");
+            return;
+        }
+        let mut config = config();
+        config.ocr.enabled = true;
+        let Ok(memory) = Uniko::builder()
+            .raw_config(config)
+            .prefetch(uniko_store::PrefetchPolicy::Lazy)
+            .build()
+            .await
+        else {
+            eprintln!("skipping: instance unavailable");
+            return;
+        };
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../uniko-extract/tests/fixtures/dummy.pdf"
+        ))
+        .unwrap();
+        let source = IngestSource::bytes(bytes)
+            .with_mime(uniko_pipes::content::Mime::parse("application/pdf").unwrap());
+        let outcome = memory.agent("a").session("s").ingest(source).await.unwrap();
+        let pdf = find(outcome.diagnostics(), Stage::PdfExtraction);
+        assert_eq!(pdf.len(), 1, "{:?}", outcome.diagnostics());
+        assert_eq!(pdf[0].status, StageStatus::Fallback);
+        assert_eq!(pdf[0].code, Some(DiagnosticCode::NotCompiled));
+    }
+
     /// Streaming ingest has no per-call result, so its degradations are
     /// counted in the pipeline health.
     #[tokio::test]
