@@ -176,6 +176,23 @@ pub async fn prepare_pdf(
     //    is exactly why they belong out here.
     let use_tiered =
         cfg!(feature = "pdf-ocr") && kb.config().ocr.enabled && kb.model_runtime().is_some();
+    // OCR was asked for but this build cannot run it: say so rather than
+    // quietly ingesting a scanned PDF as an empty text-only document.
+    if kb.config().ocr.enabled && !cfg!(feature = "pdf-ocr") {
+        tracing::warn!(
+            target: "uniko_extract::ingest::pdf",
+            artifact_id = %opts.artifact_id,
+            "ocr.enabled is set but this build lacks the `pdf-ocr` feature; using text-only extraction",
+        );
+        uniko_store::diagnostics::record(
+            uniko_store::Diagnostic::new(
+                uniko_store::Stage::PdfExtraction,
+                uniko_store::StageStatus::Fallback,
+                uniko_store::DiagnosticCode::NotCompiled,
+            )
+            .target(opts.artifact_id.clone()),
+        );
+    }
 
     let mut extraction_failure: Option<PdfExtractError> = None;
 

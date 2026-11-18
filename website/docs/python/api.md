@@ -124,6 +124,10 @@ The fields and their defaults are listed in the [configuration guide](../guides/
   `api_key_env`, `base_url`, and the requested and active ONNX execution providers;
 - `answer_alias`, `ocr_compiled` and `ocr_configured`.
 
+Every published wheel compiles OCR in, so `ocr_compiled` is `True`; `ocr_configured` stays `False`
+until the config sets `{"ocr": {"enabled": True}}`. With it on, a scanned PDF's pages are OCR'd
+into `:Page`/`:Block` nodes with bounding boxes and confidence, and its text is recallable.
+
 Prefetch at open (with the default `prefetch("eager")`) tries every model and keeps going past one
 that fails, so a single bad alias shows up here as `"failed"` instead of stopping the others
 loading; a later successful use clears it. `extractors` lists only extractors registered with

@@ -23,7 +23,10 @@ crate-type = ["cdylib"]
 # The single facade dependency. `onnx` forwards to uniko-extract's ort-backed
 # extraction adapters; the embedding/NLP runtime itself rides in via uni-db's
 # default provider-onnx (statically linked).
-uniko-api = { workspace = true, features = ["onnx"] }
+# `pdf-ocr` compiles in the tiered Native+OCR PDF path (hayro rasterizer +
+# PaddleOCR via `uni-xervo-pdf`, about +2.6 MiB on the wheel). It runs only
+# when the config sets `ocr.enabled = true`; PDFs stay text-only otherwise.
+uniko-api = { workspace = true, features = ["onnx", "pdf-ocr"] }
 # `extension-module` comes from the workspace pin; `abi3-py310` builds a single
 # wheel per platform spanning CPython >= 3.10 (matches the sibling uni-db wheel).
 pyo3 = { workspace = true, features = ["abi3-py310"] }
