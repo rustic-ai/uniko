@@ -5378,3 +5378,523 @@ async fn build_runtime_rejects_an_answer_alias_it_cannot_answer_with() {
         "{err}"
     );
 }
+
+// ── Recall diagnostics (issue #59) ───────────────────────────────────────
+
+mod recall_diagnostics {
+    use uniko_store::config::UnikoConfig;
+    use uniko_store::{Diagnostic, DiagnosticCode, Stage, StageStatus, UnikoError};
+
+    use crate::Uniko;
+    use crate::recall::{RecallConfig, recall};
+
+    fn find(diags: &[Diagnostic], stage: Stage) -> Vec<&Diagnostic> {
+        diags.iter().filter(|d| d.stage == stage).collect()
+    }
+
+    async fn store(config: UnikoConfig) -> Option<Uniko> {
+        match Uniko::builder().raw_config(config).build().await {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("skipping: instance unavailable: {e}");
+                None
+            }
+        }
+    }
+
+    fn no_reranker() -> UnikoConfig {
+        let mut config = UnikoConfig::default();
+        config.reranker.enabled = false;
+        config
+    }
+
+    /// A healthy recall reports the stages it ran and nothing degraded.
+    #[tokio::test]
+    async fn a_healthy_recall_reports_applied_stages_only() {
+        let Some(memory) = store(UnikoConfig::default()).await else {
+            return;
+        };
+        let agent = memory.agent("a");
+        let mut session = agent.session("s");
+        if session
+            .observe(crate::Turn::new("alice", "I adopted a beagle called Rex"))
+            .await
+            .is_err()
+        {
+            eprintln!("skipping: ingest unavailable");
+            return;
+        }
+        let bundle = agent.recall("what dog did alice adopt").await.unwrap();
+        let embed = find(&bundle.diagnostics, Stage::QueryEmbedding);
+        assert_eq!(embed.len(), 1, "{:?}", bundle.diagnostics);
+        if embed[0].status == StageStatus::Failed {
+            eprintln!("skipping: the embedder is unavailable here");
+            return;
+        }
+        assert_eq!(embed[0].status, StageStatus::Applied);
+        assert!(embed[0].count.unwrap() >= 1);
+        let degraded: Vec<_> = bundle
+            .diagnostics
+            .iter()
+            .filter(|d| d.status.is_degraded())
+            .collect();
+        if !degraded.is_empty() && degraded.iter().all(|d| d.stage == Stage::Rerank) {
+            eprintln!("skipping: the reranker is unavailable here");
+            return;
+        }
+        assert!(degraded.is_empty(), "{:?}", bundle.diagnostics);
+        // The reranker is on by default: it ran, or the cascade answered
+        // before Phase 3 and says so.
+        let rerank = find(&bundle.diagnostics, Stage::Rerank);
+        assert_eq!(rerank.len(), 1, "{:?}", bundle.diagnostics);
+        assert!(
+            rerank[0].status == StageStatus::Applied
+                || rerank[0].code == Some(DiagnosticCode::NotReached),
+            "{:?}",
+            rerank[0]
+        );
+        // Diagnostics carry no query text.
+        let json = serde_json::to_string(&bundle.diagnostics).unwrap();
+        assert!(!json.contains("beagle") && !json.contains("dog"), "{json}");
+    }
+
+    /// A requested reranker reports whether it ran: applied once Phase 3
+    /// reranks, skipped (`not_reached`) when the cascade returns earlier.
+    #[tokio::test]
+    async fn a_requested_reranker_reports_applied_or_not_reached() {
+        let Some(memory) = store(UnikoConfig::default()).await else {
+            return;
+        };
+        let mut config = RecallConfig::from_uniko_config(memory.config());
+        assert!(config.reranker_enabled, "the default config reranks");
+
+        // Nothing stored: the cascade returns before reranking.
+        let bundle = recall(&memory.kb, "anything at all", &config)
+            .await
+            .unwrap();
+        let rerank = find(&bundle.diagnostics, Stage::Rerank);
+        assert_eq!(rerank.len(), 1, "{:?}", bundle.diagnostics);
+        assert_eq!(rerank[0].status, StageStatus::Skipped);
+        assert_eq!(rerank[0].code, Some(DiagnosticCode::NotReached));
+
+        if memory
+            .agent("a")
+            .session("s")
+            .ingest(crate::IngestSource::text(
+                "# Runbook\n\nThe deploy key rotates every Friday at noon.",
+            ))
+            .await
+            .is_err()
+        {
+            eprintln!("skipping: ingest unavailable");
+            return;
+        }
+        config.phase2_coverage_gate = f64::INFINITY;
+        let bundle = recall(&memory.kb, "when does the deploy key rotate", &config)
+            .await
+            .unwrap();
+        let rerank = find(&bundle.diagnostics, Stage::Rerank);
+        assert_eq!(rerank.len(), 1, "{:?}", bundle.diagnostics);
+        if rerank[0].status == StageStatus::Fallback {
+            eprintln!("skipping: the reranker model is unavailable here");
+            return;
+        }
+        assert_eq!(rerank[0].status, StageStatus::Applied, "{:?}", rerank[0]);
+        assert_eq!(rerank[0].count, None, "counts would precede access control");
+    }
+
+    /// Stages asked for but unavailable on this store fall back or fail;
+    /// the recall still succeeds, and strict mode turns that into an error.
+    #[tokio::test]
+    async fn unavailable_stages_degrade_and_strict_rejects_them() {
+        let Some(memory) = store(no_reranker()).await else {
+            return;
+        };
+        let agent = memory.agent("a");
+        if agent
+            .session("s")
+            // A document, so Phase 3 has a chunk to rerank.
+            .ingest(crate::IngestSource::text(
+                "# Runbook\n\nThe deploy key rotates every Friday at noon.",
+            ))
+            .await
+            .is_err()
+        {
+            eprintln!("skipping: ingest unavailable");
+            return;
+        }
+        // No reranker model, no hybrid embedder: the cross-encoder call,
+        // the sparse channel and ColBERT all have nothing to run on.
+        let mut config = RecallConfig::from_uniko_config(memory.config());
+        config.reranker_enabled = true;
+        config.recall_sparse_enabled = true;
+        // Never exit after Phase 2, so the Phase 3 stages (reranking) run.
+        config.phase2_coverage_gate = f64::INFINITY;
+        let bundle = recall(&memory.kb, "when does the deploy key rotate", &config)
+            .await
+            .expect("best-effort recall still succeeds");
+        assert!(
+            !bundle.items.is_empty(),
+            "the runbook chunk should be recalled"
+        );
+        let rerank = find(&bundle.diagnostics, Stage::Rerank);
+        assert_eq!(rerank.len(), 1, "{:?}", bundle.diagnostics);
+        assert_eq!(rerank[0].status, StageStatus::Fallback);
+        assert_eq!(rerank[0].code, Some(DiagnosticCode::RerankFailed));
+        let sparse = find(&bundle.diagnostics, Stage::Sparse);
+        assert!(!sparse.is_empty(), "{:?}", bundle.diagnostics);
+        assert!(
+            sparse
+                .iter()
+                .all(|d| d.status == StageStatus::Failed
+                    && d.code == Some(DiagnosticCode::QueryFailed)),
+            "{sparse:?}"
+        );
+
+        config.reranker_style = "colbert".into();
+        config.recall_sparse_enabled = false;
+        let bundle = recall(&memory.kb, "when does the deploy key rotate", &config)
+            .await
+            .unwrap();
+        assert!(!bundle.items.is_empty());
+        let colbert = find(&bundle.diagnostics, Stage::Colbert);
+        assert_eq!(colbert.len(), 1, "{:?}", bundle.diagnostics);
+        assert_eq!(colbert[0].status, StageStatus::Fallback);
+        assert_eq!(colbert[0].code, Some(DiagnosticCode::QueryEmbedFailed));
+
+        config.strict = true;
+        let err = recall(&memory.kb, "when does the deploy key rotate", &config)
+            .await
+            .unwrap_err();
+        match err {
+            UnikoError::Degraded(d) => {
+                assert!(d.iter().any(|d| d.stage == Stage::Colbert), "{d:?}");
+                assert!(d.iter().all(|d| d.status.is_degraded()));
+            }
+            other => panic!("expected Degraded, got {other}"),
+        }
+    }
+
+    /// With a hybrid embedder the sparse channel and ColBERT run and say so
+    /// (a large download, so opt in with `EXPENSIVE_TESTS=1`).
+    #[tokio::test]
+    async fn a_hybrid_store_applies_sparse_and_colbert() {
+        if std::env::var("EXPENSIVE_TESTS").as_deref() != Ok("1") {
+            eprintln!("skipping: set EXPENSIVE_TESTS=1 to load BGE-M3");
+            return;
+        }
+        let mut config = no_reranker();
+        config.embedding = uniko_store::config::EmbeddingConfig::bge_m3();
+        let Some(memory) = store(config).await else {
+            return;
+        };
+        memory
+            .agent("a")
+            .session("s")
+            .ingest(crate::IngestSource::text(
+                "# Runbook\n\nThe deploy key rotates every Friday at noon.",
+            ))
+            .await
+            .unwrap();
+        let mut config = RecallConfig::from_uniko_config(memory.config());
+        config.recall_sparse_enabled = true;
+        config.reranker_enabled = true;
+        config.reranker_style = "colbert".into();
+        config.phase2_coverage_gate = f64::INFINITY;
+        config.strict = true;
+        let bundle = recall(&memory.kb, "when does the deploy key rotate", &config)
+            .await
+            .expect("nothing degrades on a hybrid store");
+        let sparse = find(&bundle.diagnostics, Stage::Sparse);
+        assert!(
+            sparse.iter().any(|d| d.status == StageStatus::Applied
+                && d.target.as_deref() == Some("Chunk")
+                && d.count.unwrap_or(0) > 0),
+            "{:?}",
+            bundle.diagnostics
+        );
+        let colbert = find(&bundle.diagnostics, Stage::Colbert);
+        assert_eq!(colbert.len(), 1, "{:?}", bundle.diagnostics);
+        assert_eq!(colbert[0].status, StageStatus::Applied);
+    }
+
+    /// An embedder that cannot load leaves recall lexical-only, which is
+    /// reported as a failed query-embedding stage.
+    #[tokio::test]
+    async fn a_failed_query_embedding_is_reported() {
+        let mut config = no_reranker();
+        config.embedding.model_id = "uniko-test/no-such-model-repo".into();
+        let built = Uniko::builder()
+            .raw_config(config)
+            .prefetch(uniko_store::PrefetchPolicy::Lazy)
+            .build()
+            .await;
+        let Ok(memory) = built else {
+            eprintln!("skipping: store did not open with a broken embedder");
+            return;
+        };
+        let agent = memory.agent("a");
+        let bundle = agent.recall("anything at all").await.unwrap();
+        let embed = find(&bundle.diagnostics, Stage::QueryEmbedding);
+        assert!(!embed.is_empty(), "{:?}", bundle.diagnostics);
+        assert!(
+            embed
+                .iter()
+                .all(|d| d.status == StageStatus::Failed
+                    && d.code == Some(DiagnosticCode::EmbedFailed)),
+            "{embed:?}"
+        );
+        let strict = agent
+            .recall_with(
+                "anything at all",
+                crate::Scope::default(),
+                &crate::RecallOverrides::default().strict(true),
+            )
+            .await;
+        assert!(matches!(strict, Err(UnikoError::Degraded(_))), "{strict:?}");
+    }
+}
+
+// ── Ingest diagnostics (issue #59) ───────────────────────────────────────
+
+mod ingest_diagnostics {
+    use uniko_store::config::UnikoConfig;
+    use uniko_store::{Diagnostic, DiagnosticCode, Stage, StageStatus};
+
+    use crate::{IngestSource, Turn, Uniko};
+
+    fn find(diags: &[Diagnostic], stage: Stage) -> Vec<&Diagnostic> {
+        diags.iter().filter(|d| d.stage == stage).collect()
+    }
+
+    fn config() -> UnikoConfig {
+        let mut config = UnikoConfig::default();
+        config.reranker.enabled = false;
+        config
+    }
+
+    async fn store(config: UnikoConfig, streaming: bool) -> Option<Uniko> {
+        match Uniko::builder()
+            .raw_config(config)
+            .streaming(streaming)
+            .build()
+            .await
+        {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("skipping: instance unavailable: {e}");
+                None
+            }
+        }
+    }
+
+    fn corrupt_pdf() -> IngestSource {
+        IngestSource::bytes(b"%PDF-1.7\nnot really a pdf".to_vec())
+            .with_mime(uniko_pipes::content::Mime::parse("application/pdf").unwrap())
+    }
+
+    /// With the NLP model unavailable, rules stand in, the turn is still
+    /// recorded, and the result says so.
+    #[tokio::test]
+    async fn an_unavailable_nlp_model_is_reported_as_a_fallback() {
+        let mut config = config();
+        config.nlp.model_id = "uniko-test/no-such-model-repo".into();
+        let Some(memory) = store(config, false).await else {
+            return;
+        };
+        let mut session = memory.agent("a").session("s");
+        let observed = session
+            .observe(Turn::new("alice", "I moved to Lisbon last spring"))
+            .await
+            .expect("the turn is recorded without NLP");
+        let nlp = find(&observed.diagnostics, Stage::Nlp);
+        assert_eq!(nlp.len(), 1, "{:?}", observed.diagnostics);
+        if cfg!(feature = "onnx") {
+            assert_eq!(nlp[0].status, StageStatus::Fallback);
+            assert_eq!(nlp[0].code, Some(DiagnosticCode::NlpUnavailable));
+            let obs = find(&observed.diagnostics, Stage::ObservationModel);
+            assert!(
+                !obs.is_empty()
+                    && obs
+                        .iter()
+                        .all(|d| d.code == Some(DiagnosticCode::RuleBased)),
+                "{:?}",
+                observed.diagnostics
+            );
+        } else {
+            assert_eq!(nlp[0].status, StageStatus::Skipped);
+            assert_eq!(nlp[0].code, Some(DiagnosticCode::NotCompiled));
+        }
+        let json = serde_json::to_string(&observed.diagnostics).unwrap();
+        assert!(!json.contains("Lisbon"), "{json}");
+    }
+
+    /// A healthy ingest reports the NLP stage as applied (on `onnx`
+    /// builds) and nothing degraded.
+    #[tokio::test]
+    async fn a_healthy_ingest_reports_nothing_degraded() {
+        let Some(memory) = store(config(), false).await else {
+            return;
+        };
+        let mut session = memory.agent("a").session("s");
+        let observed = session
+            .observe(Turn::new(
+                "alice",
+                "I adopted a beagle called Rex yesterday",
+            ))
+            .await
+            .unwrap();
+        if find(&observed.diagnostics, Stage::Nlp)
+            .iter()
+            .any(|d| d.code == Some(DiagnosticCode::NlpUnavailable))
+        {
+            eprintln!("skipping: the NLP model is unavailable here");
+            return;
+        }
+        assert!(
+            observed.diagnostics.iter().all(|d| !d.status.is_degraded()),
+            "{:?}",
+            observed.diagnostics
+        );
+        if cfg!(feature = "onnx") {
+            let nlp = find(&observed.diagnostics, Stage::Nlp);
+            assert_eq!(nlp.len(), 1, "{:?}", observed.diagnostics);
+            assert_eq!(nlp[0].status, StageStatus::Applied);
+        }
+    }
+
+    /// A missing custom rules file falls back to the bundled rules on every
+    /// message that uses them, without failing the ingest.
+    #[tokio::test]
+    async fn a_missing_rules_file_is_reported_on_each_use() {
+        if !cfg!(feature = "onnx") {
+            eprintln!("skipping: observation rules run on the onnx model path only");
+            return;
+        }
+        let mut config = config();
+        config.observation_rules_path = Some("/nonexistent/uniko-rules.yml".into());
+        let Some(memory) = store(config, false).await else {
+            return;
+        };
+        let mut session = memory.agent("a").session("s");
+        for text in [
+            "I started a new job at the observatory",
+            "My sister is visiting from Porto next week",
+        ] {
+            let observed = session.observe(Turn::new("alice", text)).await.unwrap();
+            let nlp_ran = find(&observed.diagnostics, Stage::Nlp)
+                .iter()
+                .any(|d| d.status == StageStatus::Applied);
+            if !nlp_ran {
+                eprintln!("skipping: the NLP model is unavailable here, so no rules run");
+                return;
+            }
+            let rules = find(&observed.diagnostics, Stage::ObservationRules);
+            assert_eq!(rules.len(), 1, "{:?}", observed.diagnostics);
+            assert_eq!(rules[0].code, Some(DiagnosticCode::CustomRulesUnloadable));
+        }
+    }
+
+    /// A multi-turn unit reports its diagnostics once, on the unit, with a
+    /// per-message count; each turn's own list stays empty.
+    #[tokio::test]
+    async fn a_multi_turn_unit_reports_on_the_unit() {
+        let Some(memory) = store(config(), false).await else {
+            return;
+        };
+        let mut session = memory.agent("a").session("s");
+        let turns = || {
+            vec![
+                Turn::new("alice", "what's the plan for friday?").id("m-1"),
+                Turn::new("bob", "we ship the release friday morning").id("m-2"),
+            ]
+        };
+        let unit = session.commit_unit(turns()).await.unwrap();
+        assert!(unit.turns.iter().all(|t| t.diagnostics.is_empty()));
+        let nlp_messages: u32 = find(&unit.diagnostics, Stage::Nlp)
+            .iter()
+            .map(|d| d.count.unwrap_or(0))
+            .sum();
+        assert_eq!(nlp_messages, 2, "{:?}", unit.diagnostics);
+
+        // Replaying the same unit writes nothing and reports nothing.
+        let replay = session.commit_unit(turns()).await.unwrap();
+        assert!(replay.was_replay);
+        assert!(replay.diagnostics.is_empty(), "{:?}", replay.diagnostics);
+    }
+
+    /// `record_action` reports its NLP entity-linking stage.
+    #[tokio::test]
+    async fn record_action_reports_its_nlp_stage() {
+        if !cfg!(feature = "onnx") {
+            eprintln!("skipping: action entity linking runs on onnx builds only");
+            return;
+        }
+        let mut config = config();
+        config.nlp.model_id = "uniko-test/no-such-model-repo".into();
+        let Some(memory) = store(config, false).await else {
+            return;
+        };
+        let mut session = memory.agent("a").session("s");
+        session
+            .observe(Turn::new("alice", "please search the release notes"))
+            .await
+            .unwrap();
+        let result = session
+            .record_action(crate::RecordActionParams {
+                action_type: "search".into(),
+                input: Some(serde_json::json!({"q": "release notes"})),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let nlp = find(&result.diagnostics, Stage::Nlp);
+        assert_eq!(nlp.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(nlp[0].status, StageStatus::Failed);
+        assert_eq!(nlp[0].code, Some(DiagnosticCode::NlpUnavailable));
+        assert_eq!(nlp[0].target.as_deref(), Some("action_entities"));
+    }
+
+    /// A PDF that cannot be parsed is still stored, and its outcome says
+    /// extraction failed.
+    #[tokio::test]
+    async fn a_corrupt_pdf_reports_failed_extraction() {
+        let Some(memory) = store(config(), false).await else {
+            return;
+        };
+        let session = memory.agent("a").session("s");
+        let outcome = session.ingest(corrupt_pdf()).await.unwrap();
+        let pdf = find(outcome.diagnostics(), Stage::PdfExtraction);
+        assert_eq!(pdf.len(), 1, "{:?}", outcome.diagnostics());
+        assert_eq!(pdf[0].status, StageStatus::Failed);
+        assert!(
+            matches!(
+                pdf[0].code,
+                Some(DiagnosticCode::ExtractionFailed | DiagnosticCode::TieredFailed)
+            ),
+            "{:?}",
+            pdf[0]
+        );
+    }
+
+    /// Streaming ingest has no per-call result, so its degradations are
+    /// counted in the pipeline health.
+    #[tokio::test]
+    async fn streaming_ingest_counts_degradations_in_health() {
+        let Some(memory) = store(config(), true).await else {
+            return;
+        };
+        let session = memory.agent("a").session("s");
+        session.submit_source(corrupt_pdf()).await.unwrap();
+        session.flush().await.unwrap();
+        let health = memory.health().expect("streaming is on");
+        let counted: u64 = health
+            .ingest
+            .degradations
+            .iter()
+            .filter(|(k, _)| k.starts_with("pdf_extraction:"))
+            .map(|(_, n)| n)
+            .sum();
+        assert_eq!(counted, 1, "{:?}", health.ingest.degradations);
+    }
+}

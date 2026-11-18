@@ -30,9 +30,13 @@ use uniko_store::{NodeId, UnikoError};
 
 /// Load the observation rule set, honouring `UnikoConfig.observation_rules_path`.
 ///
-/// External paths are read once and cached in a process-global map keyed
-/// by canonical path. The bundled `english.yml` is also cached (parsed
-/// once) — reused across every message in a process.
+/// An external path is read once and cached in a process-global map keyed
+/// by the path as configured. A path that fails to load is cached too, so
+/// it is neither re-read nor re-logged for every message; it is tried
+/// again once [`RULES_RETRY_AFTER`] has passed, so a file fixed (or made
+/// readable) later is picked up without a restart. While it is failing,
+/// each use records an `observation_rules` fallback diagnostic and the
+/// bundled `english.yml` (parsed once) runs instead.
 #[cfg(feature = "onnx")]
 fn load_observation_rules_from_path(
     cfg_path: Option<&std::path::Path>,
@@ -41,35 +45,73 @@ fn load_observation_rules_from_path(
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
-    static EXTERNAL: OnceLock<
-        Mutex<HashMap<PathBuf, &'static crate::observations::rules_engine::Rules>>,
-    > = OnceLock::new();
+    static EXTERNAL: OnceLock<Mutex<HashMap<PathBuf, RulesEntry>>> = OnceLock::new();
 
     if let Some(path) = cfg_path {
-        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let map = EXTERNAL.get_or_init(|| Mutex::new(HashMap::new()));
-        // Recover from a poisoned lock: the cache only holds
-        // path → &'static Rules pointers, so a panic during prior
-        // insert can't have left it in an inconsistent shape.
+        // Recover from a poisoned lock: the cache only holds loaded rule
+        // pointers and failure times, which a panic cannot leave torn.
         let mut guard = map.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(r) = guard.get(&key) {
-            return r;
+        let loaded = cached_rules(&mut guard, path, std::time::Instant::now(), || {
+            crate::observations::rules_engine::load_rules_from_path(path)
+                .map(|rules| &*Box::leak(Box::new(rules)))
+                .map_err(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to load observation_rules_path; falling back to bundled rules"
+                    );
+                })
+        });
+        if let Some(rules) = loaded {
+            return rules;
         }
-        match crate::observations::rules_engine::load_rules_from_path(&key) {
-            Ok(rules) => {
-                let leaked: &'static _ = Box::leak(Box::new(rules));
-                guard.insert(key, leaked);
-                return leaked;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "failed to load observation_rules_path; falling back to bundled rules"
-                );
-            }
-        }
+        uniko_store::diagnostics::record(uniko_store::Diagnostic::new(
+            uniko_store::Stage::ObservationRules,
+            uniko_store::StageStatus::Fallback,
+            uniko_store::DiagnosticCode::CustomRulesUnloadable,
+        ));
     }
     crate::observations::rules_engine::load_bundled_rules()
+}
+
+/// How long a failed custom rules load is remembered before it is tried
+/// again.
+#[cfg(feature = "onnx")]
+const RULES_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A cached custom rules load: the rules, or when the load last failed.
+#[cfg(feature = "onnx")]
+#[derive(Clone, Copy)]
+enum RulesEntry {
+    Loaded(&'static crate::observations::rules_engine::Rules),
+    Failed(std::time::Instant),
+}
+
+/// Look `path` up in `cache`, calling `load` only when it is absent or its
+/// last failure is older than [`RULES_RETRY_AFTER`]. `None` while failing.
+#[cfg(feature = "onnx")]
+fn cached_rules(
+    cache: &mut std::collections::HashMap<std::path::PathBuf, RulesEntry>,
+    path: &std::path::Path,
+    now: std::time::Instant,
+    load: impl FnOnce() -> Result<&'static crate::observations::rules_engine::Rules, ()>,
+) -> Option<&'static crate::observations::rules_engine::Rules> {
+    match cache.get(path) {
+        Some(RulesEntry::Loaded(rules)) => return Some(rules),
+        Some(RulesEntry::Failed(at)) if now.duration_since(*at) < RULES_RETRY_AFTER => {
+            return None;
+        }
+        _ => {}
+    }
+    let entry = match load() {
+        Ok(rules) => RulesEntry::Loaded(rules),
+        Err(()) => RulesEntry::Failed(now),
+    };
+    cache.insert(path.to_path_buf(), entry);
+    match entry {
+        RulesEntry::Loaded(rules) => Some(rules),
+        RulesEntry::Failed(_) => None,
+    }
 }
 
 /// Multi-label CLS gate.
@@ -358,6 +400,20 @@ pub async fn prepare_observations(
         sentence_ctx_updated = Some(sent_ctx);
         used_model = true;
     }
+
+    // The model path ran, or rules stood in for it. Only `onnx` builds have
+    // a model path to fall back from.
+    #[cfg(feature = "onnx")]
+    uniko_store::diagnostics::record(if used_model {
+        uniko_store::Diagnostic::applied(uniko_store::Stage::ObservationModel).count(1)
+    } else {
+        uniko_store::Diagnostic::new(
+            uniko_store::Stage::ObservationModel,
+            uniko_store::StageStatus::Fallback,
+            uniko_store::DiagnosticCode::RuleBased,
+        )
+        .count(1)
+    });
 
     // 2b. Rule-based fallback (only when model unavailable).
     if !used_model {
@@ -698,5 +754,45 @@ mod resolve_temporal_in_content_tests {
             ref_date(),
         );
         assert_eq!(content, "I went 2023-05-07 and 2023-05-07 it was sunny");
+    }
+}
+
+#[cfg(all(test, feature = "onnx"))]
+mod rules_cache_tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use super::{RULES_RETRY_AFTER, cached_rules};
+
+    #[test]
+    fn a_failed_rules_load_is_cached_then_retried() {
+        let mut cache = HashMap::new();
+        let path = Path::new("/nonexistent/rules.yml");
+        let start = Instant::now();
+        let mut loads = 0;
+        for at in [
+            start,
+            start + Duration::from_secs(1),
+            start + RULES_RETRY_AFTER + Duration::from_secs(1),
+        ] {
+            let got = cached_rules(&mut cache, path, at, || {
+                loads += 1;
+                Err(())
+            });
+            assert!(got.is_none());
+        }
+        assert_eq!(
+            loads, 2,
+            "loaded once, then again only after the retry window"
+        );
+
+        let bundled = crate::observations::rules_engine::load_bundled_rules();
+        let later = start + RULES_RETRY_AFTER * 3;
+        assert!(
+            cached_rules(&mut cache, path, later, || Ok(bundled)).is_some(),
+            "a file fixed later is picked up"
+        );
+        assert!(cached_rules(&mut cache, path, later, || panic!("cached, not reloaded")).is_some());
     }
 }

@@ -61,6 +61,12 @@ create_exception!(
 );
 create_exception!(
     _uniko,
+    DegradedError,
+    UnikoError,
+    "A stage fell back or failed during a strict operation. `.diagnostics` lists them."
+);
+create_exception!(
+    _uniko,
     UnsupportedError,
     UnikoError,
     "The content modality has no registered extractor."
@@ -83,6 +89,11 @@ pub fn to_pyerr(err: CoreError) -> PyErr {
             let err = ReadinessError::new_err(msg);
             attach_json(&err, "failures", &failures);
             (err, "not_ready")
+        }
+        CoreError::Degraded(diagnostics) => {
+            let err = DegradedError::new_err(msg);
+            attach_json(&err, "diagnostics", &diagnostics);
+            (err, "degraded")
         }
         CoreError::Config(_) => (ConfigError::new_err(msg), "config"),
         CoreError::Llm(_) => (LlmError::new_err(msg), "llm"),
@@ -142,5 +153,6 @@ pub fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add("IdConflictError", py.get_type::<IdConflictError>())?;
     m.add("UnsupportedError", py.get_type::<UnsupportedError>())?;
     m.add("ReadinessError", py.get_type::<ReadinessError>())?;
+    m.add("DegradedError", py.get_type::<DegradedError>())?;
     Ok(())
 }

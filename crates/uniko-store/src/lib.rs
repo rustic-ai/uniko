@@ -20,6 +20,7 @@
 
 pub mod blob_store;
 pub mod config;
+pub mod diagnostics;
 pub mod error;
 pub mod id;
 pub mod locks;
@@ -36,6 +37,7 @@ pub mod storage;
 pub mod text;
 pub mod types;
 
+pub use diagnostics::{Diagnostic, DiagnosticCode, Stage, StageStatus};
 pub use error::{Result, UnikoError};
 #[doc(inline)]
 pub use model::{GENERATION_PROVIDERS, ModelEntry};

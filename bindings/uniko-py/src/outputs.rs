@@ -12,11 +12,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use uniko_api::tools::{
     AbductionResult, Answer, ArtifactView, AtomicIngestResult, CircuitState, ConsolidationReport,
-    ContextBundle, CycleStats, DeletionReport, FactUpsert, FinalizeReport, GoalContext, GoalPhase,
-    GoalView, IngestOutcome, MatchedProcedure, MessageView, ObserveResult, PipelineHealth,
-    PromotionReport, RecallItem, RecallKind, RecallSource, RecordActionResult, RuleView,
-    SummarizeReport, TaskPhase, TaskView, ToolCallResult, TopicReport, UnitResult, WorkerHealth,
-    WorkerStatus,
+    ContextBundle, CycleStats, DeletionReport, Diagnostic, FactUpsert, FinalizeReport, GoalContext,
+    GoalPhase, GoalView, IngestOutcome, MatchedProcedure, MessageView, ObserveResult,
+    PipelineHealth, PromotionReport, RecallItem, RecallKind, RecallSource, RecordActionResult,
+    RuleView, SummarizeReport, TaskPhase, TaskView, ToolCallResult, TopicReport, UnitResult,
+    WorkerHealth, WorkerStatus,
 };
 
 use crate::convert::{json_to_py, utc_datetime_to_py};
@@ -255,6 +255,72 @@ impl PyRecallItem {
     }
 }
 
+/// One stage outcome of a recall or ingest: what ran, was skipped, fell
+/// back or failed. Carries no free text: names, a stable code, and at most
+/// a label or alias as `target`.
+#[pyclass(name = "Diagnostic", module = "uniko", frozen)]
+pub struct PyDiagnostic {
+    /// The stage, e.g. `"query_embedding"`, `"rerank"`, `"sparse"`.
+    #[pyo3(get)]
+    stage: String,
+    /// `"applied"`, `"skipped"`, `"fallback"` or `"failed"`.
+    #[pyo3(get)]
+    status: String,
+    /// Why, when the status is not `"applied"`, e.g. `"rerank_failed"`.
+    #[pyo3(get)]
+    code: Option<String>,
+    /// The node label, model alias or source the stage ran on.
+    #[pyo3(get)]
+    target: Option<String>,
+    /// How many items the stage contributed, when it counts them.
+    #[pyo3(get)]
+    count: Option<u32>,
+}
+
+/// The serialized (snake_case) name of a unit enum variant.
+fn serde_name(value: &impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+impl PyDiagnostic {
+    /// Build the Python wrapper from a Rust [`Diagnostic`].
+    pub fn from_rust(py: Python<'_>, d: &Diagnostic) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                stage: serde_name(&d.stage),
+                status: serde_name(&d.status),
+                code: d.code.map(|c| c.as_str().to_string()),
+                target: d.target.clone(),
+                count: d.count,
+            },
+        )
+    }
+
+    /// Wrap every diagnostic in `list`.
+    pub fn list(py: Python<'_>, list: &[Diagnostic]) -> PyResult<Vec<Py<Self>>> {
+        list.iter().map(|d| Self::from_rust(py, d)).collect()
+    }
+}
+
+#[pymethods]
+impl PyDiagnostic {
+    fn __repr__(&self) -> String {
+        let mut out = format!("Diagnostic({} {}", self.stage, self.status);
+        if let Some(code) = &self.code {
+            out.push_str(&format!(" {code}"));
+        }
+        if let Some(target) = &self.target {
+            out.push_str(&format!(" ({target})"));
+        }
+        out.push(')');
+        out
+    }
+}
+
 /// A ranked bundle of recalled context.
 #[pyclass(name = "ContextBundle", module = "uniko", frozen)]
 pub struct PyContextBundle {
@@ -273,6 +339,9 @@ pub struct PyContextBundle {
     /// Coverage score in `[0.0, 1.0]`.
     #[pyo3(get)]
     coverage: f64,
+    /// What each requested recall stage did.
+    #[pyo3(get)]
+    diagnostics: Vec<Py<PyDiagnostic>>,
 }
 
 impl PyContextBundle {
@@ -291,6 +360,7 @@ impl PyContextBundle {
                 phase1_only: bundle.phase1_only,
                 phase2_only: bundle.phase2_only,
                 coverage: bundle.coverage,
+                diagnostics: PyDiagnostic::list(py, &bundle.diagnostics)?,
             },
         )
     }
@@ -408,6 +478,10 @@ pub struct PyObserveResult {
     /// What each tool call the turn made produced, in the order added.
     #[pyo3(get)]
     tool_calls: Vec<Py<PyToolCallResult>>,
+    /// What each best-effort ingest stage did. Filled for `observe`; a
+    /// turn of a multi-turn unit leaves it empty (see `UnitResult`).
+    #[pyo3(get)]
+    diagnostics: Vec<Py<PyDiagnostic>>,
 }
 
 impl PyObserveResult {
@@ -440,6 +514,7 @@ impl PyObserveResult {
                 extracted_observations: m.extracted_observations.clone(),
                 attachments,
                 tool_calls,
+                diagnostics: PyDiagnostic::list(py, &result.diagnostics)?,
             },
         )
     }
@@ -478,6 +553,10 @@ pub struct PyToolCallResult {
     /// The call was already recorded with the same result: nothing written.
     #[pyo3(get)]
     was_replay: bool,
+    /// What each best-effort ingest stage did for the result artifact
+    /// (filled by `observe_tool`).
+    #[pyo3(get)]
+    diagnostics: Vec<Py<PyDiagnostic>>,
 }
 
 impl PyToolCallResult {
@@ -491,6 +570,7 @@ impl PyToolCallResult {
                 artifact_id: r.artifact_id.clone(),
                 artifact_node: r.artifact_node,
                 was_replay: r.was_replay,
+                diagnostics: PyDiagnostic::list(py, &r.diagnostics)?,
             },
         )
     }
@@ -1003,6 +1083,9 @@ pub struct PyIngestOutcome {
     /// Node ids of the PDF's layout blocks. Empty for non-PDFs.
     #[pyo3(get)]
     block_node_ids: Vec<i64>,
+    /// What each best-effort ingest stage did (filled by `ingest`).
+    #[pyo3(get)]
+    diagnostics: Vec<Py<PyDiagnostic>>,
 }
 
 impl PyIngestOutcome {
@@ -1020,6 +1103,7 @@ impl PyIngestOutcome {
                 extraction_error: None,
                 page_node_ids: Vec::new(),
                 block_node_ids: Vec::new(),
+                diagnostics: PyDiagnostic::list(py, &a.diagnostics)?,
             },
             IngestOutcome::Pdf(p) => Self {
                 kind: "pdf".to_string(),
@@ -1032,6 +1116,7 @@ impl PyIngestOutcome {
                 extraction_error: p.extraction_failure.as_ref().map(ToString::to_string),
                 page_node_ids: p.page_node_ids.clone(),
                 block_node_ids: p.block_node_ids.clone(),
+                diagnostics: PyDiagnostic::list(py, &p.diagnostics)?,
             },
         };
         Py::new(py, wrapper)
@@ -1102,6 +1187,9 @@ pub struct PyUnitResult {
     /// nothing and returned the earlier ids.
     #[pyo3(get)]
     was_replay: bool,
+    /// What each best-effort ingest stage did across the whole unit.
+    #[pyo3(get)]
+    diagnostics: Vec<Py<PyDiagnostic>>,
 }
 
 impl PyUnitResult {
@@ -1117,6 +1205,7 @@ impl PyUnitResult {
             Self {
                 turns,
                 was_replay: result.was_replay,
+                diagnostics: PyDiagnostic::list(py, &result.diagnostics)?,
             },
         )
     }
@@ -1238,6 +1327,9 @@ pub struct PyWorkerHealth {
     /// Moving-average latency per item, in milliseconds.
     #[pyo3(get)]
     avg_latency_ms: f64,
+    /// Degraded stages counted since start, keyed `stage:code`.
+    #[pyo3(get)]
+    degradations: std::collections::BTreeMap<String, u64>,
 }
 
 impl PyWorkerHealth {
@@ -1251,6 +1343,7 @@ impl PyWorkerHealth {
                 items_processed: health.items_processed,
                 items_failed: health.items_failed,
                 avg_latency_ms: health.avg_latency_ms,
+                degradations: health.degradations.clone(),
             },
         )
     }
@@ -1482,6 +1575,9 @@ pub struct PyActionResult {
     /// Node id of the artifact holding an output too large to keep inline.
     #[pyo3(get)]
     overflow_artifact: Option<i64>,
+    /// What each best-effort stage did (NLP entity linking, overflow ingest).
+    #[pyo3(get)]
+    diagnostics: Vec<Py<PyDiagnostic>>,
 }
 
 impl PyActionResult {
@@ -1492,6 +1588,7 @@ impl PyActionResult {
             Self {
                 action_node: result.action_node,
                 overflow_artifact: result.overflow_artifact,
+                diagnostics: PyDiagnostic::list(py, &result.diagnostics)?,
             },
         )
     }
@@ -1605,6 +1702,7 @@ impl PyMatchedProcedure {
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRecallSource>()?;
     m.add_class::<PyRecallItem>()?;
+    m.add_class::<PyDiagnostic>()?;
     m.add_class::<PyContextBundle>()?;
     m.add_class::<PyAnswer>()?;
     m.add_class::<PyObserveResult>()?;

@@ -860,6 +860,7 @@ impl KnowledgeBase {
                 .collect(),
             Err(e) => {
                 tracing::debug!(error = %e, "resolve_entity_seeds query failed");
+                crate::diagnostics::record_source_failure("entity_seeds");
                 Vec::new()
             }
         }
@@ -896,6 +897,7 @@ impl KnowledgeBase {
             }
             Err(e) => {
                 tracing::debug!(error = %e, "any_unstable_entities query failed");
+                crate::diagnostics::record_source_failure("entity_drift");
                 false
             }
         }
@@ -1162,7 +1164,10 @@ impl KnowledgeBase {
             }
             match builder.fetch_all().await {
                 Ok(result) => merge_scored_rows(result.rows(), &mut scored),
-                Err(e) => tracing::debug!(chunk_type, error = %e, "hybrid similar_to failed"),
+                Err(e) => {
+                    tracing::debug!(chunk_type, error = %e, "hybrid similar_to failed");
+                    crate::diagnostics::record_source_failure(&format!("phase3:{chunk_type}"));
+                }
             }
         }
 
@@ -1196,7 +1201,8 @@ impl KnowledgeBase {
             match builder.fetch_all().await {
                 Ok(result) => merge_scored_rows(result.rows(), &mut scored),
                 Err(e) => {
-                    tracing::debug!(owner, error = %e, "owner-scoped hybrid similar_to failed")
+                    tracing::debug!(owner, error = %e, "owner-scoped hybrid similar_to failed");
+                    crate::diagnostics::record_source_failure(&format!("phase3:Chunk:{owner}"));
                 }
             }
         }
@@ -1277,12 +1283,18 @@ impl KnowledgeBase {
                 }
                 match builder.fetch_all().await {
                     Ok(result) => merge_scored_rows(result.rows(), &mut scored),
-                    Err(e) => tracing::debug!(
-                        entity = entity_name,
-                        label,
-                        error = %e,
-                        "entity-scoped search failed"
-                    ),
+                    Err(e) => {
+                        tracing::debug!(
+                            entity = entity_name,
+                            label,
+                            error = %e,
+                            "entity-scoped search failed"
+                        );
+                        // The label only: the entity name comes from the query.
+                        crate::diagnostics::record_source_failure(&format!(
+                            "phase3:entity:{label}"
+                        ));
+                    }
                 }
             }
         }

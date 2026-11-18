@@ -86,6 +86,11 @@ fn _raise_error(kind: &str) -> PyResult<()> {
         "timeout" => UnikoError::Timeout(123),
         "conflict" => UnikoError::Conflict("demo".into()),
         "unsupported" => UnikoError::Unsupported("demo".into()),
+        "degraded" => UnikoError::Degraded(vec![uniko_api::tools::Diagnostic::new(
+            uniko_api::tools::Stage::Rerank,
+            uniko_api::tools::StageStatus::Fallback,
+            uniko_api::tools::DiagnosticCode::RerankFailed,
+        )]),
         "not_ready" => UnikoError::NotReady(vec![
             uniko_api::tools::ReadinessFailure::new(
                 "embedder",

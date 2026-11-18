@@ -99,8 +99,8 @@ pub use uniko_store::operations::facts::{FactUpsert, fact_id_for, fact_id_for_sc
 // reaching into `uniko_store`.
 #[doc(no_inline)]
 pub use uniko_store::{
-    DeletionReport, ModelState, ModelStatus, NodeId, PrefetchPolicy, ReadinessCode,
-    ReadinessFailure, SharedRuntime, UnikoError,
+    DeletionReport, Diagnostic, DiagnosticCode, ModelState, ModelStatus, NodeId, PrefetchPolicy,
+    ReadinessCode, ReadinessFailure, SharedRuntime, Stage, StageStatus, UnikoError,
 };
 // Logic / query surface: `Agent::query` / `run_rule` / `abduce` return
 // these; `Value` is the graph value type for query params and rows.

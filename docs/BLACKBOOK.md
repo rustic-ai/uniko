@@ -1469,6 +1469,49 @@ External overrides: `catalog_path` (xervo model catalog) and `schema_path` (inst
 
 `UnikoError` is the unified error: `Storage`, `Search`, `Schema`, `Pipeline`, `Locy`, `Config`, `Embedding`, `Llm`, `Timeout`, `Conflict`, `Internal`, `Unsupported`. `is_retriable()` is true **only** for `Conflict`; `From<uni_db::UniError>` preserves `uni-db`'s retriability classification so the retry loop behaves correctly.
 
+`NotReady(Vec<ReadinessFailure>)` (readiness, `readiness.rs`) and `Degraded(Vec<Diagnostic>)`
+(strict recall) carry structured lists rather than a message.
+
+### 5.14.1 Stage diagnostics (`diagnostics.rs`)
+
+Best-effort stages record what happened to them through a tokio task-local collector:
+`diagnostics::collect(fut)` scopes it, `diagnostics::record(d)` appends (merging a repeat of the
+same stage, status, code and target, adding counts) and is a no-op outside a scope. Work moved to
+another task with `tokio::spawn` is not seen. A `Diagnostic` is `{stage, status, code, target,
+count}` with no free text; the full error stays in the log line beside each recording site.
+
+`recall()` (`crates/uniko-memory/src/recall/mod.rs`) wraps the cascade in `collect`, puts the result
+on `ContextBundle::diagnostics`, and with `RecallConfig::strict` returns `Degraded` for any
+`fallback`/`failed` stage except `provenance`. Applied Phase 3 stages carry no counts, because
+access control filters the bundle afterwards. Recording sites:
+
+| Stage | Site |
+|---|---|
+| `query_embedding` | `recall/intent.rs:227`, `:232` |
+| `query_analysis` | `recall/intent.rs:533`, `:552` (`onnx` only) |
+| `provenance` | `recall/mod.rs:839` (`attach_provenance`), `:958` (`populate_sources`) |
+| `rerank` / `colbert` skipped | `recall/mod.rs:1555` (no candidates); `not_reached` at `:2207`, called on each early return (`:1362`, `:1410`, `:1511`, `:1521`) |
+| `rerank` | `recall/mod.rs:1572`, `:1595` |
+| `colbert` | `recall/mod.rs:1724`, `:1751`, `:1783`, `:1813` (`colbert_rerank`) |
+| `source` | `recall/mod.rs:2224` (`source_failed`, called from each candidate source's error arm); `crates/uniko-store/src/repository/recall.rs:863` (seeds), `:900` (drift), `:1169`, `:1205`, `:1294` (Phase 3 chunk and entity sub-queries) |
+| `sparse` | `recall/mod.rs:2258`, `:2267` (`run_sparse_source`) |
+
+Ingest stages are recorded in `uniko-extract` (and `record_action` in `uniko-memory`) and collected
+by the facade's `Session::commit_unit` (and so `observe`), `Session::ingest`, `Session::observe_tool`
+and `record_action`; a replayed unit or deduplicated source drops them. The streaming worker
+collects each item (`crates/uniko-memory/src/pipeline/ingest_worker.rs:183`) and, for items that
+succeed, counts degraded ones in `HealthTracker::record_degradations`
+(`crates/uniko-pipes/src/health.rs:99`).
+
+| Stage | Site |
+|---|---|
+| `nlp` | `uniko-extract/src/ingest/atomic.rs:75` (`nlp_diagnostic`, one count per message), called at `:451`, `:462`, `:468`, `:476`; `uniko-memory/src/action.rs:246`, `:263` (`record_action`, target `action_entities`) |
+| `observation_model` | `uniko-extract/src/observations/mod.rs:407` (`onnx` only) |
+| `observation_rules` | `uniko-extract/src/observations/mod.rs:68` (failed loads are cached and retried after 60 s) |
+| `pdf_extraction` | `uniko-extract/src/ingest/pdf/mod.rs:197`, `:224` |
+| `artifact_embedding` | `uniko-extract/src/ingest/artifact.rs:518` |
+| `extractor_post_commit` | `uniko-extract/src/ingest/source.rs:198` |
+
 ### 5.15 Invariants cheat-sheet
 
 - **The seal is CI-enforced.** Product crates reach the graph only through repository/operations/model/search methods or `begin_tx` driven by validated `*_in_tx` helpers. `.db()` is tests/bench only.

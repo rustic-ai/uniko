@@ -54,6 +54,9 @@ pub struct PdfIngestResult {
     /// Internal node IDs of created `:Block` rows (tiered path only; empty
     /// on the text-only path).
     pub block_node_ids: Vec<NodeId>,
+    /// What each best-effort ingest stage did. Filled by the facade's
+    /// `Session::ingest`; empty when built any other way.
+    pub diagnostics: Vec<uniko_store::Diagnostic>,
 }
 
 /// Everything about a PDF that is computable before the transaction opens:
@@ -191,6 +194,14 @@ pub async fn prepare_pdf(
                     error = %e,
                     "tiered pdf extraction failed; persisting artifact without doc-IR",
                 );
+                uniko_store::diagnostics::record(
+                    uniko_store::Diagnostic::new(
+                        uniko_store::Stage::PdfExtraction,
+                        uniko_store::StageStatus::Failed,
+                        uniko_store::DiagnosticCode::TieredFailed,
+                    )
+                    .target(opts.artifact_id.clone()),
+                );
                 extraction_failure = Some(e);
             }
         }
@@ -209,6 +220,14 @@ pub async fn prepare_pdf(
                     artifact_id = %opts.artifact_id,
                     error = %e,
                     "pdf extraction failed; persisting artifact without chunks",
+                );
+                uniko_store::diagnostics::record(
+                    uniko_store::Diagnostic::new(
+                        uniko_store::Stage::PdfExtraction,
+                        uniko_store::StageStatus::Failed,
+                        uniko_store::DiagnosticCode::ExtractionFailed,
+                    )
+                    .target(opts.artifact_id.clone()),
                 );
                 extraction_failure = Some(e);
             }
@@ -292,6 +311,7 @@ pub async fn ingest_pdf_in_tx(
         extraction_failure: None,
         page_node_ids: Vec::new(),
         block_node_ids: Vec::new(),
+        diagnostics: Vec::new(),
     };
 
     // 1. Per-unit memo, before any DB read.
@@ -451,6 +471,7 @@ pub async fn ingest_pdf_in_tx(
         extraction_failure: None,
         page_node_ids,
         block_node_ids,
+        diagnostics: Vec::new(),
     })
 }
 

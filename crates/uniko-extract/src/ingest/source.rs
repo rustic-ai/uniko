@@ -26,6 +26,25 @@ pub enum IngestOutcome {
 }
 
 impl IngestOutcome {
+    /// What each best-effort ingest stage did (see the result's
+    /// `diagnostics` field).
+    #[must_use]
+    pub fn diagnostics(&self) -> &[uniko_store::Diagnostic] {
+        match self {
+            Self::Artifact(r) => &r.diagnostics,
+            Self::Pdf(r) => &r.diagnostics,
+        }
+    }
+
+    /// Mutable access to the diagnostics, for the code that collects them.
+    #[doc(hidden)]
+    pub fn diagnostics_mut(&mut self) -> &mut Vec<uniko_store::Diagnostic> {
+        match self {
+            Self::Artifact(r) => &mut r.diagnostics,
+            Self::Pdf(r) => &mut r.diagnostics,
+        }
+    }
+
     /// The artifact's node id when this ingest created it, `None` when it
     /// deduplicated onto an existing one (or onto one earlier in the unit).
     #[must_use]
@@ -175,6 +194,14 @@ impl PreparedSource {
                         target: "uniko_extract::ingest",
                         error = %e,
                         "modality finish_post_commit failed; continuing",
+                    );
+                    uniko_store::diagnostics::record(
+                        uniko_store::Diagnostic::new(
+                            uniko_store::Stage::ExtractorPostCommit,
+                            uniko_store::StageStatus::Failed,
+                            uniko_store::DiagnosticCode::PostCommitFailed,
+                        )
+                        .target(result.artifact_id.clone()),
                     );
                 }
             }
@@ -418,6 +445,7 @@ mod tests {
                 artifact_id: "stub-image".into(),
                 chunk_node_ids: vec![],
                 was_deduplicated: false,
+                diagnostics: Vec::new(),
             })
         }
     }

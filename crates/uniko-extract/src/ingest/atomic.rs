@@ -70,6 +70,22 @@ pub struct AtomicTimings {
     pub total_ms: u128,
 }
 
+/// Record one message's NLP outcome: `None` when the cascade ran, else the
+/// reason rules stood in (`not_compiled` is recorded as skipped).
+fn nlp_diagnostic(code: Option<uniko_store::DiagnosticCode>) {
+    use uniko_store::{Diagnostic, DiagnosticCode, Stage, StageStatus};
+    let d = match code {
+        None => Diagnostic::applied(Stage::Nlp),
+        Some(c @ DiagnosticCode::NotCompiled) => {
+            Diagnostic::new(Stage::Nlp, StageStatus::Skipped, c)
+        }
+        Some(c) => Diagnostic::new(Stage::Nlp, StageStatus::Fallback, c),
+    };
+    // One per message; the unit merges them and sums the counts. NLP runs
+    // before the transaction, so a retried commit does not count twice.
+    uniko_store::diagnostics::record(d.count(1));
+}
+
 /// Jitterless exponential backoff between ingest-tx retry attempts.
 ///
 /// Mirrors uniko-store's internal `retry_backoff` (which is private to
@@ -432,6 +448,7 @@ pub(super) async fn extract_for_unit(
         let result = match crate::nlp::NlpPipeline::try_new(kb).await {
             Some(pipeline) => match pipeline.analyze_sentences(&msg.content).await {
                 Ok(results) => {
+                    nlp_diagnostic(None);
                     for nlp_result in &results {
                         let onnx_ents =
                             crate::ner::onnx::entities_from_nlp_result(nlp_result, &msg.content);
@@ -440,12 +457,15 @@ pub(super) async fn extract_for_unit(
                     Some(results)
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, "NLP analysis failed");
+                    // Per message, so debug: the diagnostic carries it.
+                    tracing::debug!(error = %e, "NLP analysis failed; using rules only");
+                    nlp_diagnostic(Some(uniko_store::DiagnosticCode::NlpFailed));
                     None
                 }
             },
             None => {
                 tracing::debug!("NLP pipeline unavailable, using rules only");
+                nlp_diagnostic(Some(uniko_store::DiagnosticCode::NlpUnavailable));
                 None
             }
         };
@@ -453,6 +473,7 @@ pub(super) async fn extract_for_unit(
     };
     #[cfg(not(feature = "onnx"))]
     {
+        nlp_diagnostic(Some(uniko_store::DiagnosticCode::NotCompiled));
         match crate::ner::onnx::extract_entities_onnx(&msg.content) {
             Ok(onnx_ents) => all_raw.extend(onnx_ents),
             Err(e) => tracing::debug!(error = %e, "ONNX NER unavailable"),

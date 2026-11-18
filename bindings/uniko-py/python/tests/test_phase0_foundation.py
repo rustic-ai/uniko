@@ -68,6 +68,7 @@ def test_error_mapping_subclasses_and_kind() -> None:
         "conflict": uniko.ConflictError,
         "unsupported": uniko.UnsupportedError,
         "not_ready": uniko.ReadinessError,
+        "degraded": uniko.DegradedError,
     }
     for kind, exc_cls in cases.items():
         with pytest.raises(exc_cls) as info:
