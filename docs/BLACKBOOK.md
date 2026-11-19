@@ -627,6 +627,16 @@ Memory in uniko is organized around **communication**, not around opaque documen
 
 Because who-said-what is structural, uniko can answer cross-session provenance questions ("when did Alice first mention X?", "which turn justifies this Fact?") that a flat vector store cannot.
 
+**Participant kinds.** `kind` is `agent` or `unknown`. Every write goes through `KnowledgeBase::ensure_participant` (`crates/uniko-store/src/storage/nodes.rs:330`), under the same `rmw_locks` key as `merge_node`:
+- it creates a missing participant with the given kind;
+- it upgrades `unknown` to a known kind, and never downgrades one;
+- on an existing row it fills only properties that are absent.
+
+It is called with kind `unknown` by ingest's sender setup (`crates/uniko-extract/src/ingest/session.rs:59`, which also updates `last_seen`). It is called with kind `agent` by:
+- `ensure_agent_participant` (`crates/uniko-memory/src/agent/ops.rs:95`), behind `Agent::register` (`:177`) and goal/task creation (`facade/goals.rs:438`);
+
+`add_membership`'s `ensure_group_node` is create-only and also uses kind `unknown`.
+
 Ensuring the Session and sender exist is a cold-path, first-sight-only operation guarded by `lock_session_setup` (a striped RMW lock) to avoid duplicate `Session`/`Participant`/`PARTICIPATED_IN` and SSI antidependency aborts under concurrent ingest. On the warm path (both ids cached in the in-memory `SessionContext`), it does no DB work.
 
 ### 3.3 Edge type catalog (55)

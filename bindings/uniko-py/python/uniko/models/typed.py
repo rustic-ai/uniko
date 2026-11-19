@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import datetime
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from .config import UnikoConfigModel
 from .outputs import (
@@ -471,6 +471,16 @@ class TypedAgent:
 
     def session(self, session_id: str) -> TypedSession:
         return TypedSession(self._inner.session(session_id))
+
+    async def register(
+        self, *, name: str | None = None
+    ) -> Literal["created", "upgraded", "existing"]:
+        return await self._inner.register(name=name)
+
+    def register_sync(
+        self, *, name: str | None = None
+    ) -> Literal["created", "upgraded", "existing"]:
+        return self._inner.register_sync(name=name)
 
     async def recall(self, query: str) -> ContextBundle:
         return ContextBundle.from_native(await self._inner.recall(query))

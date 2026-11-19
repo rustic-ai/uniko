@@ -149,6 +149,27 @@ let mut session = agent.session("chat-42"); // a conversation thread
 One instance can mint many agents (`alice`, `bob`); each can be scoped to what *it* may see. A session
 groups turns and lets attachments attach to the right message.
 
+### Register an agent
+
+`memory.agent(id)` only makes a handle; nothing is written. To record an agent's identity before it
+does anything, register it:
+
+```rust
+use uniko_memory::{AgentRegistration, EnsureOutcome};
+
+let reg = agent.register(AgentRegistration::new().name("Reporter")).await?;
+assert_eq!(reg.outcome, EnsureOutcome::Created); // later calls return Existing
+```
+
+Registration writes one `Participant` of kind `agent` and nothing else: no session, message or
+action. It's idempotent and safe to call concurrently, and the participant survives a reopen. A
+participant that already exists keeps its name, metadata and memberships. If it has kind `unknown`
+(ingest and `add_org_member` create participants that way), it becomes `agent` and the outcome is
+`Upgraded`. A later turn from the agent never sets the kind back to `unknown`.
+
+Registering is optional. Goals, tasks, actions and tool calls create the agent's participant
+themselves, so `agent.goals().create(...)` works on a fresh store.
+
 ---
 
 ## 3. Write memory

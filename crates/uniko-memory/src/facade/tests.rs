@@ -6120,3 +6120,224 @@ mod hybrid_regressions {
         assert!(bundle.items.iter().all(|i| i.content != BOB));
     }
 }
+
+/// Agent registration (#67).
+mod registration_and_performer {
+    use super::*;
+    use crate::{AgentRegistration, EnsureOutcome};
+
+    async fn memory_or_skip() -> Option<Uniko> {
+        match Uniko::in_memory().await {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("skipping: in-memory instance unavailable: {e}");
+                None
+            }
+        }
+    }
+
+    async fn participants(kb: &KnowledgeBase, id: &str, kind: &str) -> i64 {
+        count_query(
+            kb,
+            &format!(
+                "MATCH (p:Participant {{participant_id: '{id}'}}) \
+                 WHERE p.kind = '{kind}' RETURN count(p) AS c"
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn register_creates_an_agent_and_nothing_else() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        let first = agent
+            .register(AgentRegistration::new().name("Reporter"))
+            .await
+            .unwrap();
+        assert_eq!(first.participant_id, "reporter");
+        assert_eq!(first.outcome, EnsureOutcome::Created);
+        let again = agent.register(AgentRegistration::new()).await.unwrap();
+        assert_eq!(again.outcome, EnsureOutcome::Existing);
+
+        let kb = agent.kb();
+        assert_eq!(participants(kb, "reporter", "agent").await, 1);
+        assert_eq!(
+            count_query(
+                kb,
+                "MATCH (p:Participant {participant_id: 'reporter'}) \
+                 WHERE p.name = 'Reporter' RETURN count(p) AS c"
+            )
+            .await,
+            1
+        );
+        for label in ["Session", "Message", "Action"] {
+            assert_eq!(
+                count_query(kb, &format!("MATCH (n:{label}) RETURN count(n) AS c")).await,
+                0,
+                "register must not record a {label}"
+            );
+        }
+        drop(agent);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// A participant first seen through an org membership (kind `unknown`)
+    /// is upgraded, keeping its membership and name.
+    #[tokio::test]
+    async fn register_upgrades_an_unknown_participant_and_keeps_its_membership() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        assert!(memory.add_org_member("reporter", "acme").await.unwrap());
+        let agent = memory.agent("reporter");
+        let kb = agent.kb().clone();
+        assert_eq!(participants(&kb, "reporter", "unknown").await, 1);
+
+        let reg = agent
+            .register(AgentRegistration::new().name("Reporter"))
+            .await
+            .unwrap();
+        assert_eq!(reg.outcome, EnsureOutcome::Upgraded);
+        assert_eq!(participants(&kb, "reporter", "agent").await, 1);
+        let viewer = crate::Viewer::new(&kb, "reporter").await.unwrap();
+        assert!(viewer.orgs.contains("acme"), "membership kept");
+        drop((agent, kb, viewer));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// The agent's first turn after registration keeps kind `agent`: ingest
+    /// used to reset every participant it touched to `unknown`.
+    #[tokio::test]
+    async fn a_turn_after_registration_keeps_the_agent_kind() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        agent
+            .register(AgentRegistration::new().name("Reporter"))
+            .await
+            .unwrap();
+        let mut session = agent.session("s-kind");
+        match session
+            .observe(Turn::new("reporter", "Starting the report.").id("m-kind"))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable");
+                return;
+            }
+            Err(e) => panic!("observe failed: {e}"),
+        }
+        let kb = agent.kb();
+        assert_eq!(participants(kb, "reporter", "agent").await, 1);
+        assert_eq!(
+            count_query(
+                kb,
+                "MATCH (p:Participant {participant_id: 'reporter'}) \
+                 WHERE p.name = 'Reporter' AND p.last_seen IS NOT NULL \
+                 RETURN count(p) AS c"
+            )
+            .await,
+            1,
+            "the turn updates last_seen but keeps the registered name"
+        );
+        drop((session, agent));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn goals_and_tasks_work_on_a_fresh_store() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        let goal = agent
+            .goals()
+            .create_view(crate::CreateGoalParams {
+                goal_id: Some("g".into()),
+                title: "Goal".into(),
+                ..Default::default()
+            })
+            .await;
+        let goal = match goal {
+            Ok(g) => g,
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable");
+                return;
+            }
+            Err(e) => panic!("create_view failed: {e}"),
+        };
+        assert_eq!(goal.goal_id, "g");
+        agent
+            .goals()
+            .create_task(crate::CreateTaskParams {
+                goal_id: Some("g".into()),
+                title: "Task".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("create_task on a fresh store");
+        assert_eq!(participants(agent.kb(), "reporter", "agent").await, 1);
+        drop(agent);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_registration_creates_one_participant() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        let outcomes = futures::future::join_all((0..8).map(|_| {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.register(AgentRegistration::new()).await })
+        }))
+        .await;
+        let created = outcomes
+            .into_iter()
+            .map(|r| r.unwrap().unwrap().outcome)
+            .filter(|o| *o == EnsureOutcome::Created)
+            .count();
+        assert_eq!(created, 1, "exactly one caller creates the participant");
+        assert_eq!(
+            count_query(
+                agent.kb(),
+                "MATCH (p:Participant {participant_id: 'reporter'}) RETURN count(p) AS c"
+            )
+            .await,
+            1
+        );
+        drop(agent);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn registration_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        let Some(memory) = build_or_skip(Uniko::builder().path(&path)).await else {
+            return;
+        };
+        let reg = memory
+            .agent("reporter")
+            .register(AgentRegistration::new())
+            .await
+            .unwrap();
+        assert_eq!(reg.outcome, EnsureOutcome::Created);
+        memory.shutdown().await.expect("shutdown");
+
+        let Some(memory) = build_or_skip(Uniko::builder().path(&path)).await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        assert_eq!(participants(agent.kb(), "reporter", "agent").await, 1);
+        let again = agent.register(AgentRegistration::new()).await.unwrap();
+        assert_eq!(again.outcome, EnsureOutcome::Existing);
+        drop(agent);
+        memory.shutdown().await.expect("shutdown");
+    }
+}

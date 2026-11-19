@@ -13,7 +13,6 @@ use uniko_cortex::procedures::{
     record_procedure_use,
 };
 use uniko_cortex::topics::{TopicConfig, TopicReport, detect_topics_once};
-use uniko_store::schema::constants::labels;
 use uniko_store::{NodeId, UnikoError, Value};
 
 use super::Agent;
@@ -86,26 +85,69 @@ pub struct RuleView {
     pub natural_language: Option<String>,
 }
 
-/// Make sure `agent_id` has a Participant node, which actions, episodes
-/// and observations hang off. Ingest creates it on the agent's first
-/// observed turn; these methods may run before any. An existing node is
-/// left as it is.
+/// Make sure `agent_id` has a Participant node of kind `agent`, which
+/// goals, tasks, actions, episodes and observations hang off.
+///
+/// Ingest creates the node on the agent's first observed turn; these
+/// methods may run before any. An existing node keeps its name, metadata
+/// and memberships; one of kind `unknown` (from ingest or an org
+/// membership) becomes `agent`.
 pub(crate) async fn ensure_agent_participant(
     kb: &uniko_store::KnowledgeBase,
     agent_id: &str,
-) -> Result<(), UnikoError> {
-    if kb
-        .get_node_by_ext_id(labels::PARTICIPANT, "participant_id", agent_id)
-        .await?
-        .is_some()
-    {
-        return Ok(());
+) -> Result<uniko_store::EnsureOutcome, UnikoError> {
+    ensure_agent_participant_named(kb, agent_id, None).await
+}
+
+/// [`ensure_agent_participant`], also giving the node `name` when it has
+/// none.
+pub(crate) async fn ensure_agent_participant_named(
+    kb: &uniko_store::KnowledgeBase,
+    agent_id: &str,
+    name: Option<&str>,
+) -> Result<uniko_store::EnsureOutcome, UnikoError> {
+    let mut if_absent = HashMap::new();
+    if let Some(n) = name {
+        if_absent.insert("name".to_string(), Value::String(n.to_string()));
     }
-    let mut props = HashMap::new();
-    props.insert("kind".to_string(), Value::String("agent".to_string()));
-    kb.merge_node(labels::PARTICIPANT, "participant_id", agent_id, &props)
+    let (_, outcome) = kb
+        .ensure_participant(agent_id, "agent", &if_absent, &HashMap::new())
         .await?;
-    Ok(())
+    Ok(outcome)
+}
+
+/// Options for [`Agent::register`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct AgentRegistration {
+    /// Display name, set only when the participant has none yet.
+    pub name: Option<String>,
+}
+
+impl AgentRegistration {
+    /// No options: register the agent under its id alone.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Give the participant a display name if it has none yet.
+    #[must_use]
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+}
+
+/// What [`Agent::register`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Registration {
+    /// The agent's participant id.
+    pub participant_id: String,
+    /// Whether the participant was created, upgraded from kind `unknown`,
+    /// or already known.
+    pub outcome: uniko_store::EnsureOutcome,
 }
 
 /// Rule status set by [`Agent::delete_rule`], the same one pruning uses.
@@ -113,7 +155,32 @@ const STATUS_PRUNED: &str = "pruned";
 
 impl Agent {
     async fn ensure_participant(&self) -> Result<(), UnikoError> {
-        ensure_agent_participant(&self.kb, &self.agent_id).await
+        ensure_agent_participant(&self.kb, &self.agent_id).await?;
+        Ok(())
+    }
+
+    /// Register this agent as a participant of kind `agent`, without
+    /// recording a session, message or action.
+    ///
+    /// Idempotent and safe to call concurrently: the first call creates
+    /// the participant and later ones return
+    /// [`EnsureOutcome::Existing`](uniko_store::EnsureOutcome::Existing).
+    /// A participant already created with kind `unknown` (by ingest or
+    /// [`Uniko::add_org_member`](crate::Uniko::add_org_member)) becomes
+    /// `agent`; its name, metadata and memberships are kept. Registration
+    /// is optional: goals, tasks, actions and tool calls ensure the agent
+    /// themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] on a storage failure.
+    pub async fn register(&self, opts: AgentRegistration) -> Result<Registration, UnikoError> {
+        let outcome =
+            ensure_agent_participant_named(&self.kb, &self.agent_id, opts.name.as_deref()).await?;
+        Ok(Registration {
+            participant_id: self.agent_id.clone(),
+            outcome,
+        })
     }
 
     /// Assert a fact directly, without an observation to derive it from.

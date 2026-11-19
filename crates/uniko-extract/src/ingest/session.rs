@@ -49,8 +49,9 @@ pub async fn get_or_create_session(
 
 /// Ensure a Participant node exists for the given ID.
 ///
-/// Uses merge semantics: creates the participant if absent, updates
-/// `last_seen` if present.
+/// Creates the participant (kind `unknown`, named after its id) if absent.
+/// On an existing one it updates `last_seen` only: a name, metadata or a
+/// known kind (such as `agent` from registration) is never overwritten.
 ///
 /// # Errors
 ///
@@ -60,13 +61,14 @@ pub(crate) async fn ensure_participant(
     participant_id: &str,
     timestamp: DateTime<Utc>,
 ) -> uniko_store::Result<NodeId> {
-    let mut props = HashMap::new();
-    props.insert("name".into(), Value::String(participant_id.to_string()));
-    props.insert("kind".into(), Value::String("unknown".to_string()));
-    props.insert("last_seen".into(), datetime_value(timestamp));
+    let if_absent = HashMap::from([(
+        "name".to_string(),
+        Value::String(participant_id.to_string()),
+    )]);
+    let always = HashMap::from([("last_seen".to_string(), datetime_value(timestamp))]);
     let start = std::time::Instant::now();
-    let nid = kb
-        .merge_node("Participant", "participant_id", participant_id, &props)
+    let (nid, _) = kb
+        .ensure_participant(participant_id, "unknown", &if_absent, &always)
         .await?;
     let ms = start.elapsed().as_millis() as u64;
     tracing::info!(

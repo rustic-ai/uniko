@@ -48,7 +48,9 @@ pub(crate) mod value_convert;
 #[doc(inline)]
 pub use action::{RecordActionParams, RecordActionResult, record_action};
 #[doc(inline)]
-pub use agent::{Agent, ConsolidateOptions, ConsolidationReport, RuleView};
+pub use agent::{
+    Agent, AgentRegistration, ConsolidateOptions, ConsolidationReport, Registration, RuleView,
+};
 pub use consolidation::{CycleStats, TripleSource};
 #[doc(inline)]
 pub use episode::{RecordEpisodeParams, record_episode};
@@ -99,8 +101,8 @@ pub use uniko_store::operations::facts::{FactUpsert, fact_id_for, fact_id_for_sc
 // reaching into `uniko_store`.
 #[doc(no_inline)]
 pub use uniko_store::{
-    DeletionReport, Diagnostic, DiagnosticCode, ModelState, ModelStatus, NodeId, PrefetchPolicy,
-    ReadinessCode, ReadinessFailure, SharedRuntime, Stage, StageStatus, UnikoError,
+    DeletionReport, Diagnostic, DiagnosticCode, EnsureOutcome, ModelState, ModelStatus, NodeId,
+    PrefetchPolicy, ReadinessCode, ReadinessFailure, SharedRuntime, Stage, StageStatus, UnikoError,
 };
 // Logic / query surface: `Agent::query` / `run_rule` / `abduce` return
 // these; `Value` is the graph value type for query params and rows.
