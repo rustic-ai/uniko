@@ -1330,6 +1330,15 @@ pub struct PyWorkerHealth {
     /// Degraded stages counted since start, keyed `stage:code`.
     #[pyo3(get)]
     degradations: std::collections::BTreeMap<String, u64>,
+    /// Items dead-lettered since start.
+    #[pyo3(get)]
+    dead_lettered: u64,
+    /// Dead-letter retries resubmitted since start.
+    #[pyo3(get)]
+    retries: u64,
+    /// Of those, the ones that succeeded.
+    #[pyo3(get)]
+    retries_succeeded: u64,
 }
 
 impl PyWorkerHealth {
@@ -1344,6 +1353,9 @@ impl PyWorkerHealth {
                 items_failed: health.items_failed,
                 avg_latency_ms: health.avg_latency_ms,
                 degradations: health.degradations.clone(),
+                dead_lettered: health.dead_lettered,
+                retries: health.retries,
+                retries_succeeded: health.retries_succeeded,
             },
         )
     }

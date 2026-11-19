@@ -43,8 +43,14 @@ pub struct PipelineConfig {
     pub circuit_failure_threshold: u32,
     /// Milliseconds the circuit breaker stays open before probing.
     pub circuit_recovery_ms: u64,
-    /// Maximum automatic retries for dead-letter items.
+    /// Retries a dead-lettered item gets before it is `exhausted`.
     pub dead_letter_max_retries: u32,
+    /// Retry dead letters in the background on a backoff schedule.
+    pub dead_letter_auto_retry: bool,
+    /// Wait before a dead letter's first retry, in milliseconds.
+    pub dead_letter_retry_backoff_ms: u64,
+    /// Longest wait between retries of one dead letter, in milliseconds.
+    pub dead_letter_retry_max_backoff_ms: u64,
     /// Total seconds allowed for graceful shutdown.
     pub shutdown_timeout_secs: u64,
 }
@@ -64,6 +70,9 @@ impl Default for PipelineConfig {
             circuit_failure_threshold: 5,
             circuit_recovery_ms: 60_000,
             dead_letter_max_retries: 3,
+            dead_letter_auto_retry: false,
+            dead_letter_retry_backoff_ms: 30_000,
+            dead_letter_retry_max_backoff_ms: 3_600_000,
             shutdown_timeout_secs: 30,
         }
     }
@@ -73,8 +82,9 @@ impl PipelineConfig {
     /// The pipeline settings a [`UnikoConfig`](uniko_store::config::UnikoConfig)
     /// carries, with the rest at their defaults.
     ///
-    /// `UnikoConfig` holds the queue capacities, consolidation schedule and
-    /// circuit-breaker settings a host configures; the remaining knobs here
+    /// `UnikoConfig` holds the queue capacities, consolidation schedule,
+    /// circuit-breaker and dead-letter settings a host configures; the
+    /// remaining knobs here
     /// (concurrency, batch size, cortex cadence, shutdown) have no
     /// `UnikoConfig` counterpart and keep their defaults.
     pub fn from_uniko_config(config: &uniko_store::config::UnikoConfig) -> Self {
@@ -85,6 +95,10 @@ impl PipelineConfig {
             consolidation_interval_secs: config.consolidation_interval_secs,
             circuit_failure_threshold: config.circuit_failure_threshold,
             circuit_recovery_ms: config.circuit_recovery_ms,
+            dead_letter_max_retries: config.dead_letter_max_retries,
+            dead_letter_auto_retry: config.dead_letter_auto_retry,
+            dead_letter_retry_backoff_ms: config.dead_letter_retry_backoff_ms,
+            dead_letter_retry_max_backoff_ms: config.dead_letter_retry_max_backoff_ms,
             ..Self::default()
         }
     }
@@ -128,6 +142,10 @@ mod tests {
             consolidation_interval_secs: 42,
             circuit_failure_threshold: 2,
             circuit_recovery_ms: 1_234,
+            dead_letter_max_retries: 9,
+            dead_letter_auto_retry: true,
+            dead_letter_retry_backoff_ms: 10,
+            dead_letter_retry_max_backoff_ms: 20,
             ..UnikoConfig::default()
         };
         let mapped = PipelineConfig::from_uniko_config(&config);
@@ -137,6 +155,10 @@ mod tests {
         assert_eq!(mapped.consolidation_interval_secs, 42);
         assert_eq!(mapped.circuit_failure_threshold, 2);
         assert_eq!(mapped.circuit_recovery_ms, 1_234);
+        assert_eq!(mapped.dead_letter_max_retries, 9);
+        assert!(mapped.dead_letter_auto_retry);
+        assert_eq!(mapped.dead_letter_retry_backoff_ms, 10);
+        assert_eq!(mapped.dead_letter_retry_max_backoff_ms, 20);
         assert_eq!(
             mapped.ingest_concurrency,
             PipelineConfig::default().ingest_concurrency

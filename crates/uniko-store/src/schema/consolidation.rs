@@ -31,6 +31,19 @@ pub(crate) fn register_labels(builder: SchemaBuilder<'_>) -> SchemaBuilder<'_> {
         .property_nullable("max_retries", DataType::Int64)
         .property_nullable("next_retry_at", DataType::DateTime)
         .property_nullable("created_at", DataType::DateTime)
+        // Added for retry and recovery (#65); NULL on rows written before.
+        .property_nullable("dead_letter_id", DataType::String)
+        .property_nullable("ingest_type", DataType::String)
+        .property_nullable("payload", DataType::String)
+        .property_nullable("status", DataType::String)
+        .property_nullable("error_kind", DataType::String)
+        .property_nullable("retriable", DataType::Bool)
+        .property_nullable("agent_id", DataType::String)
+        .property_nullable("updated_at", DataType::DateTime)
+        .property_nullable("resolved_at", DataType::DateTime)
+        .property_nullable("resolution", DataType::String)
+        .index("dead_letter_id", IndexType::Scalar(ScalarType::Hash))
+        .index("status", IndexType::Scalar(ScalarType::Hash))
         .done()
 }
 

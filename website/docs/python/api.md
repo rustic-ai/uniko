@@ -97,6 +97,7 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 | `agent` | `agent(agent_id: str) -> Agent` | — (sync) | Mint an agent identity (cheap). |
 | `config` | `config() -> dict[str, Any]` | — (sync) | The full configuration this instance runs with, as nested dicts. |
 | `health` | `health() -> PipelineHealth \| None` | — (sync) | Streaming-pipeline health; `None` without `streaming(True)`. |
+| `dead_letters` | property `-> DeadLetters` | — | Failed streaming items: list, count, retry, resolve. See [`DeadLetters`](#deadletters). |
 | `add_team_member` | `add_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `add_team_member_sync` | Record a team membership; `False` when already recorded. |
 | `remove_team_member` | `remove_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `remove_team_member_sync` | Remove it; `False` when not recorded. |
 | `add_org_member` | `add_org_member(participant_id: str, org_id: str) -> Awaitable[bool]` | `add_org_member_sync` | Record a direct org membership. |
@@ -1038,7 +1039,31 @@ Returned by `Uniko.health`.
 `queue_depth`, `queue_capacity`, `items_processed`, `items_failed`, `avg_latency_ms`, and
 `degradations`: degraded ingest stages counted since start, keyed `stage:code`
 (e.g. `"pdf_extraction:extraction_failed"`). Streaming ingest has no per-call result, so this is
-where its diagnostics surface.
+where its diagnostics surface. `dead_lettered`, `retries` and `retries_succeeded` count dead
+letters stored, retries resubmitted and retries that succeeded since start.
+
+### `DeadLetters`
+
+From `Uniko.dead_letters`. Listing, counting and resolving work on any instance; retrying needs
+`streaming(True)` and raises `ConfigError` otherwise.
+
+| Method | Signature | Sync | Description |
+| --- | --- | --- | --- |
+| `list` | `list(*, status=None, limit=None) -> Awaitable[list[DeadLetter]]` | `list_sync` | Oldest first. `status` is `"pending"`, `"retrying"`, `"exhausted"`, `"resolved"` or `"legacy"`. |
+| `get` | `get(id: str) -> Awaitable[DeadLetter \| None]` | `get_sync` | One letter. |
+| `counts` | `counts() -> Awaitable[dict[str, int]]` | `counts_sync` | Letters per status. |
+| `retry` | `retry(id: str, *, force=False) -> Awaitable[None]` | `retry_sync` | Resubmit the stored payload; the outcome lands on the letter, and `Session.flush` waits for it. `force` retries a permanent failure or one out of retries. Raises `ConfigError` when it can't be retried, `PipelineError` when the queue is full. |
+| `retry_pending` | `retry_pending(limit=100) -> Awaitable[dict]` | `retry_pending_sync` | Retry pending, retriable letters now. Returns `{"retried": [...], "refused": [{"id", "reason"}]}`. |
+| `resolve` | `resolve(id: str, note=None) -> Awaitable[bool]` | `resolve_sync` | Close a letter without retrying it. Only the letter changes. |
+
+A `DeadLetter` has these fields:
+- `id`, `step`, `error`, `error_kind` (e.g. `"internal"`, `"id_conflict"`);
+- `retriable`, `status`, `retry_count`, `max_retries`;
+- `ingest_type`, `agent_id`, `replayable`;
+- `created_at`, `updated_at`, `next_retry_at`, `resolved_at`, `resolution`.
+
+The typed `uniko.models.DeadLetter` mirrors them. Automatic background retries are opt-in through
+the `dead_letter_auto_retry` config key; see the facade guide.
 
 The closed sets of strings the API passes (`GoalView.phase`, `RecallItem.kind`,
 `WorkerHealth.status`, and others) have `Literal` aliases in `uniko.types` for type checking.

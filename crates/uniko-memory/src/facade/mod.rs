@@ -29,6 +29,7 @@
 
 mod capabilities;
 mod data;
+mod dead_letters;
 mod goals;
 mod readiness;
 mod session;
@@ -40,6 +41,7 @@ mod uniko;
 
 pub use capabilities::Capabilities;
 pub use data::{ArtifactView, Data, MessageView};
+pub use dead_letters::DeadLetters;
 pub use goals::{GoalContext, GoalPhase, GoalView, Goals, TaskPhase, TaskView};
 pub use readiness::Requirement;
 pub use session::{

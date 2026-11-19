@@ -431,15 +431,34 @@ let out = ctx.llm_breaker.call(|| async { provider.complete(prompt).await }).awa
 // Err(UnikoError::Llm("circuit breaker open")) when tripped.
 ```
 
-#### The dead-letter queue — and the truth about "retry"
+#### The dead-letter queue and retries
 
-The chapter spec, and the pipes crate description, mention "retry." **There is no retry module and no retry loop in `uniko-pipes`.** This matters, so state it plainly:
+`DeadLetterQueue` (`crates/uniko-pipes/src/dead_letter.rs`) stores each failed streaming item as a standalone `DeadLetter` node, with no edges. It keeps the serialized `IngestTask` as `payload`.
 
-- `DeadLetterQueue` is a thin wrapper over `Arc<KnowledgeBase>` with a **single `store()` method** that creates a `DeadLetter` graph node (`{step, error, node_ref, retry_count, max_retries}`). There is no `list`, `retry`, or `clear` — the module doc says these surfaces are intentionally not provided.
-- `retry_count` is **always written `0`** and is never read or incremented anywhere in the crate. "Retry" exists only as *data* (`PipelineConfig::dead_letter_max_retries = 3`, and the two node properties). Retry orchestration is deferred/unimplemented.
-- The **only automatic recovery mechanism actually implemented** is the circuit breaker's `Open → HalfOpen` probe.
+**What gets stored.** The worker keeps each step's `UnikoError` instead of only its string (`run_step_chain`). `record_dead_letter` (`crates/uniko-memory/src/pipeline/ingest_worker.rs:321`):
+- stores one letter per new item: its first `DeadLetter`-policy failure;
+- for a retry, updates the letter the retry came from instead.
 
-The `DeadLetter` node is standalone with no edges — it records a failed pipeline step for offline triage, and is not wired into the memory graph.
+**Retriable or permanent.** `is_retriable` (`dead_letter.rs:200`) marks `IdConflict`, `Unsupported`, `Pipeline`, `Config`, `Schema` and `Locy` as permanent; every other kind is retriable. `store` (`:300`) writes:
+- a retriable failure as `pending`, with `next_retry_at = now + backoff`;
+- a permanent one as `exhausted`.
+
+**The lifecycle.**
+- `begin_retry` (`:432`) refuses a letter that is resolved, retrying, legacy, past `max_retries` or permanent; `force` overrides the last two. Otherwise it increments `retry_count`, sets `retrying` and returns the task.
+- `release_claim` (`:488`) undoes a claim whose resubmit hit a full queue.
+- `retry_failed` (`:521`) returns the letter to `pending` with the doubled backoff, or `exhausted` once out of retries or permanent.
+- `reset_interrupted` (`:628`) runs once per pipeline, before its first claim, and moves `retrying` back to `pending`.
+
+All transitions are serialized by a per-queue mutex, which holds within one process only.
+
+**The background scheduler** is opt-in: `dead_letter_auto_retry`, `Retrier::spawn_scheduler` (`crates/uniko-memory/src/pipeline/retry.rs:124`). It:
+- polls at the base backoff, at most every 60 s;
+- retries up to `SCHEDULER_BATCH` (32) letters from `due` (`dead_letter.rs:604`) each pass;
+- stops with the ingest cancellation token.
+
+Retries go through the same channel as submitted items and count toward `ingest_inflight`, so `quiesce` waits for retries that have started and not for ones that aren't due.
+
+Rows from before #65 have no `dead_letter_id`, payload or status. They decode as `legacy` with id `legacy:{node_id}` and can only be resolved.
 
 Separately, the *store* layer does own a real retry loop — `transact_with_retry` retries retriable SSI/commit conflicts with capped exponential backoff — but that is transaction-conflict recovery inside L1, a different concern from pipeline step retry.
 

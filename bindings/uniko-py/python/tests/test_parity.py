@@ -28,6 +28,7 @@ HANDLES = {
     "Data": typed.TypedData,
     "Sources": typed.TypedSources,
     "Goals": typed.TypedGoals,
+    "DeadLetters": typed.TypedDeadLetters,
 }
 
 # Native methods deliberately without a typed counterpart, with the reason.

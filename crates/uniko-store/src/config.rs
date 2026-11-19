@@ -776,6 +776,20 @@ pub struct UnikoConfig {
     /// Milliseconds the circuit breaker stays open before probing.
     pub circuit_recovery_ms: u64,
 
+    // Dead letters
+    /// Retries a dead-lettered streaming item gets before it is marked
+    /// `exhausted`. Applies to explicit retries and to automatic ones.
+    pub dead_letter_max_retries: u32,
+    /// Retry dead-lettered items in the background on a backoff schedule.
+    /// Off by default: retries then run only when the host asks for them.
+    /// Only failures that can succeed on a retry are retried automatically.
+    pub dead_letter_auto_retry: bool,
+    /// Wait before a dead letter's first retry, in milliseconds. Each later
+    /// retry waits twice as long, up to `dead_letter_retry_max_backoff_ms`.
+    pub dead_letter_retry_backoff_ms: u64,
+    /// Longest wait between retries of one dead letter, in milliseconds.
+    pub dead_letter_retry_max_backoff_ms: u64,
+
     // Chunking thresholds
     /// Token count above which messages are chunked.
     pub message_chunk_threshold: usize,
@@ -971,6 +985,10 @@ impl Default for UnikoConfig {
             consolidation_interval_secs: 900,
             circuit_failure_threshold: 5,
             circuit_recovery_ms: 60_000,
+            dead_letter_max_retries: 3,
+            dead_letter_auto_retry: false,
+            dead_letter_retry_backoff_ms: 30_000,
+            dead_letter_retry_max_backoff_ms: 3_600_000,
             message_chunk_threshold: 1024,
             action_output_artifact_threshold: 256,
             max_chunk_tokens: 256,
@@ -1102,6 +1120,16 @@ impl UnikoConfig {
         if self.consolidation_queue_capacity == 0 {
             return Err(UnikoError::Config(
                 "consolidation_queue_capacity must be positive".into(),
+            ));
+        }
+
+        if self.dead_letter_retry_backoff_ms == 0
+            || self.dead_letter_retry_max_backoff_ms < self.dead_letter_retry_backoff_ms
+        {
+            return Err(UnikoError::Config(
+                "dead_letter_retry_backoff_ms must be positive and at most \
+                 dead_letter_retry_max_backoff_ms"
+                    .into(),
             ));
         }
 

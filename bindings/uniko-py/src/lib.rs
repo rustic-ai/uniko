@@ -22,6 +22,7 @@ mod agent;
 mod config;
 mod convert;
 mod data;
+mod dead_letters;
 mod errors;
 mod facade;
 mod goals;
@@ -167,6 +168,8 @@ fn _uniko(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<tool::PyToolCall>()?;
     sources::register(m)?;
     m.add_class::<data::PyData>()?;
+    m.add_class::<dead_letters::PyDeadLetters>()?;
+    m.add_class::<dead_letters::PyDeadLetter>()?;
     m.add_class::<goals::PyGoals>()?;
     m.add_class::<ingest::PyIngestSource>()?;
     m.add_class::<scope::PyScope>()?;
