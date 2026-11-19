@@ -18,6 +18,8 @@ pub(crate) fn register_labels(builder: SchemaBuilder<'_>) -> SchemaBuilder<'_> {
         .property_nullable("modality_presence", DataType::CypherValue)
         .property_nullable("blob_storage", DataType::CypherValue)
         .property_nullable("embedding", DataType::CypherValue)
+        // An in-place migration that started and hasn't finished (#66).
+        .property_nullable("migration", DataType::CypherValue)
         .property("updated_at", DataType::DateTime)
         .index("stats_id", IndexType::Scalar(ScalarType::Hash))
         .done()

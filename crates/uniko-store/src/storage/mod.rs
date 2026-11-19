@@ -7,10 +7,12 @@
 pub mod batch;
 pub mod batch_record;
 pub mod blob;
+pub mod compatibility;
 pub mod deletion;
 pub mod edges;
 pub mod filter;
 pub mod kb_stats;
+pub mod migrate_store;
 pub mod migrations;
 pub mod nodes;
 
@@ -119,6 +121,122 @@ pub struct KnowledgeBase {
     pub(crate) model_states: crate::model_state::ModelStates,
     /// The store's own background prefetch, cancelled at shutdown.
     pub(crate) prefetch_task: Option<tokio::task::AbortHandle>,
+    /// Marks the path open in this process while any clone of this store
+    /// lives, so [`inspect`](Self::inspect) and [`migrate`](Self::migrate)
+    /// refuse it. `None` for an in-memory store.
+    pub(crate) open_path: Option<Arc<OpenPath>>,
+}
+
+/// Stores in use in this process, by canonical path. uni-db takes no lock
+/// on a store directory, so a second handle opened under a live one would
+/// be a second writer. Opening counts as a shared claim; inspecting or
+/// migrating takes the path exclusively.
+static OPEN_PATHS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Claim>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// This many open stores.
+    Shared(usize),
+    /// Being inspected or migrated.
+    Exclusive,
+}
+
+/// A claim on a store path, released when dropped.
+#[derive(Debug)]
+pub(crate) struct OpenPath {
+    key: std::path::PathBuf,
+    exclusive: bool,
+}
+
+impl OpenPath {
+    /// Claim `path` for an open store. Refused while it is being inspected
+    /// or migrated.
+    fn claim(path: &Path) -> Result<Arc<Self>> {
+        let key = canonical(path);
+        let mut open = OPEN_PATHS.lock().expect("open-path registry poisoned");
+        match open.get_mut(&key) {
+            Some(Claim::Exclusive) => return Err(busy(path)),
+            Some(Claim::Shared(n)) => *n += 1,
+            None => {
+                open.insert(key.clone(), Claim::Shared(1));
+            }
+        }
+        Ok(Arc::new(Self {
+            key,
+            exclusive: false,
+        }))
+    }
+
+    /// Claim `path` exclusively, to inspect or migrate it: refused while
+    /// any store, inspection or migration there is in use in this process.
+    pub(crate) fn claim_exclusive(path: &Path) -> Result<Self> {
+        let key = canonical(path);
+        let mut open = OPEN_PATHS.lock().expect("open-path registry poisoned");
+        match open.get(&key) {
+            Some(Claim::Shared(_)) => Err(UnikoError::Config(format!(
+                "the store at {} is open in this process; shut it down first",
+                path.display()
+            ))),
+            Some(Claim::Exclusive) => Err(busy(path)),
+            None => {
+                open.insert(key.clone(), Claim::Exclusive);
+                Ok(Self {
+                    key,
+                    exclusive: true,
+                })
+            }
+        }
+    }
+}
+
+fn busy(path: &Path) -> UnikoError {
+    UnikoError::Config(format!(
+        "the store at {} is being inspected or migrated in this process",
+        path.display()
+    ))
+}
+
+impl Drop for OpenPath {
+    fn drop(&mut self) {
+        let mut open = OPEN_PATHS.lock().expect("open-path registry poisoned");
+        match open.get_mut(&self.key) {
+            Some(Claim::Shared(n)) if !self.exclusive => {
+                *n -= 1;
+                if *n == 0 {
+                    open.remove(&self.key);
+                }
+            }
+            Some(Claim::Exclusive) if self.exclusive => {
+                open.remove(&self.key);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The key a path is claimed under. A store that doesn't exist yet is keyed
+/// by its canonical parent, so the key doesn't change once uni-db creates
+/// the directory (on macOS a temp dir under `/var` canonicalizes to
+/// `/private/var`).
+fn canonical(path: &Path) -> std::path::PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => {
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::canonicalize(parent)
+                .map(|p| p.join(name))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 impl KnowledgeBase {
@@ -179,6 +297,7 @@ impl KnowledgeBase {
             catalog: Some(kept),
             model_states,
             prefetch_task: None,
+            open_path: None,
         };
         kb.prefetch_task = kb.prefetch_catalog(prefetch).await;
         kb.finalize_init().await
@@ -244,11 +363,12 @@ impl KnowledgeBase {
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
         let model_states = crate::model_state::new_states(&kept);
+        let open_path = OpenPath::claim(path.as_ref())?;
         let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_catalog(catalog);
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
         }
-        let db = builder.build().await?;
+        let db = build_or_explain(builder, path.as_ref(), &config).await?;
         apply_schema(&db, &config).await?;
         // Check the store against the config (blob backend, embedding model)
         // before prefetching: a mismatched reopen should fail at once, not
@@ -262,10 +382,12 @@ impl KnowledgeBase {
             catalog: Some(kept),
             model_states,
             prefetch_task: None,
+            open_path: None,
         }
         .finalize_init()
         .await?;
         let mut kb = kb;
+        kb.open_path = Some(open_path);
         kb.prefetch_task = kb.prefetch_catalog(prefetch).await;
         Ok(kb)
     }
@@ -312,13 +434,16 @@ impl KnowledgeBase {
     ) -> Result<Self> {
         config.validate()?;
         runtime.check_serves(&config)?;
+        let open_path = OpenPath::claim(path.as_ref())?;
         let mut builder =
             Uni::open(path.as_ref().to_string_lossy()).xervo_runtime(runtime.runtime.clone());
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
         }
-        let db = builder.build().await?;
-        Self::over_shared(db, config, runtime).await
+        let db = build_or_explain(builder, path.as_ref(), &config).await?;
+        let mut kb = Self::over_shared(db, config, runtime).await?;
+        kb.open_path = Some(open_path);
+        Ok(kb)
     }
 
     async fn over_shared(db: Uni, config: UnikoConfig, runtime: &SharedRuntime) -> Result<Self> {
@@ -332,6 +457,7 @@ impl KnowledgeBase {
             catalog: Some(runtime.catalog.clone()),
             model_states: runtime.states.clone(),
             prefetch_task: None,
+            open_path: None,
         }
         .finalize_init()
         .await
@@ -379,6 +505,7 @@ impl KnowledgeBase {
         runtime: Arc<uni_xervo::runtime::ModelRuntime>,
     ) -> Result<Self> {
         config.validate()?;
+        let open_path = OpenPath::claim(path.as_ref())?;
         let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_runtime(runtime);
         // Apply the same env-driven storage perf knobs (WAL / autoflush) the
         // catalog-open path applies — otherwise opening via a shared runtime
@@ -386,7 +513,7 @@ impl KnowledgeBase {
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
         }
-        let db = builder.build().await?;
+        let db = build_or_explain(builder, path.as_ref(), &config).await?;
         apply_schema(&db, &config).await?;
         Self {
             db: Arc::new(db),
@@ -397,6 +524,7 @@ impl KnowledgeBase {
             catalog: None,
             model_states: Arc::default(),
             prefetch_task: None,
+            open_path: Some(open_path),
         }
         .finalize_init()
         .await
@@ -750,8 +878,61 @@ fn reject_duplicate_aliases(catalog: &[ModelAliasSpec]) -> Result<()> {
     Ok(())
 }
 
-/// Apply the schema from a JSON file or the builder-based registration.
+/// Open the store, turning uni-db's catalog check into a compatibility
+/// report.
+///
+/// uni-db refuses at open a store whose vector indexes name a model alias
+/// the catalog lacks: a hybrid store (`embed/hybrid`) opened with a
+/// dense-only config. That would surface as a raw "missing alias" error;
+/// inspecting the store explains it as [`UnikoError::IncompatibleStore`]
+/// instead. Any other open error, or one inspection doesn't explain, is
+/// returned as is.
+async fn build_or_explain(
+    builder: uni_db::UniBuilder,
+    path: &Path,
+    config: &UnikoConfig,
+) -> Result<Uni> {
+    match builder.build().await {
+        Ok(db) => Ok(db),
+        Err(e) => {
+            let raw = UnikoError::from(e);
+            let text = raw.to_string();
+            if config.schema_path.is_none()
+                && (text.contains("Missing Uni-Xervo alias")
+                    || text.contains("catalog is required"))
+                && let Ok((_, verdict)) = migrate_store::inspect_unclaimed(path, config).await
+                && !verdict.is_compatible()
+            {
+                return Err(UnikoError::IncompatibleStore(Box::new(verdict)));
+            }
+            Err(raw)
+        }
+    }
+}
+
+/// Check the store against `config`, then apply the schema from a JSON file
+/// or the builder-based registration.
+///
+/// The check runs first, on the schema already on disk: a config that the
+/// store can't serve (another model or dimensions, a hybrid store opened
+/// dense-only) or that needs a migration (new hybrid columns, a different
+/// index) is refused with [`UnikoError::IncompatibleStore`] before uni-db
+/// changes or rebuilds anything. A `schema_path` config skips the check:
+/// its column types come from the file, not the config.
 async fn apply_schema(db: &Uni, config: &UnikoConfig) -> Result<()> {
+    if config.schema_path.is_none() {
+        let stored = compatibility::inspect_db(db, false).await?;
+        let verdict = compatibility::check(&stored, config);
+        if !verdict.is_compatible() {
+            return Err(UnikoError::IncompatibleStore(Box::new(verdict)));
+        }
+    }
+    apply_schema_unchecked(db, config).await
+}
+
+/// Apply the schema without the compatibility check, for a migration that
+/// has already checked it.
+pub(crate) async fn apply_schema_unchecked(db: &Uni, config: &UnikoConfig) -> Result<()> {
     if let Some(path) = &config.schema_path {
         db.load_schema(path)
             .await
@@ -1136,5 +1317,36 @@ mod catalog_tests {
         let catalog = load_catalog(&config, &[extra]).unwrap();
         assert_eq!(catalog.len(), embed_catalog(&config).len() + 1);
         assert_eq!(catalog.last().unwrap().alias, "embed/extra");
+    }
+}
+
+#[cfg(test)]
+mod open_path_tests {
+    use super::*;
+
+    #[test]
+    fn shared_and_exclusive_claims_exclude_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        // Claimed before the directory exists, then created: same key.
+        let open = OpenPath::claim(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let err = OpenPath::claim_exclusive(&path).unwrap_err();
+        assert!(err.to_string().contains("open in this process"), "{err}");
+        let second = OpenPath::claim(&path).unwrap();
+        drop(open);
+        assert!(
+            OpenPath::claim_exclusive(&path).is_err(),
+            "one open store is left"
+        );
+        drop(second);
+
+        let exclusive = OpenPath::claim_exclusive(&path).unwrap();
+        let err = OpenPath::claim(&path).unwrap_err();
+        assert!(err.to_string().contains("inspected or migrated"), "{err}");
+        assert!(OpenPath::claim_exclusive(&path).is_err());
+        drop(exclusive);
+        drop(OpenPath::claim(&path).unwrap());
+        drop(OpenPath::claim_exclusive(&path).unwrap());
     }
 }

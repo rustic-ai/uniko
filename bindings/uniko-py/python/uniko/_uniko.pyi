@@ -17,11 +17,14 @@ from uniko.types import (
     CircuitState,
     DeadLetterStatus,
     GoalPhase,
+    MigrationName,
+    MigrationProgressEvent,
     IngestKind,
     RecallKind,
     RecallSourceKind,
     RegistrationOutcome,
     TaskPhase,
+    VerdictName,
     WorkerStatus,
 )
 
@@ -54,6 +57,20 @@ class DegradedError(UnikoError):
     """A stage fell back or failed during a strict operation."""
 
     diagnostics: list[dict[str, Any]]
+
+class IncompatibleStoreError(ConfigError):
+    """The store can't be opened with this config as is.
+
+    ``differences`` holds one dict per difference, shaped like
+    ``StoreDifference``: ``field``, ``stored``, ``requested``, ``verdict``
+    and ``migration``. ``compatible`` and ``migrations`` are as on
+    ``StoreReport``; ``migrations`` is empty when any difference is
+    incompatible.
+    """
+
+    differences: list[dict[str, Any]]
+    compatible: bool
+    migrations: list[MigrationName]
 
 class ReadinessError(UnikoError):
     """A required model or stage is unavailable."""
@@ -341,6 +358,57 @@ class WorkerHealth:
     dead_lettered: int
     retries: int
     retries_succeeded: int
+    def __repr__(self) -> str: ...
+
+@final
+class StoredEmbedding:
+    model_id: str | None
+    dimensions: int | None
+    sparse_dimensions: int | None
+    multivector_dimensions: int | None
+    algorithm: str | None
+    metric: str | None
+    embed_alias: str | None
+    document_prefix: str | None
+    query_prefix: str | None
+    batch_size: int | None
+    @property
+    def is_hybrid(self) -> bool: ...
+    def __repr__(self) -> str: ...
+
+@final
+class StoreInfo:
+    exists: bool
+    embedding: StoredEmbedding
+    hybrid_backfill_pending: int | None
+    migration_in_progress: MigrationName | None
+    def __repr__(self) -> str: ...
+
+@final
+class StoreDifference:
+    field: str
+    stored: str
+    requested: str
+    verdict: VerdictName
+    migration: MigrationName | None
+    def __repr__(self) -> str: ...
+
+@final
+class StoreReport:
+    info: StoreInfo
+    differences: builtins.list[StoreDifference]
+    compatible: bool
+    migrations: builtins.list[MigrationName]
+    def __repr__(self) -> str: ...
+
+@final
+class MigrationReport:
+    migration: MigrationName
+    rows_backfilled: int
+    rows_unfilled: int
+    completed: bool
+    elapsed_secs: float
+    migration_in_progress: MigrationName | None
     def __repr__(self) -> str: ...
 
 @final
@@ -1200,6 +1268,56 @@ class Uniko:
     def in_memory_sync() -> Uniko: ...
     @staticmethod
     def builder() -> UnikoBuilder: ...
+    @staticmethod
+    def inspect_store(
+        path: str,
+        config: dict[str, Any] | None = None,
+        *,
+        embedding: str | dict[str, Any] | None = None,
+    ) -> Awaitable[StoreReport]: ...
+    @staticmethod
+    def inspect_store_sync(
+        path: str,
+        config: dict[str, Any] | None = None,
+        *,
+        embedding: str | dict[str, Any] | None = None,
+    ) -> StoreReport: ...
+    @staticmethod
+    def migrate_store(
+        path: str,
+        migration: MigrationName,
+        config: dict[str, Any] | None = None,
+        *,
+        embedding: str | dict[str, Any] | None = None,
+        progress: Callable[[MigrationProgressEvent], object] | None = None,
+    ) -> Awaitable[MigrationReport]:
+        """Migrate the store at ``path`` in place.
+
+        ``progress`` is called with a ``MigrationProgressEvent`` dict per
+        phase and batch. It can't cancel the migration: an exception it
+        raises (``KeyboardInterrupt`` and ``SystemExit`` included) or a panic
+        it sets off is printed to stderr and ignored. An ``async def``
+        callback is not awaited. The callback must not call other ``_sync``
+        uniko methods.
+        """
+    @staticmethod
+    def migrate_store_sync(
+        path: str,
+        migration: MigrationName,
+        config: dict[str, Any] | None = None,
+        *,
+        embedding: str | dict[str, Any] | None = None,
+        progress: Callable[[MigrationProgressEvent], object] | None = None,
+    ) -> MigrationReport:
+        """Blocking variant of ``migrate_store``.
+
+        The same ``progress`` rules apply: exceptions and panics in the
+        callback are printed to stderr and ignored, the callback can't cancel
+        the migration, an ``async def`` callback is not awaited, and the
+        callback must not call other ``_sync`` uniko methods.
+        """
+    def store_info(self) -> Awaitable[StoreInfo]: ...
+    def store_info_sync(self) -> StoreInfo: ...
     def agent(self, agent_id: str) -> Agent: ...
     def config(self) -> dict[str, Any]: ...
     def health(self) -> PipelineHealth | None: ...
@@ -1303,4 +1421,10 @@ __all__ = [
     "UnsupportedError",
     "ReadinessError",
     "DegradedError",
+    "IncompatibleStoreError",
+    "StoreReport",
+    "StoreInfo",
+    "StoredEmbedding",
+    "StoreDifference",
+    "MigrationReport",
 ]

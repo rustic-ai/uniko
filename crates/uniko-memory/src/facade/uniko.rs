@@ -51,6 +51,16 @@ pub struct Uniko {
     pub(super) extractors: Arc<ModalityRegistry>,
 }
 
+/// What [`Uniko::inspect_store`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StoreReport {
+    /// What the store was built with.
+    pub info: uniko_store::StoreInfo,
+    /// How it compares with the config it was checked against.
+    pub compatibility: uniko_store::Compatibility,
+}
+
 impl fmt::Debug for Uniko {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // KnowledgeBase wraps the live store handle and is not Debug;
@@ -234,6 +244,62 @@ impl Uniko {
     /// pipeline to report on.
     pub fn health(&self) -> Option<PipelineHealth> {
         self.streaming.as_ref().map(|pipeline| pipeline.health())
+    }
+
+    /// What the store at `path` was built with, and whether `config` can
+    /// open it as is.
+    ///
+    /// Reads the stored schema and model record only: it applies no schema,
+    /// changes no index or data and loads no model, so it is safe to call
+    /// before deciding how to open a store (uni-db's own open and close may
+    /// still write bookkeeping files). Opening runs the same check and
+    /// refuses an incompatible config with [`UnikoError::IncompatibleStore`]
+    /// before the store changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] when the store is open, inspected or
+    /// migrated in this process (use [`store_info`](Self::store_info) on an
+    /// open instance), [`UnikoError::Unsupported`] for a remote URI, and
+    /// [`UnikoError`] when the store can't be read.
+    pub async fn inspect_store(
+        path: impl AsRef<Path>,
+        config: &UnikoConfig,
+    ) -> Result<StoreReport, UnikoError> {
+        let (info, compatibility) = KnowledgeBase::inspect(path, config).await?;
+        Ok(StoreReport {
+            info,
+            compatibility,
+        })
+    }
+
+    /// What this instance's store was built with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when the store can't be read.
+    pub async fn store_info(&self) -> Result<uniko_store::StoreInfo, UnikoError> {
+        self.kb.store_info().await
+    }
+
+    /// Bring the store at `path` in line with `config` in place. See
+    /// [`KnowledgeBase::migrate`] for what each [`Migration`](uniko_store::Migration)
+    /// does; anything else, such as a new model or dimension size, needs a
+    /// fresh store. `progress` is called after each phase and backfill batch.
+    /// The store must not be open elsewhere.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::IncompatibleStore`] when the migration can't
+    /// resolve the store's differences from `config`, or the error that
+    /// stopped it; the work already done is kept, and a rerun resumes.
+    pub async fn migrate_store(
+        path: impl AsRef<Path>,
+        config: UnikoConfig,
+        migration: uniko_store::Migration,
+        mut progress: impl FnMut(&uniko_store::MigrationProgress) + Send,
+    ) -> Result<uniko_store::MigrationReport, UnikoError> {
+        KnowledgeBase::migrate(path, config, migration, &mut progress).await
     }
 
     /// The streaming pipeline's dead letters: list, count, retry and

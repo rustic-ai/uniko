@@ -33,6 +33,7 @@ nav:
       - Recall & Retrieval: guides/retrieval.md
       - Reasoning with Locy: guides/reasoning-with-locy.md
       - Configuration: guides/configuration.md
+      - Changing the Embedding Model: guides/model-migration.md
   - Reference:
       - API: reference/api.md
       - Schema: reference/schema.md

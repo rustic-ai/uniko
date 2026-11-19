@@ -21,17 +21,19 @@ from __future__ import annotations
 import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from ..types import (
     CircuitState,
     DeadLetterStatus,
     GoalPhase,
+    MigrationName,
     IngestKind,
     RecallKind,
     RecallSourceKind,
     RegistrationOutcome,
     TaskPhase,
+    VerdictName,
     WorkerStatus,
 )
 
@@ -625,6 +627,91 @@ class RetryReport(BaseModel):
         return cls.model_validate(native)
 
 
+class StoredEmbedding(BaseModel):
+    """The embedding setup a store was built with (native ``StoredEmbedding``)."""
+
+    model_config = _OUT
+
+    model_id: Optional[str] = None
+    dimensions: Optional[int] = None
+    sparse_dimensions: Optional[int] = None
+    multivector_dimensions: Optional[int] = None
+    algorithm: Optional[str] = None
+    metric: Optional[str] = None
+    embed_alias: Optional[str] = None
+    document_prefix: Optional[str] = None
+    query_prefix: Optional[str] = None
+    batch_size: Optional[int] = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_hybrid(self) -> bool:
+        """The store has the sparse or ColBERT column."""
+        return (
+            self.sparse_dimensions is not None
+            or self.multivector_dimensions is not None
+        )
+
+
+class StoreInfo(BaseModel):
+    """What a store was built with (native ``StoreInfo``)."""
+
+    model_config = _OUT
+
+    exists: bool
+    embedding: StoredEmbedding
+    hybrid_backfill_pending: Optional[int] = None
+    migration_in_progress: Optional[MigrationName] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "StoreInfo":
+        return cls.model_validate(native)
+
+
+class StoreDifference(BaseModel):
+    """One way a store differs from a config (native ``StoreDifference``)."""
+
+    model_config = _OUT
+
+    field: str
+    stored: str
+    requested: str
+    verdict: VerdictName
+    migration: Optional[MigrationName] = None
+
+
+class StoreReport(BaseModel):
+    """What ``Uniko.inspect_store`` found (native ``StoreReport``)."""
+
+    model_config = _OUT
+
+    info: StoreInfo
+    differences: list[StoreDifference] = Field(default_factory=list)
+    compatible: bool
+    migrations: list[MigrationName] = Field(default_factory=list)
+
+    @classmethod
+    def from_native(cls, native: Any) -> "StoreReport":
+        return cls.model_validate(native)
+
+
+class MigrationReport(BaseModel):
+    """What ``Uniko.migrate_store`` did (native ``MigrationReport``)."""
+
+    model_config = _OUT
+
+    migration: MigrationName
+    rows_backfilled: int
+    rows_unfilled: int
+    completed: bool
+    elapsed_secs: float
+    migration_in_progress: Optional[MigrationName] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "MigrationReport":
+        return cls.model_validate(native)
+
+
 class Registration(BaseModel):
     """What ``Agent.register`` did (native ``Registration``)."""
 
@@ -838,6 +925,11 @@ __all__ = [
     "PipelineHealth",
     "DeadLetter",
     "Registration",
+    "StoredEmbedding",
+    "StoreInfo",
+    "StoreDifference",
+    "StoreReport",
+    "MigrationReport",
     "DeadLetterCounts",
     "RetryReport",
     "RetryRefusal",

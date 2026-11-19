@@ -97,6 +97,9 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 | `agent` | `agent(agent_id: str) -> Agent` | — (sync) | Mint an agent identity (cheap). |
 | `config` | `config() -> dict[str, Any]` | — (sync) | The full configuration this instance runs with, as nested dicts. |
 | `health` | `health() -> PipelineHealth \| None` | — (sync) | Streaming-pipeline health; `None` without `streaming(True)`. |
+| `inspect_store` | `@staticmethod inspect_store(path, config=None, *, embedding=None) -> Awaitable[StoreReport]` | `inspect_store_sync` | What the store at `path` was built with and how a config compares (`compatible`, `differences`, `migrations`). `migrations` is empty whenever a difference is incompatible. Applies no schema, changes no index or data and loads no model (uni-db's own open and close may still write bookkeeping files, such as a manifest and its WAL). A local path that isn't a store isn't touched at all and reports `info.exists == False`. Raises `ConfigError` while the store is open, inspected or migrated in this process (use `store_info` on an open handle), and `UnsupportedError` for a remote URI (a path containing `://`). See [Changing the Embedding Model](../guides/model-migration.md). |
+| `migrate_store` | `@staticmethod migrate_store(path, migration, config=None, *, embedding=None, progress=None) -> Awaitable[MigrationReport]` | `migrate_store_sync` | Run `"enable_hybrid"` or `"rebuild_vector_indexes"` in place. The argument order differs from Rust's `migrate_store(path, config, migration, progress)`. `progress` gets a dict, typed as `uniko.types.MigrationProgressEvent` (`migration`, `phase`: `"schema"` \| `"backfill"` \| `"done"`, `label`, `done`, `total`); the final `"done"` event has `done == total == rows_backfilled + rows_unfilled`. An exception or panic in the callback is printed and ignored, and it can't cancel the run. An `async def` callback isn't awaited, and the callback must not call other `_sync` uniko methods. Resumable. Raises `IncompatibleStoreError` when the migration can't resolve the differences; `ConfigError` when there is no store at `path`, the config sets `schema_path`, or the store is open, inspected or migrated in this process; and `UnsupportedError` for a remote URI. While a migration runs, opening the store in this process raises `ConfigError`. |
+| `store_info` | `store_info() -> Awaitable[StoreInfo]` | `store_info_sync` | What this instance's store was built with, including `hybrid_backfill_pending`. |
 | `dead_letters` | property `-> DeadLetters` | — | Failed streaming items: list, count, retry, resolve. See [`DeadLetters`](#deadletters). |
 | `add_team_member` | `add_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `add_team_member_sync` | Record a team membership; `False` when already recorded. |
 | `remove_team_member` | `remove_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `remove_team_member_sync` | Remove it; `False` when not recorded. |
@@ -238,8 +241,10 @@ uni = (uniko.Uniko.builder()
   capacity of `0`, and similar constraints raise `ConfigError` there, not in the setter.
 - **Embedding presets**: `nomic`, `nomic-q`, `minilm`, `bge-small` (the default), `bge-large`,
   `bge-m3`, `gemma`.
-- **Reopening a store with a different embedding model raises `ConfigError`**. Its vectors were
-  made with the original model and are not comparable with another's.
+- **Reopening a store with a different embedding model raises `IncompatibleStoreError`**, a
+  `ConfigError` subclass. Its vectors were made with the original model and are not comparable
+  with another's. A changed index setting raises it too, until a migration runs; see
+  [Changing the Embedding Model](../guides/model-migration.md).
 - `blob_storage` and `vector_algorithm` are replaced whole rather than merged, since a different
   variant has different keys: `{"blob_storage": {"kind": "fs", "root": "/data/blobs"}}`.
 
@@ -1068,6 +1073,74 @@ A `DeadLetter` has these fields:
 The typed `uniko.models.DeadLetter` mirrors them. Automatic background retries are opt-in through
 the `dead_letter_auto_retry` config key; see the facade guide.
 
+### `StoreReport`
+
+Returned by `Uniko.inspect_store`. Rust's `StoreReport` holds a `Compatibility`; Python flattens
+it into `compatible`, `differences` and `migrations`, and represents verdicts and migrations as
+strings.
+
+| Field | Type |
+| --- | --- |
+| `info` | `StoreInfo` |
+| `differences` | `list[StoreDifference]` — empty when the config opens the store as is |
+| `compatible` | `bool` |
+| `migrations` | `list["enable_hybrid" \| "rebuild_vector_indexes"]` — empty when any difference is incompatible |
+
+### `StoreInfo`
+
+Returned by `Uniko.store_info`, and as `StoreReport.info`.
+
+| Field | Type |
+| --- | --- |
+| `exists` | `bool` — `False` for a path that isn't a store |
+| `embedding` | `StoredEmbedding` |
+| `hybrid_backfill_pending` | `int \| None` — chunks and observations whose hybrid columns aren't filled yet, on a hybrid store |
+| `migration_in_progress` | `"enable_hybrid" \| "rebuild_vector_indexes" \| None` — a migration that started and hasn't finished |
+
+### `StoredEmbedding`
+
+The embedding setup a store was built with, as stored. Every field is `None` when the store
+doesn't record it.
+
+| Field | Type |
+| --- | --- |
+| `model_id` | `str \| None` — `None` on a store from before the model was recorded |
+| `dimensions` | `int \| None` |
+| `sparse_dimensions` | `int \| None` |
+| `multivector_dimensions` | `int \| None` |
+| `algorithm` | `str \| None` — e.g. `"hnsw_sq(m=16, ef_construction=100)"` |
+| `metric` | `str \| None` — `"cosine"`, `"l2"` or `"dot"` |
+| `embed_alias` | `str \| None` — `"embed/default"`, or `"embed/hybrid"` on a hybrid store |
+| `document_prefix` | `str \| None` |
+| `query_prefix` | `str \| None` |
+| `batch_size` | `int \| None` |
+| `is_hybrid` | `bool` (property) — the store has the sparse or ColBERT column |
+
+### `StoreDifference`
+
+One entry of `StoreReport.differences`.
+
+| Field | Type |
+| --- | --- |
+| `field` | `str` — e.g. `"dimensions"`, `"model_id"`, `"vector_metric"` |
+| `stored` | `str` |
+| `requested` | `str` |
+| `verdict` | `"incompatible" \| "needs_migration" \| "unknown"` — `"unknown"` for a verdict this build doesn't know; the alias is `uniko.types.VerdictName` |
+| `migration` | `"enable_hybrid" \| "rebuild_vector_indexes" \| None` — set when `verdict` is `"needs_migration"` |
+
+### `MigrationReport`
+
+Returned by `Uniko.migrate_store`.
+
+| Field | Type |
+| --- | --- |
+| `migration` | `"enable_hybrid" \| "rebuild_vector_indexes"` |
+| `rows_backfilled` | `int` — existing rows whose new columns were filled |
+| `rows_unfilled` | `int` — rows re-embedded whose new columns still came back empty; passed over in this run, but still counted as pending, so a rerun tries them again |
+| `completed` | `bool` — the store needs nothing further for this config. Still true when the only pending rows are the unfilled ones |
+| `migration_in_progress` | `"enable_hybrid" \| "rebuild_vector_indexes" \| None` — a migration still marked unfinished on the store after the run, which is why `completed` can be false after a run that did its own part; rerun that migration to finish it |
+| `elapsed_secs` | `float` |
+
 The closed sets of strings the API passes (`GoalView.phase`, `RecallItem.kind`,
 `WorkerHealth.status`, and others) have `Literal` aliases in `uniko.types` for type checking.
 
@@ -1171,6 +1244,7 @@ Each is an `issubclass` of `UnikoError` and carries a fixed `.kind`.
 | `UnsupportedError` | `"unsupported"` | No extractor for the modality. |
 | `ReadinessError` | `"not_ready"` | A `require()`d model or stage is unavailable; `.failures` lists each. |
 | `DegradedError` | `"degraded"` | A `strict=True` recall had a stage fall back or fail; `.diagnostics` lists them as dicts. |
+| `IncompatibleStoreError` | `"incompatible_store"` | The store can't be opened (or migrated) with this config as is. A subclass of `ConfigError`, so `except ConfigError` catches it, but its `.kind` is `"incompatible_store"`. `.differences` lists dicts with `field`, `stored`, `requested`, `verdict` (`"incompatible"`, `"needs_migration"` or `"unknown"`; `uniko.types.VerdictName`) and `migration`; `.compatible` is a bool and `.migrations` the migration names that would fix it (empty when any difference is incompatible). |
 
 !!! note "`UnikoTimeoutError`, formerly `uniko.TimeoutError`"
     The class was renamed so that `from uniko import *` no longer shadows the built-in

@@ -59,8 +59,8 @@ pub use facade::{
     ArtifactView, Capabilities, Data, DeadLetters, FinalizeReport, GoalContext, GoalPhase,
     GoalView, Goals, LlmSpec, MessageView, ObserveResult, Outline, OutlineEntry, ReadRange,
     ReadResult, RecallScope, Requirement, SearchHit, SearchOptions, Session, SourceRef, Sources,
-    SummarizeReport, TaskPhase, TaskView, ToolCall, ToolCallResult, ToolCallView, ToolOutput, Turn,
-    TurnUnit, Uniko, UnikoBuilder, UnitResult,
+    StoreReport, SummarizeReport, TaskPhase, TaskView, ToolCall, ToolCallResult, ToolCallView,
+    ToolOutput, Turn, TurnUnit, Uniko, UnikoBuilder, UnitResult,
 };
 #[doc(inline)]
 pub use fact::{AssertFactParams, InvalidateFactParams, assert_fact, invalidate_fact};
@@ -107,8 +107,10 @@ pub use uniko_store::operations::facts::{FactUpsert, fact_id_for, fact_id_for_sc
 // reaching into `uniko_store`.
 #[doc(no_inline)]
 pub use uniko_store::{
-    DeletionReport, Diagnostic, DiagnosticCode, EnsureOutcome, ModelState, ModelStatus, NodeId,
-    PrefetchPolicy, ReadinessCode, ReadinessFailure, SharedRuntime, Stage, StageStatus, UnikoError,
+    Compatibility, DeletionReport, Diagnostic, DiagnosticCode, EnsureOutcome, Migration,
+    MigrationProgress, MigrationReport, ModelState, ModelStatus, NodeId, PrefetchPolicy,
+    ReadinessCode, ReadinessFailure, SharedRuntime, Stage, StageStatus, StoreDifference, StoreInfo,
+    StoredEmbedding, UnikoError, Verdict,
 };
 // Logic / query surface: `Agent::query` / `run_rule` / `abduce` return
 // these; `Value` is the graph value type for query params and rows.

@@ -159,18 +159,27 @@ async fn reopen_with_a_different_embedding_model_is_hard_error() {
         .err()
         .expect("reopening with a different model_id must fail");
     let msg = err.to_string();
-    assert!(msg.contains("embedding mismatch"), "got: {msg}");
     assert!(
-        msg.contains(&original.embedding.model_id),
+        matches!(err, uniko_store::UnikoError::IncompatibleStore(_)),
+        "got: {msg}"
+    );
+    assert!(
+        msg.contains("model_id") && msg.contains(&original.embedding.model_id),
         "error must name the stored model, got: {msg}"
     );
 
-    // Different dimensions must fail too, whichever check catches it.
+    // Different dimensions are caught by the same check, before uni-db's
+    // own type error.
     let mut wider = original.clone();
     wider.embedding.dimensions = original.embedding.dimensions * 2;
+    let err = open_no_prefetch(&path, wider)
+        .await
+        .err()
+        .expect("reopening with different dimensions must fail");
     assert!(
-        open_no_prefetch(&path, wider).await.is_err(),
-        "reopening with different dimensions must fail"
+        matches!(&err, uniko_store::UnikoError::IncompatibleStore(c)
+            if c.differences.iter().any(|d| d.field == "dimensions")),
+        "got: {err}"
     );
 
     // The original config still opens.
@@ -212,5 +221,9 @@ async fn reopen_records_embedding_on_a_store_that_predates_it() {
         .await
         .err()
         .expect("once recorded, a different model must fail");
-    assert!(err.to_string().contains("embedding mismatch"), "got: {err}");
+    assert!(
+        matches!(&err, uniko_store::UnikoError::IncompatibleStore(c)
+            if c.differences.iter().any(|d| d.field == "model_id")),
+        "got: {err}"
+    );
 }

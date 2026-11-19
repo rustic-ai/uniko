@@ -88,6 +88,13 @@ pub enum UnikoError {
     /// stage and why; best-effort mode returns these on the result instead.
     #[error("degraded: {}", crate::diagnostics::describe(.0))]
     Degraded(Vec<crate::Diagnostic>),
+
+    /// The store at a path can't be opened with this config as is: each
+    /// difference says whether it needs a fresh store or names the
+    /// in-place migration that fixes it. Raised before anything on disk
+    /// changes or any model loads.
+    #[error("incompatible store: {0}")]
+    IncompatibleStore(Box<crate::Compatibility>),
 }
 
 impl UnikoError {

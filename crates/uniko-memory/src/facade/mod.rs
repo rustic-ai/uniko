@@ -54,7 +54,7 @@ pub use sources::{
     ToolCallView,
 };
 pub use tool::{ToolCall, ToolCallResult, ToolOutput};
-pub use uniko::{LlmSpec, Uniko, UnikoBuilder};
+pub use uniko::{LlmSpec, StoreReport, Uniko, UnikoBuilder};
 
 use crate::policy::Viewer;
 

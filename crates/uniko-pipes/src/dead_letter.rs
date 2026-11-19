@@ -245,6 +245,7 @@ pub fn is_retriable(err: &UnikoError) -> bool {
             | UnikoError::Config(_)
             | UnikoError::Schema(_)
             | UnikoError::Locy(_)
+            | UnikoError::IncompatibleStore(_)
     )
 }
 
@@ -267,6 +268,7 @@ pub fn error_kind(err: &UnikoError) -> &'static str {
         UnikoError::Unsupported(_) => "unsupported",
         UnikoError::NotReady(_) => "not_ready",
         UnikoError::Degraded(_) => "degraded",
+        UnikoError::IncompatibleStore(_) => "incompatible_store",
     }
 }
 

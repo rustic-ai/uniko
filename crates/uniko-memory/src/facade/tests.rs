@@ -5992,6 +5992,99 @@ mod hybrid_regressions {
         config
     }
 
+    /// #66: a dense-only BGE-M3 store gains the hybrid columns in place.
+    /// The backfill fills them for existing rows, recall then uses them,
+    /// and a rerun after rows lost their sparse vectors resumes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enabling_hybrid_in_place_fills_the_new_columns() {
+        if !expensive() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        let mut dense = config(false);
+        dense.embedding.sparse_dimensions = None;
+        dense.embedding.multivector_dimensions = None;
+        dense.reranker.enabled = false;
+        let memory = Uniko::builder()
+            .path(&path)
+            .raw_config(dense)
+            .build()
+            .await
+            .expect("dense-only store");
+        seed(&memory).await;
+        memory.shutdown().await.unwrap();
+
+        let mut phases = Vec::new();
+        let report = Uniko::migrate_store(
+            &path,
+            config(true),
+            uniko_store::Migration::EnableHybrid,
+            |p| phases.push(p.phase.clone()),
+        )
+        .await
+        .expect("migrate");
+        assert!(report.completed, "{report:?}");
+        assert!(report.rows_backfilled >= DOCS.len() as u64, "{report:?}");
+        assert!(phases.iter().any(|p| p == "backfill"), "{phases:?}");
+
+        let memory = Uniko::builder()
+            .path(&path)
+            .raw_config(config(true))
+            .build()
+            .await
+            .expect("opens as hybrid");
+        let info = memory.store_info().await.unwrap();
+        assert!(info.embedding.is_hybrid());
+        assert_eq!(info.hybrid_backfill_pending, Some(0));
+        let kb = memory.agent("a").kb().clone();
+        assert_eq!(
+            super::count_query(
+                &kb,
+                "MATCH (c:Chunk) WHERE c.colbert_embedding IS NULL RETURN count(c) AS c"
+            )
+            .await,
+            0,
+            "every chunk has token vectors"
+        );
+        let bundle = memory.agent("a").recall(QUERY).await.unwrap();
+        for stage in [Stage::Sparse, Stage::Colbert] {
+            assert!(
+                bundle
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.stage == stage && d.status == StageStatus::Applied),
+                "{stage:?} not applied: {:?}",
+                bundle.diagnostics
+            );
+        }
+
+        // Lose two chunks' sparse vectors: a rerun picks up exactly those.
+        let tx = kb
+            .db() // ALLOW: test-only setup; the seal governs product code.
+            .session()
+            .tx()
+            .await
+            .unwrap();
+        tx.query("MATCH (c:Chunk) WITH c LIMIT 2 SET c.sparse_embedding = null")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        drop(kb);
+        memory.shutdown().await.unwrap();
+        let again = Uniko::migrate_store(
+            &path,
+            config(true),
+            uniko_store::Migration::EnableHybrid,
+            |_| {},
+        )
+        .await
+        .expect("resume");
+        assert_eq!(again.rows_backfilled, 2, "{again:?}");
+        assert_eq!(again.rows_unfilled, 0, "{again:?}");
+        assert!(again.completed);
+    }
+
     async fn seed(memory: &Uniko) {
         let alice = memory.agent("a").session("alice");
         for (id, text) in DOCS {
@@ -7038,5 +7131,62 @@ mod dead_letter_scheduler {
         };
         wait_for(&memory, &id, |l| l.status == DeadLetterStatus::Resolved).await;
         memory.shutdown().await.expect("shutdown");
+    }
+}
+
+/// Store compatibility through the facade (#66). Model-free.
+mod store_compatibility {
+    use uniko_store::config::{EmbeddingConfig, UnikoConfig};
+    use uniko_store::{UnikoError, Verdict};
+
+    use crate::{PrefetchPolicy, Uniko};
+
+    #[tokio::test]
+    async fn the_builder_refuses_an_incompatible_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        Uniko::builder()
+            .path(&path)
+            .prefetch(PrefetchPolicy::Lazy)
+            .build()
+            .await
+            .expect("create")
+            .shutdown()
+            .await
+            .unwrap();
+
+        let m3 = UnikoConfig {
+            embedding: EmbeddingConfig::bge_m3(),
+            ..UnikoConfig::default()
+        };
+        let report = Uniko::inspect_store(&path, &m3).await.unwrap();
+        assert!(report.info.exists && report.compatibility.has_incompatible());
+
+        let err = Uniko::builder()
+            .path(&path)
+            .prefetch(PrefetchPolicy::Lazy)
+            .raw_config(m3)
+            .build()
+            .await
+            .err()
+            .expect("refused");
+        match err {
+            UnikoError::IncompatibleStore(c) => assert!(
+                c.differences
+                    .iter()
+                    .any(|d| d.field == "dimensions" && d.verdict == Verdict::Incompatible)
+            ),
+            other => panic!("expected IncompatibleStore, got {other}"),
+        }
+
+        let memory = Uniko::builder()
+            .path(&path)
+            .prefetch(PrefetchPolicy::Lazy)
+            .build()
+            .await
+            .expect("the original config opens");
+        let info = memory.store_info().await.unwrap();
+        assert_eq!(info.embedding.dimensions, Some(384));
+        memory.shutdown().await.unwrap();
     }
 }

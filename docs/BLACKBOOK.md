@@ -1144,6 +1144,34 @@ Nodes written across the L3 write paths: `Message, Chunk, Entity, Observation, S
 
 The default embedder is `BGESmallENV15` (384-d, query-side prefix only). When a hybrid embedder (bge-m3) is configured, the schema adds `sparse_embedding` (`SparseVector`) and `colbert_embedding` (`List<Vector>`) columns on Chunk/Observation, all pointing at the same `embed/hybrid` alias so uni-db fuses them into one `EmbedHybrid` forward pass. The embedding dimension is fixed at DB creation (it is part of the on-disk vector index), so switching embedders requires a fresh KB.
 
+**Store compatibility (#66).** Every open path applies the schema through `apply_schema` (`crates/uniko-store/src/storage/mod.rs:922`). Unless the config sets `schema_path`, it first runs two steps on the schema already on disk:
+- `inspect_db` (`storage/compatibility.rs:245`) reads the `Chunk` column types, the `Chunk.embedding` index config and the stats row's model record and migration marker. Its `with_counts` flag is off here, so the open-time check reads the schema and the stats row only. `inspect`, `store_info` and `migrate` count `hybrid_backfill_pending`, which scans Chunk and Observation;
+- `check` (`:372`) compares them with the config.
+
+Any difference returns `UnikoError::IncompatibleStore` before uni-db changes anything or a model loads. Each difference has one of two verdicts:
+- `Incompatible`, which needs a fresh store:
+  - the model id or dense dimensions changed;
+  - a hybrid store is opened dense-only;
+  - hybrid columns are asked for over a different model, or over a store with no recorded model id (reopening it once with the original config records the id);
+  - `document_prefix` changed, since the stored vectors carry the old prefix;
+- `NeedsMigration`:
+  - `EnableHybrid` when the recorded model and dimensions match and the sparse and/or ColBERT column is added, a sparse-only store gaining ColBERT included;
+  - `RebuildVectorIndexes` for an algorithm, metric, `query_prefix` or `batch_size` change.
+
+A store with no recorded model id, from before the record existed, is otherwise checked on its shape only (`check`'s `None` arm, `compatibility.rs:416`): another model with the same dimensions shows no difference, and opening with it records that model, since `init_kb_stats` writes the identity when the row has none (`kb_stats.rs:120`).
+
+`Compatibility::migrations` returns nothing when any difference is `Incompatible`. The config's algorithm is compared through `VectorAlgorithm::to_index_type`, which resolves an automatic PQ `sub_vectors: 0` the way uni-db stores it, so such a store reopens.
+
+uni-db refuses at open a store whose indexes name an alias the catalog lacks. `build_or_explain` (`mod.rs:890`) turns that failure into the same report, so a hybrid store opened dense-only returns `IncompatibleStore` rather than uni-db's raw "Missing Uni-Xervo alias" error. It inspects through `inspect_unclaimed` (`migrate_store.rs:244`), since the opening path already holds its own claim.
+
+`KnowledgeBase::inspect` (`storage/migrate_store.rs:79`) and `migrate` (`:132`) need a local path: `reject_remote` (`:260`) returns `Unsupported` for any path containing `://`. Neither touches a local path that isn't a uni-db store: `is_store` (`:272`) requires uni-db's `catalog/schema.json` or a root `schema.json`, and `inspect` reports `exists: false` while `migrate` returns `Config`. On a real store, `inspect` applies no schema, changes no index or data and loads no model, but uni-db's own open and close still write bookkeeping files (a manifest, its WAL). `migrate` also refuses a `schema_path` config with `Config`, since the schema would come from that file rather than the config being migrated to.
+
+The in-process guard is two-way. `OPEN_PATHS` (`mod.rs:134`) maps each canonical store path to a claim: every path-backed open takes a shared one (`OpenPath::claim`), and `inspect` and `migrate` take the path exclusively through `claim_exclusive` (`mod.rs:174`), which checks and claims under the registry's one lock. So inspect or migrate is refused, with `Config`, while the store is open, inspected or migrated in this process, and opening is refused, with `Config`, while it is being inspected or migrated. Another process can't be detected, since uni-db takes no lock. Both open the store with `inspection_catalog` (`migrate_store.rs:210`): the config's catalog, plus an `embed/hybrid` alias when it lacks one. That alias is a lazy `local/onnx` stub, so stores on `remote/*` or `llamacpp` embedders can be inspected and migrated.
+
+`EnableHybrid` applies the schema, then `backfill_label` (`migrate_store.rs:384`) walks each label's rows once, in node-id order, a batch per transaction. It rewrites the Chunk `text` / Observation `content` (`SET n.text = n.text`) of each row that `pending_predicate` (`compatibility.rs:322`) matches: a row whose sparse and/or ColBERT column, whichever the store has, is empty. That makes uni-db re-embed every auto-embed column of the row. A row that still comes back empty is counted in `MigrationReport::rows_unfilled` and passed over in that run. It doesn't loop or error, but it still counts as pending, so `hybrid_backfill_pending` doesn't reach 0 and a rerun tries it again; `completed` is still true when the only pending rows are the unfilled ones. Backfill progress events count rows done (filled plus unfilled) per label, and the final `done` event has `done == total == rows_backfilled + rows_unfilled`. The step is resumable. A `migration` marker on the stats row covers the run. It is set before the schema step when the store already has the `migration` column, and after it otherwise, since an older store gets the column from that step. Only the kind that set a marker clears it, so a `RebuildVectorIndexes` run leaves an unfinished `EnableHybrid` marker in place; `MigrationReport::migration_in_progress` names such a marker, which is why `completed` can be false after a run that did its own part.
+
+The stats row's `embedding` map, written by `identity_map` (`compatibility.rs:607`), records the model id and the dense, sparse and multi-vector dimensions, the algorithm and the metric. The prefixes and batch size aren't in it: `inspect_db` reads them from the stored `Chunk.embedding` index config. `init_kb_stats` (`kb_stats.rs:78`) completes an older `{model_id, dimensions}` record on reopen. Its own model and dimension comparison is the backstop for a `schema_path` config, which skips the open-time check.
+
 ### 4.11 Build features and testing
 
 L3's behavior is gated by Cargo features:
@@ -1193,7 +1221,7 @@ cargo nextest run -p uniko-extract --features onnx
 | `ModelAliasSpec`, `ModelTask`, `WarmupPolicy` | Naming a model alias when registering an extra model (what the facade's `LlmSpec` builds) |
 | `ModelRuntime` | Shared ONNX/model runtime handle |
 
-A CI grep gate forbids `use uni_db` and `KnowledgeBase::db()` in the `src/` of product crates. `.db() -> &Uni` remains a `pub` escape hatch but is documented as tests/benchmark-only (`storage/mod.rs:315-326`). Reviewed exceptions are tagged `// ALLOW:` on the same line. If a product crate needs a new graph operation, the operation is added *here* rather than by reaching past the seal.
+A CI grep gate forbids `use uni_db` and `KnowledgeBase::db()` in the `src/` of product crates. `.db() -> &Uni` remains a `pub` escape hatch but is documented as tests/benchmark-only (`storage/mod.rs:564-575`). Reviewed exceptions are tagged `// ALLOW:` on the same line. If a product crate needs a new graph operation, the operation is added *here* rather than by reaching past the seal.
 
 The crate is deliberately **policy-free for scoring**: recall/working-memory/consolidation reads return *decoded* Rust structs (never raw `Record`s), and the ranking math — RRF fusion, tier weights, MMR, coverage — lives one layer up in `uniko-memory`. What lives here is the schema, the graph walks, bitemporal Facts, idempotent id derivation, and the concurrency primitives.
 
@@ -1203,11 +1231,16 @@ The crate is deliberately **policy-free for scoring**: recall/working-memory/con
 pub struct KnowledgeBase {
     db: Arc<Uni>,
     config: UnikoConfig,
-    kb_stats_lock: Arc<Mutex<()>>,   // serializes :KnowledgeBaseStats RMW
-    rmw_locks: Arc<StripedLocks>,    // check-then-create serialization
+    kb_stats_lock: Arc<Mutex<()>>,          // serializes :KnowledgeBaseStats RMW
+    rmw_locks: Arc<StripedLocks>,           // check-then-create serialization
+    setup_locks: Arc<StripedLocks>,         // session/sender setup (separate table, #36)
+    catalog: Option<Arc<[ModelAliasSpec]>>, // the catalog handed to uni-db, if known
+    model_states: ModelStates,              // per-alias load state for model_status
+    prefetch_task: Option<AbortHandle>,     // background prefetch, cancelled at shutdown
+    open_path: Option<Arc<OpenPath>>,       // shared claim on the path (#66); None in memory
 }
 ```
-(`storage/mod.rs:80-99`). It is `Clone` (the `Arc<Uni>` is shared).
+(`storage/mod.rs:83-128`). It is `Clone` (the `Arc<Uni>` is shared).
 
 **Constructors** (all validate config, build the xervo catalog via `load_catalog`→file or `embed_catalog`, open `Uni`, `apply_schema`, optionally `prefetch_models`, then `finalize_init`→`init_kb_stats`):
 
@@ -1218,9 +1251,9 @@ pub struct KnowledgeBase {
 | `open_with_xervo[_no_prefetch]` / `open_with_prefetch(.., PrefetchPolicy)` | Persistent + explicit catalog |
 | `SharedRuntime::build(cfg, specs, policy)` + `in_memory_shared` / `open_shared` | Share ONE model runtime (one ONNX session / VRAM arena) across many KBs |
 
-`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and shares the runtime's per-alias load state, so `model_status()` works on every store over it. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`. (It was also once the only open path that let a BGE-M3 hybrid KB reopen, uni-db #130; uni-db 5.2.1's catalog-open path now checks embedding capability instead, so both paths reopen one.) (`mod.rs:214-299`).
+`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and shares the runtime's per-alias load state, so `model_status()` works on every store over it. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`. (It was also once the only open path that let a BGE-M3 hybrid KB reopen, uni-db #130. That is fixed upstream: `crates/uniko-store/tests/unidb_hybrid_reopen_repro.rs` asserts both paths reopen one, and `store_compatibility::a_hybrid_store_reopens` checks it at the `KnowledgeBase` level.) (`open_shared` and `over_shared`, `crates/uniko-store/src/storage/mod.rs:430` and `:449`).
 
-Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`mod.rs:27-50, 196-198`).
+Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`apply_perf_knobs_from_env`, `mod.rs:29-52`, applied at `:368`, `:440` and `:513`, and by `migrate_store.rs:283` for inspect and migrate).
 
 ### 5.3 Concurrency: SSI + striped locks + retry
 
@@ -1258,7 +1291,7 @@ drop(guards);
 
 `lock_many` sorts and dedups by **stripe index** (not key bytes), giving both a global acquisition order (prevents AB/BA deadlock) and self-deadlock safety when two distinct keys collide on one non-reentrant stripe (`locks.rs:110-142`). The mutexes are **non-reentrant**: acquiring the same stripe twice self-deadlocks — always use `lock_many` for multi-key acquisition, never a hand-rolled per-key loop. `batch_upsert_facts` learned this the hard way; a per-fact loop self-deadlocked past ~50 facts (`operations/facts.rs:330-338`).
 
-`bump_modality_presence` is a separate case: it uses the single shared `kb_stats_lock` because `uni-db` `Map` props are atomic-per-column (no per-key `SET`), so the full 4-entry map is round-tripped under lock (`kb_stats.rs:178-240`).
+`bump_modality_presence` is a separate case: it uses the single shared `kb_stats_lock` because `uni-db` `Map` props are atomic-per-column (no per-key `SET`), so the full 4-entry map is round-tripped under lock (`kb_stats.rs:238-300`).
 
 ```
 concurrent same-entity ingest, no lock:
@@ -1272,7 +1305,7 @@ with lock_entity_ids([X]):
 
 ### 5.4 Write paths: Cypher vs bulk
 
-Generic CRUD builds **parameterized** Cypher via `build_inline_props` / `build_set_clause` (`mod.rs:829-879`). Every interpolated *identifier* (label, edge type, property name) is gated by `validate_label` / `validate_edge_type` / `validate_property_name`; *values* are always `$pN`-bound.
+Generic CRUD builds **parameterized** Cypher via `build_inline_props` / `build_set_clause` (`storage/mod.rs:1253-1281`). Every interpolated *identifier* (label, edge type, property name) is gated by `validate_label` / `validate_edge_type` / `validate_property_name`; *values* are always `$pN`-bound.
 
 | API | Path | Notes |
 |---|---|---|
@@ -2673,7 +2706,7 @@ rows = await agent.assume(
 - **`reference_ts` is a per-query anchor, never a KB setting.** Recalling a historical corpus without setting a reference timestamp computes the temporal window around *now*, which never overlaps old data and silently disables the Phase-2 temporal channel. (In the Rust `RecallConfig` this is `reference_ts`; the LME bench sets it to the question date.)
 - **Multi-query variant reformulation is opt-in.** The default is keywords-only. Enabling all four variants measured −2.1 pt evidence and 3× latency on LoCoMo — don't turn it on expecting a win.
 - **The reranker is on by default** (`cross-encoder/ms-marco-MiniLM-L-6-v2`, top_n=50, ~50–100 ms/query). Disable via `RerankerConfig { enabled: false, .. }` if latency matters more than precision. (The config *doc comment* saying "disabled by default" is stale — the `Default` impl enables it. Trust the code.)
-- **Embedding dimension is fixed at DB creation** — it's baked into the on-disk vector index. Switching embedders (e.g. to a 1024-d model) requires a fresh KB; `validate()` catches zero dims but not a model/dimension mismatch on reopen.
+- **Embedding dimension is fixed at DB creation** — it's baked into the on-disk vector index. Switching embedders (e.g. to a 1024-d model) requires a fresh KB; `validate()` catches zero dims but not a model/dimension mismatch, which the open-time compatibility check refuses with `UnikoError::IncompatibleStore` (see *Store compatibility (#66)*).
 - **The negative-surface guards are the API contract.** If you extend `uniko-api::tools`, the nine `compile_fail` doctests and `tests/surface.rs` will break on drift — treat them as load-bearing, not incidental.
 - **Not yet shipped** (do not build against): HTTP/MCP server, CLI, cross-agent sharing, rule induction, MCTS planning. The Python SDK is alpha and its API may change before 1.0.
 
@@ -3028,7 +3061,7 @@ uniko is configured in three layers, in increasing order of specificity:
 | Session upkeep | `session_inactivity_secs` | `3600` |
 | External overrides | `catalog_path`, `schema_path`, `observation_rules_path` | `None` |
 
-`validate()` enforces cross-field constraints. Two that matter in practice: reranker `top_n` must be `>= recall_limit`; and enabling `recall_sparse_enabled` or setting `reranker.style=colbert` is rejected unless the embedding config actually has `sparse_dimensions` / `multivector_dimensions` set (i.e. a hybrid embedder is configured). `validate()` catches zero dimensions but **cannot** catch a model/dimension mismatch against an existing on-disk index.
+`validate()` enforces cross-field constraints. Two that matter in practice: reranker `top_n` must be `>= recall_limit`; and enabling `recall_sparse_enabled` or setting `reranker.style=colbert` is rejected unless the embedding config actually has `sparse_dimensions` / `multivector_dimensions` set (i.e. a hybrid embedder is configured). `validate()` catches zero dimensions but **cannot** catch a model/dimension mismatch against an existing on-disk index; the open-time compatibility check does, with `UnikoError::IncompatibleStore`.
 
 > **Trust the code, not the prose.** A comment near config.rs:636 says the reranker is "disabled by default", which contradicts the actual `Default` impl (`enabled: true`). The reranker costs ~50–100 ms/query; if you don't want it, set `RerankerConfig{ enabled: false, .. }` explicitly.
 
@@ -3049,7 +3082,7 @@ uniko is configured in three layers, in increasing order of specificity:
 
 The hybrid (`bge-m3`) path needs **two xervo aliases** backed by the same model: `embed/default` (`ModelTask::Embed`, dense) and `embed/hybrid` (`ModelTask::EmbedHybrid`). The hybrid model implements only `HybridEmbeddingModel` and cannot back lone-dense columns, so the model loads twice (~2× VRAM). Sparse (`SparseVector`) and ColBERT (`List<Vector>`) columns exist on `Chunk`/`Observation` **only** when the hybrid dimensions are set; ColBERT vectors use `VectorAlgo::Flat` and feed only the MaxSim rerank, never first-stage retrieval.
 
-> **Embedding dimension is frozen at KB creation** — it is part of the on-disk vector index. Switching embedders (e.g. BGE-Small 384-d → BGE-Large 1024-d) requires a **fresh KB**. Reopening a KB with a mismatched embedder/dimension corrupts the vector index.
+> **Embedding dimension is frozen at KB creation** — it is part of the on-disk vector index. Switching embedders (e.g. BGE-Small 384-d → BGE-Large 1024-d) requires a **fresh KB**. Reopening a KB with a mismatched embedder/dimension is refused with `UnikoError::IncompatibleStore` before anything on disk changes (see *Store compatibility (#66)*).
 
 #### 10.1.3 The model catalog (`config/catalog.json`)
 
@@ -3065,7 +3098,7 @@ Aliases used throughout the schema and search code are consts in `schema/mod.rs`
 Two catalog subtleties from the benchmark harness generalize to any embedded use:
 
 - A **shared `ModelRuntime`** (built via `SharedRuntime::build`, then passed to `KnowledgeBase::open_shared`) lets many KBs share one set of ONNX sessions / one VRAM arena. This is mandatory at concurrency ≥ 3 on an 8 GB GPU to avoid per-KB ONNX OOM.
-- Before uni-db 5.2.1, the prebuilt-runtime open path was the only way a `bge-m3` hybrid KB reopened (uni-db #130); the catalog-open path now checks embedding capability and reopens one too.
+- On older uni-db the prebuilt-runtime open path was the only way a `bge-m3` hybrid KB reopened (uni-db #130). It's fixed upstream, and both paths reopen one; `unidb_hybrid_reopen_repro.rs` and `store_compatibility::a_hybrid_store_reopens` guard it.
 
 #### 10.1.4 The installed-schema snapshot (`config/schema.json`) and count drift
 
@@ -3489,7 +3522,7 @@ Because uniko sits on a live, evolving embedded engine, `uniko-store` carries a 
 | **#145 FOLD-alias returns 0.0** | A value-aggregate `FOLD` that is `YIELD`-renamed returns 0.0. | Compute `mean_importance` / `mean_episode_importance` in Rust; only trust `COUNT` in Locy FOLDs (`execution.rs`, `stdlib.rs`, cortex `procedures.rs`). |
 | **RC12 — rule invocation** | Handing a bare rule name to `execute_rule` fails to parse; `$param` in a post-FOLD `HAVING` doesn't resolve. | Invoke registered rules by name via `query_rule` (builds `QUERY <name> RETURN ...`); push threshold filters into the Rust consumer (`upsert_procedure` applies `promote_threshold`, not the rule). |
 | **`max(DateTime)` aggregate** | Serialized as LargeBinary, breaks readback. | `close_inactive_sessions` avoids the Cypher aggregate. |
-| **#130 — catalog-open rejected non-Embed vector aliases** | Before uni-db 5.2.1, a bge-m3 hybrid KB (sparse/ColBERT aliases) would not reopen via the catalog path. | Fixed upstream in 5.2.1 (capability check); the prebuilt-runtime path (`SharedRuntime::build` + `open_shared`) also works. |
+| **#130 — catalog-open rejected non-Embed vector aliases** | On older uni-db, a bge-m3 hybrid KB (sparse/ColBERT aliases) would not reopen via the catalog path. | Fixed upstream. `unidb_hybrid_reopen_repro.rs` asserts the reopen succeeds on both paths, and `store_compatibility::a_hybrid_store_reopens` checks it through `KnowledgeBase`. |
 | **Bulk API doesn't return EIDs** | `bulk_insert_vertices/edges` skip the Cypher executor (~980× faster/row) but don't surface allocated EIDs or re-validate property names. | Callers validate keys up front; the `return_ids` arm falls back to UNWIND-Cypher (`batch.rs`, `edges.rs`). |
 | **Multi-target edge label-filter leak** | Same-type edges to different labels can leak the wrong target under load. | Match by endpoint id, not label. |
 | **`datetime_value` vs string coercion** | Writing DateTime as a string coerces poorly. | Prefer `datetime_value` for DateTime writes. |
@@ -3510,7 +3543,7 @@ These are the sharp edges spread across the layers. They fall into a few familie
 #### Hybrid embedding and search
 
 - **A hybrid embedder needs two aliases:** `embed/default` (dense, `ModelTask::Embed`) and `embed/hybrid` (`ModelTask::EmbedHybrid`), both backed by the same model. The hybrid model implements only `HybridEmbeddingModel` and can't back lone-dense columns, so it loads twice (~2× VRAM). Sparse/ColBERT columns exist only when `config.embedding.{sparse,multivector}_dimensions` is `Some` (bge-m3 today); `config.validate()` rejects `recall_sparse_enabled` or a `colbert` reranker style without them.
-- **Embedding dimension is fixed at DB creation** (part of the on-disk vector index). Switching embedders (e.g. to a 1024-d model) requires a fresh KB; `validate()` catches zero dims but **not** a model/dimension mismatch. `config/catalog.json` and `catalog_minilm.json` differ only in the embed-alias model — a mismatched reopen corrupts the vector index.
+- **Embedding dimension is fixed at DB creation** (part of the on-disk vector index). Switching embedders (e.g. to a 1024-d model) requires a fresh KB; `validate()` catches zero dims but **not** a model/dimension mismatch; the open-time compatibility check refuses one with `UnikoError::IncompatibleStore`. `config/catalog.json` and `catalog_minilm.json` differ only in the embed-alias model. The check compares the config's `embedding` section, not the `catalog_path` file, so a catalog whose embed alias names another model than `embedding.model_id` is not caught: keep the two in step.
 - **Consolidation embed batching is chunked at 64** (`EMBED_BATCH_CHUNK_SIZE`) to avoid the ORT BFC arena OOM (~1.3 GB at ~6k inputs). `embed_batch_chunked` exists for the same reason. Don't remove it.
 
 #### Recall behavior
