@@ -1333,7 +1333,7 @@ Items appearing in multiple lists accumulate. `hybrid_search_weighted(&[SearchTa
 **Recall reads** (`repository/recall.rs`, the largest read module) return decoded `ScoredRow`/`TemporalRow`/`NodeContentRow`:
 
 - `resolve_scope_allow_set(ScopeFilter)` — unions per-anchor-type MATCH arms (Message/Observation/Episode/Chunk) into an id allow-set; each candidate query then filters with `AND id(n) IN $allow`.
-- `recall_vector_search`, `recall_fulltext_search`, `recall_sparse_search` (`uni.sparse.query`), `recall_colbert_maxsim`. Sparse/ColBERT restrict at the *index* level via a `_vid IN (...)` SQL filter string — `_vid` equals Cypher `id(n)` (`recall.rs:98-105, 368-450`).
+- `recall_vector_search`, `recall_fulltext_search`, `recall_sparse_search` (`uni.sparse.query`), `recall_colbert_maxsim`. Sparse restricts at the *index* level via a `_vid IN (...)` SQL filter string — `_vid` equals Cypher `id(n)`; uni-db 5.2.1 rejects that filter (rustic-ai/uni-db#344), so scoped sparse recall reports `sparse: failed` today. ColBERT reads the candidates' `colbert_embedding` token vectors with `MATCH … WHERE id(node) IN $ids` and computes MaxSim in process (`repository/recall.rs:804`), because the filtered multi-vector `uni.vector.query` admits unflushed rows outside its filter (rustic-ai/uni-db#343).
 - `temporal_window_hits` — `btic_overlaps(f.valid_at, $qbtic)` UDF for Facts; BTree range for Observation/Episode.
 - `recall_chunk_and_entity_scoped`, `resolve_entity_seeds`, `any_unstable_entities` (drift override signal), `fetch_node_contents`, `query_cypher` (read-only decoded rows).
 
@@ -1492,7 +1492,7 @@ access control filters the bundle afterwards. Recording sites:
 | `provenance` | `recall/mod.rs:839` (`attach_provenance`), `:958` (`populate_sources`) |
 | `rerank` / `colbert` skipped | `recall/mod.rs:1555` (no candidates); `not_reached` at `:2207`, called on each early return (`:1362`, `:1410`, `:1511`, `:1521`) |
 | `rerank` | `recall/mod.rs:1572`, `:1595` |
-| `colbert` | `recall/mod.rs:1724`, `:1751`, `:1783`, `:1813` (`colbert_rerank`) |
+| `colbert` | `recall/mod.rs:1730`, `:1735`, `:1754`, `:1789`, `:1812` (`colbert_rerank`; `:1812` is `fallback` / `unscored`) |
 | `source` | `recall/mod.rs:2224` (`source_failed`, called from each candidate source's error arm); `crates/uniko-store/src/repository/recall.rs:863` (seeds), `:900` (drift), `:1169`, `:1205`, `:1294` (Phase 3 chunk and entity sub-queries) |
 | `sparse` | `recall/mod.rs:2258`, `:2267` (`run_sparse_source`) |
 
@@ -1648,7 +1648,7 @@ Per-variant fan-out: each `QueryVariant` runs `run_recall_for_variant` (`kb.reca
 
 `RecallItem`s are then built with tier weights, and optionally reranked (`:1160`):
 
-- **ColBERT** — in-process MaxSim over the `colbert_embedding` column, rescaled into the top-window score band, OR
+- **ColBERT** — in-process MaxSim over the `colbert_embedding` column, rescaled into the top-window score band; a candidate with no token vectors is ranked just below the lowest rescored one (`apply_maxsim`), OR
 - **xervo cross-encoder** — `top_n` candidates rescored, optional sigmoid mapping.
 
 An **answer-type boost** (`:1197`) runs one Cypher per item over `top_n` (default multiplier 1.0 = no-op). Finally a **Phase-1 contribution strategy** (`:1230`) folds consolidated Facts back in.

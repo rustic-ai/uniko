@@ -5931,3 +5931,192 @@ mod ingest_diagnostics {
         assert_eq!(counted, 1, "{:?}", health.ingest.degradations);
     }
 }
+
+// ── Hybrid-store regressions (#70, #72) ──────────────────────────────────
+
+mod hybrid_regressions {
+    use uniko_store::config::{EmbeddingConfig, UnikoConfig};
+    use uniko_store::{DiagnosticCode, Stage, StageStatus};
+
+    use crate::{ContextBundle, IngestSource, RecallOverrides, Scope, Uniko};
+
+    /// The fixture from rustic-ai/uniko#72, in ingest order.
+    const DOCS: &[(&str, &str)] = &[
+        (
+            "eiffel",
+            "The Eiffel Tower is a wrought-iron lattice tower beside the Seine in Paris, France.",
+        ),
+        (
+            "tokyo",
+            "Tokyo Tower is a communications and observation tower in Tokyo, Japan, painted orange and white.",
+        ),
+        (
+            "london",
+            "The Tower of London is a historic castle on the River Thames in London, England.",
+        ),
+        (
+            "paris",
+            "Paris is the capital of France. The Louvre museum holds paintings and ancient sculptures.",
+        ),
+        (
+            "ada",
+            "Ada Lovelace wrote the first published algorithm for Charles Babbage's Analytical Engine.",
+        ),
+        (
+            "bridge",
+            "The Golden Gate Bridge is a suspension bridge across the strait north of San Francisco.",
+        ),
+    ];
+    const BOB: &str = "BOB_PRIVATE lattice tower in Paris.";
+    const QUERY: &str = "lattice tower in Paris";
+
+    fn expensive() -> bool {
+        if std::env::var("EXPENSIVE_TESTS").as_deref() == Ok("1") {
+            return true;
+        }
+        eprintln!("skipping: set EXPENSIVE_TESTS=1 to load BGE-M3");
+        false
+    }
+
+    fn config(sparse: bool) -> UnikoConfig {
+        let mut config = UnikoConfig::default();
+        config.embedding = EmbeddingConfig::bge_m3();
+        config.reranker.enabled = true;
+        config.reranker.style = "colbert".into();
+        config.reranker.top_n = 50;
+        config.recall_sparse_enabled = sparse;
+        config.recall_limit = 15;
+        config.phase1_strategy = "off".into();
+        config.phase2_coverage_threshold = 1.0;
+        config.recall_lexical_enabled = false;
+        config
+    }
+
+    async fn seed(memory: &Uniko) {
+        let alice = memory.agent("a").session("alice");
+        for (id, text) in DOCS {
+            let mut src = IngestSource::text(*text);
+            src.category = Some("external_evidence".into());
+            src.source_id = Some((*id).into());
+            src.revision_id = Some(format!("{id}-r1"));
+            alice.ingest(src).await.unwrap();
+        }
+        memory
+            .agent("a")
+            .session("bob")
+            .ingest(IngestSource::text(BOB))
+            .await
+            .unwrap();
+    }
+
+    fn alice() -> Scope {
+        Scope::default()
+            .sessions(["alice"])
+            .categories(["external_evidence"])
+    }
+
+    async fn scoped_recall(memory: &Uniko) -> ContextBundle {
+        memory
+            .agent("a")
+            .recall_with(
+                QUERY,
+                alice(),
+                &RecallOverrides::default().limit(15).reranker(true),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// The doc ids (`DOCS` keys) in the bundle's order.
+    fn doc_order(bundle: &ContextBundle) -> Vec<&'static str> {
+        bundle
+            .items
+            .iter()
+            .filter_map(|i| {
+                DOCS.iter()
+                    .find(|(_, t)| *t == i.content)
+                    .map(|(id, _)| *id)
+            })
+            .collect()
+    }
+
+    /// Direct MaxSim order (uni-db's raw scores, recorded in #72 and checked
+    /// against an independent cosine MaxSim there).
+    const MAXSIM_ORDER: &[&str] = &["eiffel", "tokyo", "paris", "london", "bridge", "ada"];
+
+    /// #72: on a fresh store, ColBERT recall follows MaxSim, never lets
+    /// Bob's out-of-scope chunk set the scale, and stays the same after a
+    /// reopen.
+    #[tokio::test]
+    async fn colbert_recall_follows_maxsim_fresh_and_reopened() {
+        if !expensive() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let memory = Uniko::builder()
+            .raw_config(config(false))
+            .path(dir.path())
+            .build()
+            .await
+            .unwrap();
+        seed(&memory).await;
+
+        let fresh = scoped_recall(&memory).await;
+        assert!(
+            fresh.items.iter().all(|i| i.content != BOB),
+            "{:?}",
+            fresh.items
+        );
+        assert_eq!(doc_order(&fresh), MAXSIM_ORDER, "fresh store");
+        let colbert: Vec<_> = fresh
+            .diagnostics
+            .iter()
+            .filter(|d| d.stage == Stage::Colbert)
+            .collect();
+        assert_eq!(colbert.len(), 1, "{:?}", fresh.diagnostics);
+        assert_eq!(colbert[0].status, StageStatus::Applied);
+
+        memory.shutdown().await.unwrap();
+        let memory = Uniko::builder()
+            .raw_config(config(false))
+            .path(dir.path())
+            .build()
+            .await
+            .unwrap();
+        let reopened = scoped_recall(&memory).await;
+        assert_eq!(doc_order(&reopened), MAXSIM_ORDER, "reopened store");
+        memory.shutdown().await.unwrap();
+    }
+
+    /// #70: scoped recall should use the sparse channel. uni-db 5.2.1
+    /// rejects a filtered `uni.sparse.query`, so today this reports
+    /// `sparse: failed / query_failed`.
+    #[tokio::test]
+    #[ignore = "waits on rustic-ai/uni-db#344"]
+    async fn scoped_recall_applies_the_sparse_channel() {
+        if !expensive() {
+            return;
+        }
+        let memory = Uniko::builder()
+            .raw_config(config(true))
+            .build()
+            .await
+            .unwrap();
+        seed(&memory).await;
+        let bundle = scoped_recall(&memory).await;
+        let sparse: Vec<_> = bundle
+            .diagnostics
+            .iter()
+            .filter(|d| d.stage == Stage::Sparse)
+            .collect();
+        assert!(!sparse.is_empty(), "{:?}", bundle.diagnostics);
+        assert!(
+            sparse
+                .iter()
+                .all(|d| d.status == StageStatus::Applied
+                    && d.code != Some(DiagnosticCode::QueryFailed)),
+            "{sparse:?}"
+        );
+        assert!(bundle.items.iter().all(|i| i.content != BOB));
+    }
+}

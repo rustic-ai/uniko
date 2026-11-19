@@ -379,7 +379,7 @@ let bundle = agent.recall_with("...", Scope::default(), &strict).await?; // Unik
 | `query_embedding` | `applied`, with `count` the number of query variants embedded, or `failed` / `embed_failed`: vector search is skipped and recall is keyword-only. |
 | `query_analysis` | `applied`, or `fallback` / `nlp_unavailable` or `nlp_failed`: rule-based entity extraction ran instead. Recorded on `onnx` builds only. |
 | `sparse` | `applied` per label, or `failed` / `query_failed` (e.g. no hybrid embedder). Only with `recall_sparse_enabled`. |
-| `colbert` | `applied`, `skipped` / `no_candidates`, or `fallback` / `query_embed_failed` or `maxsim_failed`: the fused order is kept. |
+| `colbert` | `applied`, `skipped` / `no_candidates`, or `fallback` / `query_embed_failed` or `maxsim_failed`: the fused order is kept. `fallback` / `unscored` (target `Chunk` or `Observation`) alongside `applied`: some candidates had no token vectors yet and were ranked below every rescored one. |
 | `rerank` | `applied`, `skipped` / `no_candidates`, or `fallback` / `rerank_failed`: the fused order is kept. |
 | `source` | `failed` / `query_failed`, naming what contributed nothing: a candidate source (e.g. `phase2:Episode:vector`, `phase3:Chunk:Message`, `phase3:entity:Chunk`), or a ranking input (`entity_seeds`, `entity_drift`, `session_boost`, `entity_type_match`, `modality_presence`). |
 | `provenance` | `failed` / `provenance_unresolved`: items keep empty category, source or lineage fields. |
