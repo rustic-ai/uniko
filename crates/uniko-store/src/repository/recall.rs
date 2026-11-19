@@ -783,19 +783,24 @@ impl KnowledgeBase {
 
     /// ColBERT MaxSim re-scoring of a candidate node-id set.
     ///
-    /// Runs `uni.vector.query` over the multi-vector `colbert_field`,
-    /// restricting the exact-MaxSim scan to `node_ids` via the `_vid IN (…)`
-    /// filter — so it re-scores exactly the supplied candidates rather than
-    /// retrieving globally. `query_multivector` is the query's per-token
-    /// embedding; scores are MaxSim (`Σ_q max_d cos`). Returns an empty vec
-    /// when either input is empty.
+    /// Reads each candidate's stored `colbert_field` token vectors and scores
+    /// it in process: MaxSim is `Σ_q max_d sim(q, d)` with the configured
+    /// vector metric. Only the supplied `node_ids` are read, so the result
+    /// can never contain a node outside the candidate set. A candidate with
+    /// no token vectors (not embedded yet, or a null column) is left out;
+    /// the caller decides how to rank it.
+    ///
+    /// This does not go through `uni.vector.query`, whose `_vid IN (…)`
+    /// filter is not applied to unflushed rows of a multi-vector column
+    /// (rustic-ai/uni-db#343).
     ///
     /// `label`/`colbert_field`/`content_field` are trusted identifiers.
+    /// Returns an empty vec when either input is empty.
     ///
     /// # Errors
     ///
     /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on query
-    /// failure.
+    /// failure, or when a stored token's dimension differs from the query's.
     pub async fn recall_colbert_maxsim(
         &self,
         label: &str,
@@ -809,27 +814,47 @@ impl KnowledgeBase {
         }
         let session = self.db.session();
         let cypher = format!(
-            // Same yield-schema mismatch as the sparse channel above.
-            "CALL uni.vector.query('{label}', '{colbert_field}', $q, $k, $filter, null, {{}}) \
-             YIELD vid, score \
-             MATCH (node) WHERE id(node) = vid \
+            "MATCH (node:{label}) WHERE id(node) IN $ids \
              RETURN id(node) AS nid, labels(node)[0] AS lbl, \
-                    coalesce(node.{content_field}, '') AS content, score"
+                    coalesce(node.{content_field}, '') AS content, \
+                    node.{colbert_field} AS tokens"
         );
-        let qval = Value::List(
-            query_multivector
-                .iter()
-                .map(|t| Value::Vector(t.clone()))
-                .collect(),
-        );
+        let ids = Value::List(node_ids.iter().map(|n| Value::Int(*n)).collect());
         let result = session
             .query_with(&cypher)
-            .param("q", qval)
-            .param("k", node_ids.len() as i64)
-            .param("filter", vid_in_string(node_ids))
+            .param("ids", ids)
             .fetch_all()
             .await?;
-        Ok(decode_scored_rows(result.rows()))
+        let metric = self.config().vector_metric;
+        let mut out = Vec::with_capacity(result.rows().len());
+        for row in result.rows() {
+            let Ok(node_id) = row.get::<i64>("nid") else {
+                continue;
+            };
+            let doc = match row.value("tokens") {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .filter_map(|t| match t {
+                        Value::Vector(v) => Some(v.as_slice()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            if doc.is_empty() {
+                continue;
+            }
+            let score = maxsim(query_multivector, &doc, metric).map_err(|e| {
+                crate::UnikoError::Storage(format!("colbert maxsim for node {node_id}: {e}"))
+            })?;
+            out.push(ScoredRow {
+                node_id,
+                label: row.get::<String>("lbl").unwrap_or_default(),
+                content: row.get::<String>("content").unwrap_or_default(),
+                score,
+            });
+        }
+        Ok(out)
     }
 
     /// Resolve entity/participant `names` to graph seed node ids for
@@ -1320,6 +1345,61 @@ impl KnowledgeBase {
 
 /// Decode a batch of `nid`/`lbl`/`content`/`score` rows into
 /// [`ScoredRow`]s. Rows with an unreadable `nid` are skipped.
+/// ColBERT MaxSim: for each query token, the best similarity to any document
+/// token, summed. Cosine and dot match uni-db's own MaxSim; L2 maps a
+/// Euclidean distance `d` to `1 / (1 + d)` so that higher is still better.
+fn maxsim(
+    query: &[Vec<f32>],
+    doc: &[&[f32]],
+    metric: crate::config::VectorMetricChoice,
+) -> std::result::Result<f64, String> {
+    use crate::config::VectorMetricChoice as M;
+    let mut total = 0.0_f64;
+    for q in query {
+        let mut best = f64::NEG_INFINITY;
+        for d in doc {
+            if d.len() != q.len() {
+                return Err(format!(
+                    "token dimension {} does not match query dimension {}",
+                    d.len(),
+                    q.len()
+                ));
+            }
+            let dot: f64 = q
+                .iter()
+                .zip(*d)
+                .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                .sum();
+            let sim = match metric {
+                M::Dot => dot,
+                M::Cosine => {
+                    let nq = q.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
+                    let nd = d.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
+                    if nq == 0.0 || nd == 0.0 {
+                        0.0
+                    } else {
+                        dot / (nq * nd)
+                    }
+                }
+                M::L2 => {
+                    let dist = q
+                        .iter()
+                        .zip(*d)
+                        .map(|(a, b)| (f64::from(*a) - f64::from(*b)).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    1.0 / (1.0 + dist)
+                }
+            };
+            best = best.max(sim);
+        }
+        if best.is_finite() {
+            total += best;
+        }
+    }
+    Ok(total)
+}
+
 fn decode_scored_rows(rows: &[uni_db::Row]) -> Vec<ScoredRow> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1363,4 +1443,39 @@ fn temporal_window_to_btic_value(lo: DateTime<Utc>, hi: DateTime<Utc>) -> Value 
         hi: btic.hi(),
         meta: btic.meta(),
     })
+}
+
+#[cfg(test)]
+mod maxsim_tests {
+    use super::maxsim;
+    use crate::config::VectorMetricChoice;
+
+    #[test]
+    fn cosine_maxsim_sums_each_query_tokens_best_match() {
+        let q = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let a = [1.0_f32, 0.0];
+        let b = [0.0_f32, 2.0];
+        let doc: Vec<&[f32]> = vec![&a, &b];
+        let s = maxsim(&q, &doc, VectorMetricChoice::Cosine).unwrap();
+        assert!((s - 2.0).abs() < 1e-9, "{s}");
+    }
+
+    #[test]
+    fn dot_and_l2_rank_the_closer_document_higher() {
+        let q = vec![vec![1.0, 0.0]];
+        let near = [0.9_f32, 0.1];
+        let far = [0.1_f32, 0.9];
+        for metric in [VectorMetricChoice::Dot, VectorMetricChoice::L2] {
+            let n = maxsim(&q, &[&near], metric).unwrap();
+            let f = maxsim(&q, &[&far], metric).unwrap();
+            assert!(n > f, "{metric:?}: {n} <= {f}");
+        }
+    }
+
+    #[test]
+    fn a_dimension_mismatch_is_an_error() {
+        let q = vec![vec![1.0, 0.0]];
+        let d = [1.0_f32, 0.0, 0.0];
+        assert!(maxsim(&q, &[&d], VectorMetricChoice::Cosine).is_err());
+    }
 }

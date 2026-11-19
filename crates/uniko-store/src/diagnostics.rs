@@ -97,6 +97,9 @@ pub enum DiagnosticCode {
     MaxsimFailed,
     /// No candidate carried what the stage needs.
     NoCandidates,
+    /// Some candidates could not be scored by the stage (for ColBERT, they
+    /// have no token vectors yet) and were ranked below every scored one.
+    Unscored,
     /// The reranker model call failed.
     RerankFailed,
     /// Item provenance could not be resolved.
@@ -131,6 +134,7 @@ impl DiagnosticCode {
             Self::QueryEmbedFailed => "query_embed_failed",
             Self::MaxsimFailed => "maxsim_failed",
             Self::NoCandidates => "no_candidates",
+            Self::Unscored => "unscored",
             Self::RerankFailed => "rerank_failed",
             Self::ProvenanceUnresolved => "provenance_unresolved",
             Self::NotReached => "not_reached",

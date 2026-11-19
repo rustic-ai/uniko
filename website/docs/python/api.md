@@ -322,7 +322,7 @@ answer = await agent.answer("when is the deadline?")   # needs .llm(...)
 | `recall_with` | `recall_with(query: str, scope: Scope \| None = None, *, limit=None, token_budget=None, min_score=None, reranker=None, reference_ts=None, strict=None) -> Awaitable[ContextBundle]` | `recall_with_sync` | Recall with per-call overrides; each `None` keeps the configured value. `strict=True` raises `DegradedError` when a stage falls back or fails. |
 | `answer` | `answer(question: str) -> Awaitable[Answer]` | `answer_sync` | Recall + the configured LLM. |
 | `answer_in` | `answer_in(question: str, scope: Scope) -> Awaitable[Answer]` | `answer_in_sync` | Scoped `answer`. |
-| `query` | `query(cypher: str) -> Awaitable[list[dict[str, Any]]]` | `query_sync` | Read-only Cypher; mutations rejected. |
+| `query` | `query(cypher: str) -> Awaitable[list[dict[str, Any]]]` | `query_sync` | Read-only Cypher; mutations rejected. Dense vectors come back as `list[float]`, sparse vectors as `{"indices": list[int], "values": list[float]}`, binary vectors as `bytes`, and a date, duration or other value with no Python equivalent as its string form. Only a database null is `None`. |
 | `query_in` | `query_in(cypher: str, scope: Scope) -> Awaitable[list[dict[str, Any]]]` | `query_in_sync` | Binds the scope allow-set as `$allow`. |
 
 !!! note "`query_in` is a raw escape hatch"
