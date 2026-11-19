@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import uniko
-from uniko.models import ToolCallSpec, TurnSpec
+from uniko.models import Registration, ToolCallSpec, TurnSpec
 from uniko.models.typed import TypedUniko
 
 PERFORMER = (
@@ -28,8 +28,9 @@ KIND = (
 
 def test_register_is_idempotent_and_records_nothing_else() -> None:
     agent = uniko.Uniko.in_memory_sync().agent("reporter")
-    assert agent.register_sync(name="Reporter") == "created"
-    assert agent.register_sync() == "existing"
+    reg = agent.register_sync(name="Reporter")
+    assert (reg.participant_id, reg.outcome) == ("reporter", "created")
+    assert agent.register_sync().outcome == "existing"
     assert agent.query_sync(KIND) == [{"kind": "agent", "name": "Reporter"}]
     assert agent.query_sync("MATCH (n:Session) RETURN count(n) AS c") == [{"c": 0}]
 
@@ -38,8 +39,8 @@ async def test_register_async_upgrades_an_org_member() -> None:
     memory = await uniko.Uniko.in_memory()
     assert await memory.add_org_member("reporter", "acme")
     agent = memory.agent("reporter")
-    assert await agent.register() == "upgraded"
-    assert await agent.register() == "existing"
+    assert (await agent.register()).outcome == "upgraded"
+    assert (await agent.register()).outcome == "existing"
     rows = await agent.query(KIND)
     assert rows[0]["kind"] == "agent"
 
@@ -57,12 +58,12 @@ def test_registration_survives_a_reopen(tmp_path: Path) -> None:
         return uniko.Uniko.builder().path(str(tmp_path / "store")).build_sync()
 
     uni = open_store()
-    assert uni.agent("reporter").register_sync() == "created"
+    assert uni.agent("reporter").register_sync().outcome == "created"
     uni.shutdown_sync()
 
     uni = open_store()
     agent = uni.agent("reporter")
-    assert agent.register_sync() == "existing"
+    assert agent.register_sync().outcome == "existing"
     assert agent.query_sync(KIND)[0]["kind"] == "agent"
     del agent
     uni.shutdown_sync()
@@ -100,6 +101,12 @@ def test_an_embedded_call_can_name_its_performer(tmp_path: Path) -> None:
     uni.shutdown_sync()
 
 
+def test_tool_call_reads_back_its_name_and_performer() -> None:
+    call = uniko.ToolCall("search")
+    assert (call.tool_name, call.performer_id) == ("search", None)
+    assert call.performer("reporter").performer_id == "reporter"
+
+
 def test_a_different_performer_for_the_same_call_is_refused() -> None:
     session = uniko.Uniko.in_memory_sync().agent("reporter").session("research")
 
@@ -128,5 +135,7 @@ def test_typed_spec_carries_the_performer() -> None:
     )
     session.commit_unit_sync([turn])
     agent = typed.agent("reporter")
-    assert agent.register_sync() == "existing"
+    reg = agent.register_sync()
+    assert isinstance(reg, Registration)
+    assert (reg.participant_id, reg.outcome) == ("reporter", "existing")
     assert agent.query_sync(PERFORMER) == [{"who": "reporter"}]

@@ -62,7 +62,7 @@ Layer 2, depending on `uniko-store` only. This crate is *generic* pipeline machi
 
 - [`Step`](../pipelines/index.md) — the trait every processing stage implements, plus `PipelineContext` carrying per-item state.
 - `CircuitBreaker` / `CircuitState` — trips background LLM calls open on repeated failure.
-- `DeadLetterQueue` — captures items that exhaust retries.
+- `DeadLetterQueue` — keeps failed streaming items, with their payload, to inspect, retry and resolve.
 - `ShutdownCoordinator` — cooperative cancellation across workers.
 - `health` and `metrics` — per-worker status and Prometheus-exportable counters.
 - Task and result types: `IngestTask`, `IngestMessage`, `IngestArtifact`, `IngestPdf`, `ConsolidationTask`, `ObservationsReady`, `ItemResult`, `StepOutcome`, `StepErrorPolicy`, `PipelineConfig`.

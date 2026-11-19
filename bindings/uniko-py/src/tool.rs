@@ -54,6 +54,19 @@ impl PyToolCall {
         }
     }
 
+    /// The tool's name.
+    #[getter]
+    fn tool_name(&self) -> PyResult<String> {
+        Ok(self.snapshot()?.tool_name().to_string())
+    }
+
+    /// The explicit performer set with ``performer()``, or ``None`` for the
+    /// default (the turn's sender, or the session's agent).
+    #[getter]
+    fn performer_id(&self) -> PyResult<Option<String>> {
+        Ok(self.snapshot()?.performer_id().map(str::to_string))
+    }
+
     /// The host's own id for this call. Recording the same id again with
     /// the same result is a no-op; with a different result it raises
     /// `IdConflictError`.

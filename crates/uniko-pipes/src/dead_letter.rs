@@ -17,7 +17,7 @@
 //! Rows written before this lifecycle existed have no payload or status;
 //! they list as `legacy` and can only be resolved.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -59,6 +59,7 @@ impl DeadLetterStatus {
         }
     }
 
+    /// Decode a stored status: anything unknown or missing is `Legacy`.
     fn parse(s: Option<&str>) -> Self {
         match s {
             Some("pending") => Self::Pending,
@@ -67,6 +68,32 @@ impl DeadLetterStatus {
             Some("resolved") => Self::Resolved,
             _ => Self::Legacy,
         }
+    }
+}
+
+impl std::str::FromStr for DeadLetterStatus {
+    type Err = UnikoError;
+
+    /// Parse a status name: `pending`, `retrying`, `exhausted`, `resolved`
+    /// or `legacy`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "retrying" => Ok(Self::Retrying),
+            "exhausted" => Ok(Self::Exhausted),
+            "resolved" => Ok(Self::Resolved),
+            "legacy" => Ok(Self::Legacy),
+            other => Err(UnikoError::Config(format!(
+                "unknown dead-letter status '{other}'; expected pending, retrying, \
+                 exhausted, resolved or legacy"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for DeadLetterStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -158,6 +185,7 @@ pub struct DeadLetterCounts {
 
 /// Retry limit and backoff for dead letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// Retries before a letter is exhausted.
     pub max_retries: u32,
@@ -178,6 +206,17 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// A policy allowing `max_retries` retries, waiting `backoff_ms` before
+    /// the first and doubling up to `max_backoff_ms`.
+    #[must_use]
+    pub fn new(max_retries: u32, backoff_ms: u64, max_backoff_ms: u64) -> Self {
+        Self {
+            max_retries,
+            backoff_ms,
+            max_backoff_ms,
+        }
+    }
+
     /// The wait before retry number `attempt + 1`: the base backoff doubled
     /// `attempt` times, capped at the maximum.
     #[must_use]
@@ -255,14 +294,37 @@ fn task_agent_id(task: &IngestTask) -> Option<String> {
 
 const LEGACY_PREFIX: &str = "legacy:";
 
+/// The DeadLetter properties [`DeadLetterQueue::list`] reads: all but the
+/// payload.
+const LIST_FIELDS: &[&str] = &[
+    "dead_letter_id",
+    "step",
+    "error",
+    "error_kind",
+    "retriable",
+    "status",
+    "retry_count",
+    "max_retries",
+    "ingest_type",
+    "agent_id",
+    "created_at",
+    "updated_at",
+    "next_retry_at",
+    "resolved_at",
+    "resolution",
+];
+
 /// Persistent dead-letter queue using `DeadLetter` graph nodes.
 #[derive(Debug, Clone)]
 pub struct DeadLetterQueue {
     kb: Arc<KnowledgeBase>,
     policy: RetryPolicy,
     /// Serializes read-check-write transitions within this process, so two
-    /// callers can't both claim the same retry.
-    transitions: Arc<Mutex<()>>,
+    /// callers can't both claim the same retry, and holds the ids of the
+    /// retries this process has claimed and not yet finished. A letter
+    /// marked `retrying` that is not in this set was left by a process that
+    /// stopped mid-retry.
+    transitions: Arc<Mutex<HashSet<String>>>,
 }
 
 impl DeadLetterQueue {
@@ -276,7 +338,7 @@ impl DeadLetterQueue {
         Self {
             kb,
             policy,
-            transitions: Arc::new(Mutex::new(())),
+            transitions: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -289,10 +351,13 @@ impl DeadLetterQueue {
     /// Store a failed item, keeping its payload for retries. Returns the
     /// new letter's id.
     ///
-    /// A failure that cannot succeed on a retry is stored `exhausted`;
-    /// otherwise the letter is `pending` with its first retry due after the
-    /// base backoff. Without a `task` (a failure outside an ingest item)
-    /// the letter has no payload and is stored `exhausted`.
+    /// A retriable failure is stored `pending`, with its first retry due
+    /// after the base backoff. It is stored `exhausted` instead when the
+    /// failure cannot succeed on a retry, when the policy allows no retries,
+    /// or when there is no payload to replay: no `task` (a failure outside
+    /// an ingest item), or one that could not be serialized (for example a
+    /// path that isn't valid UTF-8), in which case the letter is still kept
+    /// for inspection.
     ///
     /// # Errors
     ///
@@ -307,14 +372,15 @@ impl DeadLetterQueue {
         let id = uniko_store::id::new_id();
         let now = Utc::now();
         let retriable = is_retriable(error);
-        let payload = match task {
-            Some(t) => Some(serde_json::to_string(t).map_err(|e| {
-                UnikoError::Internal(format!("dead letter: serialize payload: {e}"))
-            })?),
-            None => None,
-        };
+        let payload = task.and_then(|t| match serde_json::to_string(t) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(error = %e, "dead letter payload not serializable; storing it unreplayable");
+                None
+            }
+        });
         let replayable = payload.is_some();
-        let status = if retriable && replayable {
+        let status = if retriable && replayable && self.policy.max_retries > 0 {
             DeadLetterStatus::Pending
         } else {
             DeadLetterStatus::Exhausted
@@ -360,13 +426,39 @@ impl DeadLetterQueue {
     ///
     /// Returns [`UnikoError::Storage`] on graph failure.
     pub async fn list(&self, filter: &DeadLetterFilter) -> Result<Vec<DeadLetter>, UnikoError> {
+        // Every field but the payload, which can be large: listing and the
+        // scheduler's `due` never need it, and `begin_retry` reads it back.
+        let (filter_clause, params) = match filter.status {
+            None => (String::new(), HashMap::new()),
+            Some(DeadLetterStatus::Legacy) => {
+                ("WHERE d.status IS NULL".to_string(), HashMap::new())
+            }
+            Some(status) => (
+                "WHERE d.status = $status".to_string(),
+                HashMap::from([(
+                    "status".to_string(),
+                    Value::String(status.as_str().to_string()),
+                )]),
+            ),
+        };
+        let fields = LIST_FIELDS
+            .iter()
+            .map(|f| format!("d.{f} AS {f}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cypher = format!(
+            "MATCH (d:DeadLetter) {filter_clause} \
+             RETURN id(d) AS nid, {fields}, d.payload IS NOT NULL AS has_payload"
+        );
         let mut letters: Vec<DeadLetter> = self
             .kb
-            .query_nodes(DEAD_LETTER, None, None)
+            .query_cypher(&cypher, &params)
             .await?
             .into_iter()
-            .map(|(nid, props)| decode(nid, &props))
-            .filter(|l| filter.status.is_none_or(|s| l.status == s))
+            .filter_map(|row| match row.get("nid") {
+                Some(Value::Int(nid)) => Some(decode(*nid, &row)),
+                _ => None,
+            })
             .collect();
         letters.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
         if let Some(limit) = filter.limit {
@@ -430,7 +522,7 @@ impl DeadLetterQueue {
     ///
     /// As above, or [`UnikoError::Storage`] on graph failure.
     pub async fn begin_retry(&self, id: &str, force: bool) -> Result<IngestTask, UnikoError> {
-        let _guard = self.transitions.lock().await;
+        let mut in_flight = self.transitions.lock().await;
         let (nid, props) = self
             .find(id)
             .await?
@@ -475,6 +567,7 @@ impl DeadLetterQueue {
         update.insert("updated_at".into(), datetime_value(Utc::now()));
         update.insert("next_retry_at".into(), Value::Null);
         self.kb.update_node(nid, &update).await?;
+        in_flight.insert(id.to_string());
         Ok(task)
     }
 
@@ -486,11 +579,17 @@ impl DeadLetterQueue {
     ///
     /// Returns [`UnikoError::Storage`] on graph failure.
     pub async fn release_claim(&self, id: &str) -> Result<(), UnikoError> {
-        let _guard = self.transitions.lock().await;
+        let mut in_flight = self.transitions.lock().await;
+        in_flight.remove(id);
         let Some((nid, props)) = self.find(id).await? else {
             return Ok(());
         };
-        let letter = decode(nid, &props);
+        self.uncount_claim(nid, &decode(nid, &props)).await
+    }
+
+    /// Put a `retrying` letter back to `pending`, due now, without counting
+    /// the attempt it was claimed for.
+    async fn uncount_claim(&self, nid: NodeId, letter: &DeadLetter) -> Result<(), UnikoError> {
         if letter.status != DeadLetterStatus::Retrying {
             return Ok(());
         }
@@ -524,7 +623,8 @@ impl DeadLetterQueue {
         step: &str,
         error: &UnikoError,
     ) -> Result<(), UnikoError> {
-        let _guard = self.transitions.lock().await;
+        let mut in_flight = self.transitions.lock().await;
+        in_flight.remove(id);
         let Some((nid, props)) = self.find(id).await? else {
             return Ok(());
         };
@@ -563,7 +663,8 @@ impl DeadLetterQueue {
     ///
     /// Returns [`UnikoError::Storage`] on graph failure.
     pub async fn retry_succeeded(&self, id: &str) -> Result<(), UnikoError> {
-        let _guard = self.transitions.lock().await;
+        let mut in_flight = self.transitions.lock().await;
+        in_flight.remove(id);
         if let Some((nid, _)) = self.find(id).await? {
             self.mark_resolved(nid, "retried").await?;
         }
@@ -571,23 +672,30 @@ impl DeadLetterQueue {
     }
 
     /// Resolve `id` without retrying it, recording `note` as the reason.
-    /// Nothing outside the letter is changed. Returns `false` when there is
-    /// no such letter or it was already resolved.
+    /// Nothing outside the letter is changed, and its stored payload is
+    /// dropped. Returns `false` when there is no such letter or it was
+    /// already resolved.
+    ///
+    /// A letter `retrying` because a process stopped mid-retry can be
+    /// resolved; only a retry in flight in this process is refused.
     ///
     /// # Errors
     ///
-    /// Returns [`UnikoError::Config`] while a retry of it is in flight, or
-    /// [`UnikoError::Storage`] on graph failure.
+    /// Returns [`UnikoError::Config`] while a retry of it is in flight here,
+    /// or [`UnikoError::Storage`] on graph failure.
     pub async fn resolve(&self, id: &str, note: Option<&str>) -> Result<bool, UnikoError> {
-        let _guard = self.transitions.lock().await;
+        let in_flight = self.transitions.lock().await;
         let Some((nid, props)) = self.find(id).await? else {
             return Ok(false);
         };
-        match decode(nid, &props).status {
+        let letter = decode(nid, &props);
+        match letter.status {
             DeadLetterStatus::Resolved => Ok(false),
-            DeadLetterStatus::Retrying => Err(UnikoError::Config(format!(
-                "dead letter '{id}' is being retried; resolve it once the retry finishes"
-            ))),
+            DeadLetterStatus::Retrying if in_flight.contains(&letter.id) => {
+                Err(UnikoError::Config(format!(
+                    "dead letter '{id}' is being retried; resolve it once the retry finishes"
+                )))
+            }
             _ => {
                 self.mark_resolved(nid, note.unwrap_or("resolved")).await?;
                 Ok(true)
@@ -619,31 +727,27 @@ impl DeadLetterQueue {
     }
 
     /// Return letters left `retrying` by a process that stopped mid-retry
-    /// to `pending`, due now. Run when a pipeline starts, when nothing can
-    /// still be in flight. Returns how many were reset.
+    /// to `pending`, due now, without counting the attempt that never
+    /// finished. Retries claimed by this process are left alone. A pipeline
+    /// runs this when it starts. Returns how many were reset.
     ///
     /// # Errors
     ///
     /// Returns [`UnikoError::Storage`] on graph failure.
     pub async fn reset_interrupted(&self) -> Result<usize, UnikoError> {
-        let _guard = self.transitions.lock().await;
-        let now = Utc::now();
+        let in_flight = self.transitions.lock().await;
         let mut reset = 0;
         for letter in self
             .list(&DeadLetterFilter::new().status(DeadLetterStatus::Retrying))
             .await?
         {
-            let Some((nid, _)) = self.find(&letter.id).await? else {
+            if in_flight.contains(&letter.id) {
+                continue;
+            }
+            let Some((nid, props)) = self.find(&letter.id).await? else {
                 continue;
             };
-            let mut update = HashMap::new();
-            update.insert(
-                "status".into(),
-                Value::String(DeadLetterStatus::Pending.as_str().into()),
-            );
-            update.insert("next_retry_at".into(), datetime_value(now));
-            update.insert("updated_at".into(), datetime_value(now));
-            self.kb.update_node(nid, &update).await?;
+            self.uncount_claim(nid, &decode(nid, &props)).await?;
             reset += 1;
         }
         Ok(reset)
@@ -660,6 +764,9 @@ impl DeadLetterQueue {
         update.insert("resolved_at".into(), datetime_value(now));
         update.insert("updated_at".into(), datetime_value(now));
         update.insert("next_retry_at".into(), Value::Null);
+        // A resolved letter is never replayed, so its payload, which can be
+        // large, is dropped.
+        update.insert("payload".into(), Value::Null);
         self.kb.update_node(nid, &update).await
     }
 
@@ -719,7 +826,8 @@ fn decode(nid: NodeId, props: &HashMap<String, Value>) -> DeadLetter {
         ingest_type: string(props, "ingest_type"),
         agent_id: string(props, "agent_id"),
         replayable: status != DeadLetterStatus::Legacy
-            && matches!(props.get("payload"), Some(Value::String(_))),
+            && (matches!(props.get("payload"), Some(Value::String(_)))
+                || matches!(props.get("has_payload"), Some(Value::Bool(true)))),
         created_at: time(props, "created_at"),
         updated_at: time(props, "updated_at"),
         next_retry_at: time(props, "next_retry_at"),
@@ -734,17 +842,28 @@ mod tests {
 
     #[test]
     fn backoff_doubles_and_caps() {
-        let p = RetryPolicy {
-            max_retries: 5,
-            backoff_ms: 1_000,
-            max_backoff_ms: 5_000,
-        };
+        let p = RetryPolicy::new(5, 1_000, 5_000);
         let ms = |n| p.backoff_after(n).num_milliseconds();
         assert_eq!(ms(0), 1_000);
         assert_eq!(ms(1), 2_000);
         assert_eq!(ms(2), 4_000);
         assert_eq!(ms(3), 5_000);
         assert_eq!(ms(200), 5_000);
+    }
+
+    #[test]
+    fn status_names_round_trip() {
+        for s in [
+            DeadLetterStatus::Pending,
+            DeadLetterStatus::Retrying,
+            DeadLetterStatus::Exhausted,
+            DeadLetterStatus::Resolved,
+            DeadLetterStatus::Legacy,
+        ] {
+            assert_eq!(s.as_str().parse::<DeadLetterStatus>().unwrap(), s);
+            assert_eq!(s.to_string(), s.as_str());
+        }
+        assert!("stuck".parse::<DeadLetterStatus>().is_err());
     }
 
     #[test]

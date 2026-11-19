@@ -405,8 +405,8 @@ and `IvfRq` for different scale / recall / memory trade-offs.
 | `consolidation_queue_capacity`| `32`     | Bounded channel capacity for the consolidation worker. |
 | `circuit_failure_threshold`   | `5`      | Consecutive failures before the circuit breaker opens. |
 | `circuit_recovery_ms`         | `60000`  | Milliseconds the breaker stays open before probing. |
-| `dead_letter_max_retries`     | `3`      | Retries a dead-lettered streaming item gets before it is `exhausted`. |
-| `dead_letter_auto_retry`      | `false`  | Retry dead letters in the background once their backoff elapses. |
+| `dead_letter_max_retries`     | `3`      | Retries a dead-lettered streaming item gets before it is `exhausted`; fixed on each letter when stored. `0` stores every failure `exhausted`. |
+| `dead_letter_auto_retry`      | `false`  | Retry dead letters in the background once their backoff elapses (checked every backoff interval, between 1 s and 60 s). |
 | `dead_letter_retry_backoff_ms`| `30000`  | Wait before a dead letter's first retry; doubles on each later one. |
 | `dead_letter_retry_max_backoff_ms` | `3600000` | Longest wait between retries of one dead letter. |
 

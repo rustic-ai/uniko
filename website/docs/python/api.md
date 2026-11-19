@@ -355,7 +355,7 @@ builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoni
 | Method | Signature | Sync | Description |
 | --- | --- | --- | --- |
 | `session` | `session(session_id: str) -> Session` | — (sync) | Open a conversation thread. |
-| `register` | `register(*, name: str \| None = None) -> Awaitable[Literal["created", "upgraded", "existing"]]` | `register_sync` | Record this agent as a participant of kind `agent`, writing nothing else. Idempotent; a participant of kind `unknown` (for example from `add_org_member`) becomes `agent`, keeping its name and memberships. `name` is set only when the participant has none. Optional: goals, tasks, actions and tool calls create the participant themselves. |
+| `register` | `register(*, name: str \| None = None) -> Awaitable[Registration]` | `register_sync` | Record this agent as a participant of kind `agent`, writing nothing else. Returns a `Registration` with `participant_id` and `outcome` (`"created"`, `"upgraded"` or `"existing"`). Idempotent; a participant of kind `unknown` (for example from `add_org_member`) becomes `agent`, keeping its name and memberships. `name` is set only when the participant has none. Optional: goals, tasks, actions and tool calls create the participant themselves. |
 | `delete_session` | `delete_session(session_id: str) -> Awaitable[DeletionReport]` | `delete_session_sync` | Hard-delete a session and cascade. |
 | `finalize_session` | `finalize_session(session_id: str) -> Awaitable[FinalizeReport]` | `finalize_session_sync` | Build/refresh a session's retrieval surfaces without its `Session` handle. |
 | `retire_source` | `retire_source(source_id: str) -> Awaitable[bool]` | `retire_source_sync` | Hide everything recorded under a source id from recall, reversibly. |
@@ -676,6 +676,8 @@ turn = (uniko.Turn("alice", "see the attached report")
 ```python
 ToolCall(tool_name: str)
 ```
+
+`call.tool_name` and `call.performer_id` (`None` unless `.performer(...)` was set) read the call back.
 
 One call of one tool. Reusable, like `Turn`.
 
@@ -1045,16 +1047,17 @@ letters stored, retries resubmitted and retries that succeeded since start.
 ### `DeadLetters`
 
 From `Uniko.dead_letters`. Listing, counting and resolving work on any instance; retrying needs
-`streaming(True)` and raises `ConfigError` otherwise.
+`streaming(True)` and raises `ConfigError` otherwise. Drop the handle before `shutdown()`, as with
+an `Agent` or `Session`.
 
 | Method | Signature | Sync | Description |
 | --- | --- | --- | --- |
 | `list` | `list(*, status=None, limit=None) -> Awaitable[list[DeadLetter]]` | `list_sync` | Oldest first. `status` is `"pending"`, `"retrying"`, `"exhausted"`, `"resolved"` or `"legacy"`. |
 | `get` | `get(id: str) -> Awaitable[DeadLetter \| None]` | `get_sync` | One letter. |
-| `counts` | `counts() -> Awaitable[dict[str, int]]` | `counts_sync` | Letters per status. |
-| `retry` | `retry(id: str, *, force=False) -> Awaitable[None]` | `retry_sync` | Resubmit the stored payload; the outcome lands on the letter, and `Session.flush` waits for it. `force` retries a permanent failure or one out of retries. Raises `ConfigError` when it can't be retried, `PipelineError` when the queue is full. |
-| `retry_pending` | `retry_pending(limit=100) -> Awaitable[dict]` | `retry_pending_sync` | Retry pending, retriable letters now. Returns `{"retried": [...], "refused": [{"id", "reason"}]}`. |
-| `resolve` | `resolve(id: str, note=None) -> Awaitable[bool]` | `resolve_sync` | Close a letter without retrying it. Only the letter changes. |
+| `counts` | `counts() -> Awaitable[DeadLetterCounts]` | `counts_sync` | Letters per status: `pending`, `retrying`, `exhausted`, `resolved`, `legacy`. |
+| `retry` | `retry(id: str, *, force=False) -> Awaitable[None]` | `retry_sync` | Resubmit the stored payload; the outcome lands on the letter, and `Session.flush` waits for it. `force` retries a permanent failure or one out of retries. Raises `ConfigError` when it can't be retried, and `UnikoError` with `kind == "pipeline"` when the ingest queue is full (the attempt isn't counted). |
+| `retry_pending` | `retry_pending(limit=100) -> Awaitable[RetryReport]` | `retry_pending_sync` | Retry pending, retriable letters now, at most `limit`. `RetryReport.retried` lists the ids resubmitted; `refused` lists `RetryRefusal(id, reason)`. |
+| `resolve` | `resolve(id: str, note=None) -> Awaitable[bool]` | `resolve_sync` | Close a letter without retrying it. Only the letter changes, and its payload is dropped. Raises `ConfigError` while this process is retrying it. |
 
 A `DeadLetter` has these fields:
 - `id`, `step`, `error`, `error_kind` (e.g. `"internal"`, `"id_conflict"`);

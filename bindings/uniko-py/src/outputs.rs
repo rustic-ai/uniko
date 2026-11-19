@@ -1304,6 +1304,41 @@ fn circuit_state_str(state: CircuitState) -> &'static str {
     }
 }
 
+/// What ``Agent.register`` did.
+#[pyclass(name = "Registration", module = "uniko", frozen)]
+pub struct PyRegistration {
+    /// The agent's participant id.
+    #[pyo3(get)]
+    participant_id: String,
+    /// ``"created"``, ``"upgraded"`` (from kind ``unknown``) or
+    /// ``"existing"``.
+    #[pyo3(get)]
+    outcome: &'static str,
+}
+
+impl PyRegistration {
+    /// Build the Python wrapper from a Rust [`Registration`].
+    pub fn from_rust(py: Python<'_>, reg: &uniko_api::tools::Registration) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                participant_id: reg.participant_id.clone(),
+                outcome: reg.outcome.as_str(),
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyRegistration {
+    fn __repr__(&self) -> String {
+        format!(
+            "Registration(participant_id='{}', outcome='{}')",
+            self.participant_id, self.outcome
+        )
+    }
+}
+
 /// One streaming-pipeline worker's health.
 #[pyclass(name = "WorkerHealth", module = "uniko", frozen)]
 pub struct PyWorkerHealth {
@@ -1715,6 +1750,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRecallSource>()?;
     m.add_class::<PyRecallItem>()?;
     m.add_class::<PyDiagnostic>()?;
+    m.add_class::<PyRegistration>()?;
     m.add_class::<PyContextBundle>()?;
     m.add_class::<PyAnswer>()?;
     m.add_class::<PyObserveResult>()?;

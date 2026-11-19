@@ -210,16 +210,21 @@ from five different node types into `Entity`). Those are noted inline.
 | `TEAM_IN_ORG` | `Team` → `Organization` | A team's parent organization. |
 
 !!! note "DeadLetter has no edges"
-    `DeadLetter` is a standalone node — it records a failed pipeline step
-    (`step`, `error`, `node_ref`, `retry_count`, `max_retries`,
-    `next_retry_at`) and is not wired into the graph by an edge type.
+    `DeadLetter` is a standalone node, not wired into the graph by an edge type. It records a
+    failed streaming item:
+    - `dead_letter_id`, `step`, `error`, `error_kind`, `retriable`;
+    - `status`, `retry_count`, `max_retries`, `next_retry_at`;
+    - `ingest_type`, `agent_id`, the replayable `payload`;
+    - `created_at`, `updated_at`, `resolved_at`, `resolution`.
+
+    See `Uniko::dead_letters()`.
 
 ## Indexes at a glance
 
-Most id properties carry a `Hash` scalar index for O(1) lookup — the exceptions
-are `Chunk.chunk_id`, which is unindexed because chunks are reached through
-`HAS_CHUNK` / vector / BM25 rather than by id, and `DeadLetter`, which has no id
-property at all. Beyond that, the schema leans on three index families:
+Most id properties carry a `Hash` scalar index for O(1) lookup — the exception
+is `Chunk.chunk_id`, which is unindexed because chunks are reached through
+`HAS_CHUNK` / vector / BM25 rather than by id. `DeadLetter` rows written before
+`dead_letter_id` existed have no id. Beyond that, the schema leans on three index families:
 
 - **Hash** — exact-match columns like `Entity.name`, `Fact.subject`,
   `Fact.predicate`, `Episode.action_type`, `Entity.unstable`.

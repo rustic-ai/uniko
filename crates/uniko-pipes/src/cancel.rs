@@ -51,6 +51,12 @@ impl ShutdownCoordinator {
         self.consolidation.clone()
     }
 
+    /// A guard that cancels the whole tree when dropped, so a pipeline
+    /// dropped without [`shutdown`](Self::shutdown) still stops its tasks.
+    pub fn cancel_on_drop(&self) -> tokio_util::sync::DropGuard {
+        self.root.clone().drop_guard()
+    }
+
     /// Whether the root has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.root.is_cancelled()

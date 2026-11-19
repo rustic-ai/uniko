@@ -8,4 +8,5 @@
 //! Run: `cargo nextest run -p uniko-memory --test pipeline_e2e`
 
 mod cortex_trigger_e2e;
+mod dead_letter_recovery;
 mod pipeline_integration;

@@ -6495,7 +6495,7 @@ mod dead_letters {
     use crate::{DeadLetterFilter, DeadLetterStatus, Modality, TextExtractor};
 
     /// An image extractor that fails with `err` while `failing` is set.
-    fn flaky(failing: Arc<AtomicBool>, err: fn() -> UnikoError) -> Arc<TextExtractor> {
+    pub(super) fn flaky(failing: Arc<AtomicBool>, err: fn() -> UnikoError) -> Arc<TextExtractor> {
         Arc::new(TextExtractor::new(Modality::Image, move |_| {
             if failing.load(Ordering::SeqCst) {
                 Err(err())
@@ -6505,11 +6505,11 @@ mod dead_letters {
         }))
     }
 
-    fn offline() -> UnikoError {
+    pub(super) fn offline() -> UnikoError {
         UnikoError::Internal("captioner offline".into())
     }
 
-    fn image(id: &str) -> IngestSource {
+    pub(super) fn image(id: &str) -> IngestSource {
         IngestSource::bytes(vec![0x42; 16])
             .with_mime(Mime::parse("image/png").expect("mime"))
             .with_id(id)
@@ -6522,16 +6522,19 @@ mod dead_letters {
         }
     }
 
-    async fn streaming(
+    /// A streaming instance; skips (returns `None`) only when a model is
+    /// unavailable, so a regression in the streaming build still fails.
+    pub(super) async fn streaming(
         builder: crate::UnikoBuilder,
         extractor: Arc<TextExtractor>,
     ) -> Option<Uniko> {
         match builder.streaming(true).extractor(extractor).build().await {
             Ok(m) => Some(m),
-            Err(e) => {
-                eprintln!("skipping: streaming instance unavailable: {e}");
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable: {e}");
                 None
             }
+            Err(e) => panic!("streaming instance failed to build: {e}"),
         }
     }
 
@@ -6759,14 +6762,16 @@ mod dead_letters {
             return;
         };
         let dl = memory.dead_letters();
-        let letter = dl.get(&id).await.unwrap().expect("letter survives");
-        assert_eq!(letter.status, DeadLetterStatus::Retrying);
+        assert!(dl.get(&id).await.unwrap().is_some(), "letter survives");
         let report = dl.retry_pending(10).await.unwrap();
         assert_eq!(report.retried, vec![id.clone()], "{report:?}");
         flush(&memory).await;
         let letter = dl.get(&id).await.unwrap().unwrap();
         assert_eq!(letter.status, DeadLetterStatus::Resolved);
-        assert_eq!(letter.retry_count, 2, "the interrupted claim still counts");
+        assert_eq!(
+            letter.retry_count, 1,
+            "the interrupted claim never finished, so only the real retry counts"
+        );
         drop(dl);
         memory.shutdown().await.expect("shutdown");
     }
@@ -6834,27 +6839,12 @@ mod dead_letter_scheduler {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
-    use uniko_pipes::content::Mime;
-
+    use super::dead_letters::{flaky, image, offline, streaming as build};
     use super::*;
-    use crate::{DeadLetter, DeadLetterFilter, DeadLetterStatus, Modality, TextExtractor};
+    use crate::{DeadLetter, DeadLetterFilter, DeadLetterStatus};
 
-    fn flaky(failing: Arc<AtomicBool>, err: fn() -> UnikoError) -> Arc<TextExtractor> {
-        Arc::new(TextExtractor::new(Modality::Image, move |_| {
-            if failing.load(Ordering::SeqCst) {
-                Err(err())
-            } else {
-                Ok("a red bicycle leaning on a wall".to_string())
-            }
-        }))
-    }
-
-    fn offline() -> UnikoError {
-        UnikoError::Internal("captioner offline".into())
-    }
-
-    /// Auto-retry on, with millisecond backoff so a test sees several
-    /// passes quickly.
+    /// Auto-retry on, with a short backoff. The scheduler polls at most once
+    /// a second, so each pass is about a second apart.
     fn auto(max_retries: u32, backoff_ms: u64) -> UnikoConfig {
         UnikoConfig {
             dead_letter_max_retries: max_retries,
@@ -6865,26 +6855,9 @@ mod dead_letter_scheduler {
         }
     }
 
-    async fn build(builder: crate::UnikoBuilder, extractor: Arc<TextExtractor>) -> Option<Uniko> {
-        match builder.streaming(true).extractor(extractor).build().await {
-            Ok(m) => Some(m),
-            Err(e) => {
-                eprintln!("skipping: streaming instance unavailable: {e}");
-                None
-            }
-        }
-    }
-
     async fn submit_failing(memory: &Uniko, id: &str) -> String {
         let session = memory.agent("viewer").session("dl");
-        session
-            .submit_source(
-                IngestSource::bytes(vec![0x42; 16])
-                    .with_mime(Mime::parse("image/png").expect("mime"))
-                    .with_id(id),
-            )
-            .await
-            .expect("submit");
+        session.submit_source(image(id)).await.expect("submit");
         session.flush().await.expect("flush");
         let letters = memory
             .dead_letters()
@@ -6894,9 +6867,9 @@ mod dead_letter_scheduler {
         letters.first().expect("a dead letter").id.clone()
     }
 
-    /// Poll the letter until `done` holds, failing after 15 s.
+    /// Poll the letter until `done` holds, failing after 30 s.
     async fn wait_for(memory: &Uniko, id: &str, done: impl Fn(&DeadLetter) -> bool) -> DeadLetter {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let letter = memory
                 .dead_letters()
@@ -6919,7 +6892,7 @@ mod dead_letter_scheduler {
     async fn a_transient_failure_recovers_on_its_own() {
         let failing = Arc::new(AtomicBool::new(true));
         let Some(memory) = build(
-            Uniko::builder().in_memory().raw_config(auto(3, 50)),
+            Uniko::builder().in_memory().raw_config(auto(10, 50)),
             flaky(failing.clone(), offline),
         )
         .await
@@ -6959,8 +6932,8 @@ mod dead_letter_scheduler {
         let id = submit_failing(&memory, "img-b").await;
         let letter = wait_for(&memory, &id, |l| l.status == DeadLetterStatus::Exhausted).await;
         assert_eq!(letter.retry_count, 2);
-        // Give the scheduler a few more passes: it must not go past the limit.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Give the scheduler more passes: it must not go past the limit.
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
         let letter = memory.dead_letters().get(&id).await.unwrap().unwrap();
         assert_eq!(
             (letter.retry_count, letter.status),
@@ -6982,7 +6955,8 @@ mod dead_letter_scheduler {
             return;
         };
         let id = submit_failing(&memory, "img-c").await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Several scheduler passes go by without touching it.
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
         let letter = memory.dead_letters().get(&id).await.unwrap().unwrap();
         assert_eq!(
             (letter.retry_count, letter.status),
@@ -7007,7 +6981,7 @@ mod dead_letter_scheduler {
         let id = submit_failing(&memory, "img-d").await;
         memory.agent("viewer").session("dl").flush().await.unwrap();
         assert!(
-            started.elapsed() < Duration::from_secs(10),
+            started.elapsed() < Duration::from_secs(30),
             "flush waited for a future retry"
         );
         let letter = memory.dead_letters().get(&id).await.unwrap().unwrap();

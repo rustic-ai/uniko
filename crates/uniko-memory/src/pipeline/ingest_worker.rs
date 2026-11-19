@@ -160,10 +160,18 @@ impl IngestWorker {
             populate_ingest_metadata(&task, &mut ctx);
 
             metrics::emit_ingest_item();
-            let ((result, dead), diagnostics) =
+            let (chain, diagnostics) =
                 uniko_store::diagnostics::collect(run_step_chain(&steps, &mut ctx)).await;
             let elapsed_ms = start.elapsed().as_millis() as f64;
-            record_dead_letter(&dlq, &health, &task, retry_of.as_deref(), dead, ctx.node_id).await;
+            let result = record_dead_letter(
+                &dlq,
+                &health,
+                &task,
+                retry_of.as_deref(),
+                chain,
+                ctx.node_id,
+            )
+            .await;
 
             // Tell the consolidation worker that new Observations landed, so
             // its per-agent counter advances and the threshold / periodic
@@ -252,23 +260,46 @@ fn populate_ingest_metadata(task: &IngestTask, ctx: &mut PipelineContext) {
     }
 }
 
+/// How a step chain ended.
+#[derive(Debug)]
+pub(crate) enum ChainEnd {
+    /// Every step ran (some may have failed with `Skip` or `DeadLetter`).
+    Completed,
+    /// The cancellation token fired before every step ran.
+    Cancelled,
+    /// A step failed with `Abort`; its error.
+    Aborted(String, UnikoError),
+}
+
+/// What [`run_step_chain`] produced for one item.
+pub(crate) struct ChainOutcome {
+    pub(crate) result: ItemResult,
+    /// Every failure whose policy is `DeadLetter`, with its error intact so
+    /// the dead letter can record whether a retry may succeed.
+    pub(crate) dead: Vec<(String, UnikoError)>,
+    pub(crate) end: ChainEnd,
+}
+
 /// Execute a chain of steps with per-item error isolation.
 ///
 /// Each step's failure is handled according to its
 /// [`StepErrorPolicy`].  The chain continues unless `Abort` is
-/// declared or the cancellation token fires. Returns the item's result and
-/// every failure whose policy is `DeadLetter`, with its error intact so the
-/// dead letter can record whether a retry may succeed.
+/// declared or the cancellation token fires, and reports which of the
+/// three ended it.
 pub(crate) async fn run_step_chain(
     steps: &[Box<dyn Step>],
     ctx: &mut PipelineContext,
-) -> (ItemResult, Vec<(String, UnikoError)>) {
+) -> ChainOutcome {
     let mut result = ItemResult::new(ctx.node_id);
     let mut dead = Vec::new();
 
     for step in steps {
         if ctx.cancel.is_cancelled() {
-            break;
+            return ChainOutcome {
+                result,
+                dead,
+                end: ChainEnd::Cancelled,
+            };
         }
         if !step.should_run(ctx) {
             result.steps_skipped.push(step.name().to_owned());
@@ -303,48 +334,195 @@ pub(crate) async fn run_step_chain(
         match policy {
             StepErrorPolicy::Skip => {}
             StepErrorPolicy::DeadLetter => dead.push((step_name, error)),
-            StepErrorPolicy::Abort => break,
+            StepErrorPolicy::Abort => {
+                return ChainOutcome {
+                    result,
+                    dead,
+                    end: ChainEnd::Aborted(step_name, error),
+                };
+            }
         }
     }
-    (result, dead)
+    ChainOutcome {
+        result,
+        dead,
+        end: ChainEnd::Completed,
+    }
 }
 
-/// Record the outcome of an item against the dead-letter queue.
+/// Record the outcome of an item against the dead-letter queue, and return
+/// the item's result.
 ///
 /// - A new item with a dead-letter failure becomes one letter (the first
 ///   such failure; later ones in the same chain are only logged).
-/// - A retry updates the letter it retries: resolved when nothing failed,
-///   otherwise back to pending or exhausted.
+/// - A retry updates the letter it retries:
+///   - resolved only when its chain completed with no dead-letter failure;
+///   - pending again or exhausted when it failed or aborted;
+///   - released, uncounted, when shutdown cancelled it before it finished,
+///     since the payload never fully ran.
 ///
 /// A queue write failure is logged, never raised: the item itself has
 /// already been processed.
-async fn record_dead_letter(
+pub(crate) async fn record_dead_letter(
     dlq: &DeadLetterQueue,
     health: &Mutex<HealthTracker>,
     task: &IngestTask,
     retry_of: Option<&str>,
-    dead: Vec<(String, UnikoError)>,
+    chain: ChainOutcome,
     node_ref: uniko_store::NodeId,
-) {
-    match (retry_of, dead.into_iter().next()) {
-        (Some(id), None) => {
+) -> ItemResult {
+    let ChainOutcome { result, dead, end } = chain;
+    let first_failure = dead.into_iter().next();
+    match (retry_of, end, first_failure) {
+        (Some(id), ChainEnd::Cancelled, _) => {
+            if let Err(e) = dlq.release_claim(id).await {
+                tracing::error!(error = %e, dead_letter = id, "failed to release retry claim");
+            }
+        }
+        (Some(id), ChainEnd::Completed, None) => {
             if let Err(e) = dlq.retry_succeeded(id).await {
                 tracing::error!(error = %e, dead_letter = id, "failed to resolve dead letter");
             }
             health.lock().unwrap().record_retry_success();
         }
-        (Some(id), Some((step, err))) => {
+        (Some(id), ChainEnd::Aborted(step, err), None) | (Some(id), _, Some((step, err))) => {
             if let Err(e) = dlq.retry_failed(id, &step, &err).await {
                 tracing::error!(error = %e, dead_letter = id, "failed to update dead letter");
             }
         }
-        (None, Some((step, err))) => match dlq.store(&step, &err, Some(task), node_ref).await {
+        (None, _, Some((step, err))) => match dlq.store(&step, &err, Some(task), node_ref).await {
             Ok(id) => {
                 tracing::info!(dead_letter = %id, step = %step, "item dead-lettered");
                 health.lock().unwrap().record_dead_letter();
             }
             Err(e) => tracing::error!(error = %e, "failed to store dead letter"),
         },
-        (None, None) => {}
+        (None, _, None) => {}
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use uniko_pipes::dead_letter::{DeadLetterStatus, RetryPolicy};
+    use uniko_pipes::types::IngestMessage;
+    use uniko_store::config::UnikoConfig;
+
+    use super::*;
+
+    fn task() -> IngestTask {
+        IngestTask::Message(IngestMessage {
+            message_id: "m".into(),
+            content: "hello".into(),
+            content_type: "text".into(),
+            sender_id: "user".into(),
+            session_id: "s".into(),
+            addressed_to: None,
+            timestamp: chrono::Utc::now(),
+            metadata: HashMap::new(),
+            category: None,
+            source_id: None,
+            revision_id: None,
+            visibility: None,
+        })
+    }
+
+    fn outcome(end: ChainEnd) -> ChainOutcome {
+        ChainOutcome {
+            result: ItemResult::new(0),
+            dead: Vec::new(),
+            end,
+        }
+    }
+
+    /// A claimed retry and the queue it lives in.
+    async fn claimed() -> Option<(DeadLetterQueue, String)> {
+        let kb = match KnowledgeBase::in_memory(UnikoConfig::default()).await {
+            Ok(kb) => Arc::new(kb),
+            Err(e) => {
+                eprintln!("skipping: in-memory store unavailable: {e}");
+                return None;
+            }
+        };
+        let dlq = DeadLetterQueue::with_policy(kb, RetryPolicy::new(3, 10, 40));
+        let id = dlq
+            .store("ingest", &UnikoError::Timeout(1), Some(&task()), 0)
+            .await
+            .unwrap();
+        dlq.begin_retry(&id, false).await.unwrap();
+        Some((dlq, id))
+    }
+
+    /// Shutdown cutting a retry short must not mark it resolved: the
+    /// payload never ran, so the claim is released and not counted.
+    #[tokio::test]
+    async fn a_cancelled_retry_is_released_not_resolved() {
+        let Some((dlq, id)) = claimed().await else {
+            return;
+        };
+        let health = Mutex::new(HealthTracker::new());
+        record_dead_letter(
+            &dlq,
+            &health,
+            &task(),
+            Some(&id),
+            outcome(ChainEnd::Cancelled),
+            0,
+        )
+        .await;
+        let letter = dlq.get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (letter.status, letter.retry_count),
+            (DeadLetterStatus::Pending, 0)
+        );
+        assert_eq!(
+            health.lock().unwrap().health(0, 1, false).retries_succeeded,
+            0
+        );
+    }
+
+    /// A retry that aborts is a failure, not a success.
+    #[tokio::test]
+    async fn an_aborted_retry_counts_as_failed() {
+        let Some((dlq, id)) = claimed().await else {
+            return;
+        };
+        let health = Mutex::new(HealthTracker::new());
+        let end = ChainEnd::Aborted("ingest".into(), UnikoError::Timeout(2));
+        record_dead_letter(&dlq, &health, &task(), Some(&id), outcome(end), 0).await;
+        let letter = dlq.get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (letter.status, letter.retry_count),
+            (DeadLetterStatus::Pending, 1)
+        );
+        assert_eq!(letter.error_kind.as_deref(), Some("timeout"));
+    }
+
+    /// Only a completed chain with no dead-letter failure resolves a retry.
+    #[tokio::test]
+    async fn a_completed_retry_is_resolved() {
+        let Some((dlq, id)) = claimed().await else {
+            return;
+        };
+        let health = Mutex::new(HealthTracker::new());
+        record_dead_letter(
+            &dlq,
+            &health,
+            &task(),
+            Some(&id),
+            outcome(ChainEnd::Completed),
+            0,
+        )
+        .await;
+        assert_eq!(
+            dlq.get(&id).await.unwrap().unwrap().status,
+            DeadLetterStatus::Resolved
+        );
+        assert_eq!(
+            health.lock().unwrap().health(0, 1, false).retries_succeeded,
+            1
+        );
     }
 }

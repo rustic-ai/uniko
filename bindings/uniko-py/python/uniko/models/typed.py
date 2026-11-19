@@ -25,8 +25,9 @@ from __future__ import annotations
 import builtins
 import datetime
 from collections.abc import Sequence
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
+from ..types import DeadLetterStatus
 from .config import UnikoConfigModel
 from .outputs import (
     AbductionResult,
@@ -48,6 +49,9 @@ from .outputs import (
     MatchedProcedure,
     PipelineHealth,
     DeadLetter,
+    Registration,
+    DeadLetterCounts,
+    RetryReport,
     RuleView,
     SummarizeReport,
     TaskView,
@@ -108,13 +112,13 @@ class TypedDeadLetters:
         self._inner = inner
 
     async def list(
-        self, *, status: Optional[str] = None, limit: Optional[int] = None
+        self, *, status: Optional[DeadLetterStatus] = None, limit: Optional[int] = None
     ) -> builtins.list[DeadLetter]:
         rows = await self._inner.list(status=status, limit=limit)
         return [DeadLetter.from_native(r) for r in rows]
 
     def list_sync(
-        self, *, status: Optional[str] = None, limit: Optional[int] = None
+        self, *, status: Optional[DeadLetterStatus] = None, limit: Optional[int] = None
     ) -> builtins.list[DeadLetter]:
         rows = self._inner.list_sync(status=status, limit=limit)
         return [DeadLetter.from_native(r) for r in rows]
@@ -127,11 +131,11 @@ class TypedDeadLetters:
         native = self._inner.get_sync(id)
         return None if native is None else DeadLetter.from_native(native)
 
-    async def counts(self) -> dict[str, int]:
-        return await self._inner.counts()
+    async def counts(self) -> DeadLetterCounts:
+        return DeadLetterCounts.from_native(await self._inner.counts())
 
-    def counts_sync(self) -> dict[str, int]:
-        return self._inner.counts_sync()
+    def counts_sync(self) -> DeadLetterCounts:
+        return DeadLetterCounts.from_native(self._inner.counts_sync())
 
     async def retry(self, id: str, *, force: bool = False) -> None:
         await self._inner.retry(id, force=force)
@@ -139,11 +143,11 @@ class TypedDeadLetters:
     def retry_sync(self, id: str, *, force: bool = False) -> None:
         self._inner.retry_sync(id, force=force)
 
-    async def retry_pending(self, limit: int = 100) -> dict[str, Any]:
-        return await self._inner.retry_pending(limit)
+    async def retry_pending(self, limit: int = 100) -> RetryReport:
+        return RetryReport.from_native(await self._inner.retry_pending(limit))
 
-    def retry_pending_sync(self, limit: int = 100) -> dict[str, Any]:
-        return self._inner.retry_pending_sync(limit)
+    def retry_pending_sync(self, limit: int = 100) -> RetryReport:
+        return RetryReport.from_native(self._inner.retry_pending_sync(limit))
 
     async def resolve(self, id: str, note: Optional[str] = None) -> bool:
         return await self._inner.resolve(id, note)
@@ -525,15 +529,11 @@ class TypedAgent:
     def session(self, session_id: str) -> TypedSession:
         return TypedSession(self._inner.session(session_id))
 
-    async def register(
-        self, *, name: str | None = None
-    ) -> Literal["created", "upgraded", "existing"]:
-        return await self._inner.register(name=name)
+    async def register(self, *, name: str | None = None) -> Registration:
+        return Registration.from_native(await self._inner.register(name=name))
 
-    def register_sync(
-        self, *, name: str | None = None
-    ) -> Literal["created", "upgraded", "existing"]:
-        return self._inner.register_sync(name=name)
+    def register_sync(self, *, name: str | None = None) -> Registration:
+        return Registration.from_native(self._inner.register_sync(name=name))
 
     async def recall(self, query: str) -> ContextBundle:
         return ContextBundle.from_native(await self._inner.recall(query))
