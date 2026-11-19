@@ -1704,10 +1704,10 @@ async fn recall_unfiltered(
 ///
 /// Only Chunk and Observation carry a `colbert_embedding` column, so this
 /// re-scores those candidates within the top `reranker_top_n` window and
-/// leaves the rest at their fused score (partial rerank). MaxSim scores are
-/// rescaled into the window's existing score band so the re-scored and
-/// untouched candidates interleave without a scale jump. Best-effort: on any
-/// embed/query failure it logs and leaves RRF order intact.
+/// leaves other kinds at their fused score (partial rerank). See
+/// [`apply_maxsim`] for how the two scales are combined and where a
+/// candidate with no token vectors goes. Best-effort: on any embed/query
+/// failure it logs and leaves the fused order intact.
 async fn colbert_rerank(
     kb: &KnowledgeBase,
     query: &str,
@@ -1760,10 +1760,10 @@ async fn colbert_rerank(
     }
 
     let mut maxsim: HashMap<NodeId, f64> = HashMap::new();
-    let mut maxsim_failed = false;
-    for (label, content_field, ids) in [
-        ("Chunk", "text", &chunk_ids),
-        ("Observation", "content", &obs_ids),
+    let mut failed_kinds: Vec<RecallKind> = Vec::new();
+    for (kind, label, content_field, ids) in [
+        (RecallKind::Chunk, "Chunk", "text", &chunk_ids),
+        (RecallKind::Observation, "Observation", "content", &obs_ids),
     ] {
         if ids.is_empty() {
             continue;
@@ -1774,12 +1774,17 @@ async fn colbert_rerank(
         {
             Ok(rows) => {
                 for r in rows {
-                    maxsim.insert(r.node_id, r.score);
+                    // The store reads only the ids it was given, but guard the
+                    // invariant: a score for a node outside the window must
+                    // never set the rescale ceiling.
+                    if ids.contains(&r.node_id) {
+                        maxsim.insert(r.node_id, r.score);
+                    }
                 }
             }
             Err(e) => {
                 tracing::warn!(label, error = %e, "colbert maxsim query failed");
-                maxsim_failed = true;
+                failed_kinds.push(kind);
                 record_stage(
                     Diagnostic::new(Stage::Colbert, StageStatus::Fallback, Code::MaxsimFailed)
                         .target(label),
@@ -1787,36 +1792,96 @@ async fn colbert_rerank(
             }
         }
     }
-    if maxsim.is_empty() {
-        // A failed query already said why nothing was rescored.
-        if !maxsim_failed {
-            skipped();
-        }
-        return;
-    }
 
-    // Rescale MaxSim into the current top-window band so re-scored items
-    // interleave with the untouched (non-colbert) candidates instead of
-    // jumping to a different score scale.
+    match apply_maxsim(items, top, &maxsim) {
+        MaxsimOutcome::NothingScored => {
+            // A failed query already said why nothing was rescored.
+            if failed_kinds.is_empty() {
+                skipped();
+            }
+        }
+        MaxsimOutcome::Applied { unscored } => {
+            // No count: it would be taken before access control filters the
+            // bundle, so it could reveal how many hidden items matched.
+            record_stage(Diagnostic::applied(Stage::Colbert));
+            for kind in unscored {
+                if failed_kinds.contains(&kind) {
+                    continue;
+                }
+                record_stage(
+                    Diagnostic::new(Stage::Colbert, StageStatus::Fallback, Code::Unscored).target(
+                        if kind == RecallKind::Chunk {
+                            "Chunk"
+                        } else {
+                            "Observation"
+                        },
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// What [`apply_maxsim`] did to the rerank window.
+#[derive(Debug, PartialEq)]
+enum MaxsimOutcome {
+    /// No candidate had a positive MaxSim score; the fused order is kept.
+    NothingScored,
+    /// Scored candidates were rescaled; `unscored` lists the ColBERT-bearing
+    /// kinds that had at least one candidate without a score.
+    Applied { unscored: Vec<RecallKind> },
+}
+
+/// Re-score the top `top` items by MaxSim and re-sort.
+///
+/// A scored item's MaxSim is rescaled into the window's existing score band
+/// (`ms / max_ms * band_ceiling`), so it interleaves with kinds that carry no
+/// ColBERT column (Facts, Entities, …), which keep their fused scores.
+///
+/// A Chunk or Observation in the window with no MaxSim score is placed just
+/// under the lowest rescaled score, in its fused order. Leaving it at its
+/// fused score would compare numbers from two different scales, and an
+/// unscored item could then outrank every scored one (issue #72).
+fn apply_maxsim(
+    items: &mut [RecallItem],
+    top: usize,
+    maxsim: &HashMap<NodeId, f64>,
+) -> MaxsimOutcome {
+    let top = top.min(items.len());
+    let max_ms = items[..top]
+        .iter()
+        .filter_map(|i| maxsim.get(&i.node_id).copied())
+        .fold(f64::MIN, f64::max);
+    if max_ms <= 0.0 {
+        return MaxsimOutcome::NothingScored;
+    }
     let band_ceiling = items[..top]
         .iter()
         .map(|i| i.score)
         .fold(f64::MIN, f64::max)
         .max(f64::MIN_POSITIVE);
-    let max_ms = maxsim.values().copied().fold(f64::MIN, f64::max);
-    if max_ms <= 0.0 {
-        skipped();
-        return;
-    }
-    // No count: it would be taken before access control filters the
-    // bundle, so it could reveal how many hidden items matched.
-    record_stage(Diagnostic::applied(Stage::Colbert));
+    let colbert_kind = |k: RecallKind| matches!(k, RecallKind::Chunk | RecallKind::Observation);
+
+    let mut floor = f64::INFINITY;
     for item in items[..top].iter_mut() {
         if let Some(&ms) = maxsim.get(&item.node_id) {
-            item.score = ms / max_ms * band_ceiling;
+            item.score = ms.max(0.0) / max_ms * band_ceiling;
+            floor = floor.min(item.score);
+        }
+    }
+    let mut unscored = Vec::new();
+    for item in items[..top].iter_mut() {
+        if colbert_kind(item.kind) && !maxsim.contains_key(&item.node_id) {
+            // Strictly below the floor, keeping the fused order among
+            // unscored items (their fused scores are all <= band_ceiling).
+            item.score = floor * 0.5 * (item.score / band_ceiling).clamp(0.0, 1.0);
+            if !unscored.contains(&item.kind) {
+                unscored.push(item.kind);
+            }
         }
     }
     crate::sort_by_score_desc(items, |x| x.score);
+    MaxsimOutcome::Applied { unscored }
 }
 
 /// Phase 1 (Compact) coverage threshold from spec §IX.
@@ -2937,5 +3002,106 @@ mod budget_tests {
         let (kept, total) = finalize_bundle(items, 3, 10_000);
         assert_eq!(kept.len(), 3);
         assert_eq!(total, kept.iter().map(|i| i.token_count).sum::<usize>());
+    }
+}
+
+#[cfg(test)]
+mod colbert_tests {
+    use std::collections::HashMap;
+
+    use super::{MaxsimOutcome, RecallItem, RecallKind, apply_maxsim};
+
+    fn item(id: i64, kind: RecallKind, score: f64) -> RecallItem {
+        RecallItem {
+            node_id: id,
+            kind,
+            score,
+            content: String::new(),
+            sources: Vec::new(),
+            category: None,
+            source_id: None,
+            revision_id: None,
+            token_count: 0,
+            context: None,
+            address: None,
+        }
+    }
+
+    fn order(items: &[RecallItem]) -> Vec<i64> {
+        items.iter().map(|i| i.node_id).collect()
+    }
+
+    /// The #72 fixture: fused (RRF) scores in, MaxSim for every candidate
+    /// but Ada (180). Ada must not stay on top with a score from the other
+    /// scale.
+    #[test]
+    fn an_unscored_candidate_ranks_below_every_scored_one() {
+        let mut items = vec![
+            item(112, RecallKind::Chunk, 1.0 / 120.0),
+            item(163, RecallKind::Chunk, 1.0 / 122.0),
+            item(129, RecallKind::Chunk, 1.0 / 124.0),
+            item(146, RecallKind::Chunk, 1.0 / 126.0),
+            item(197, RecallKind::Chunk, 1.0 / 128.0),
+            item(180, RecallKind::Chunk, 1.0 / 130.0),
+        ];
+        let maxsim = HashMap::from([
+            (112, 5.389),
+            (129, 3.602),
+            (163, 3.595),
+            (146, 3.433),
+            (197, 2.824),
+        ]);
+        let outcome = apply_maxsim(&mut items, 6, &maxsim);
+        assert_eq!(
+            outcome,
+            MaxsimOutcome::Applied {
+                unscored: vec![RecallKind::Chunk]
+            }
+        );
+        assert_eq!(order(&items), vec![112, 129, 163, 146, 197, 180]);
+        assert!(items[5].score < items[4].score);
+    }
+
+    /// With every candidate scored, the order is the MaxSim order and the
+    /// top item keeps the window's ceiling.
+    #[test]
+    fn a_fully_scored_window_follows_maxsim() {
+        let mut items = vec![
+            item(1, RecallKind::Chunk, 0.9),
+            item(2, RecallKind::Observation, 0.8),
+            item(3, RecallKind::Chunk, 0.7),
+        ];
+        let maxsim = HashMap::from([(1, 1.0), (2, 3.0), (3, 2.0)]);
+        let outcome = apply_maxsim(&mut items, 3, &maxsim);
+        assert_eq!(outcome, MaxsimOutcome::Applied { unscored: vec![] });
+        assert_eq!(order(&items), vec![2, 3, 1]);
+        assert!((items[0].score - 0.9).abs() < 1e-12);
+    }
+
+    /// Kinds without a ColBERT column keep their fused score and interleave.
+    #[test]
+    fn other_kinds_keep_their_fused_score() {
+        let mut items = vec![
+            item(1, RecallKind::Chunk, 0.9),
+            item(2, RecallKind::Fact, 0.5),
+            item(3, RecallKind::Chunk, 0.4),
+        ];
+        let maxsim = HashMap::from([(1, 1.0), (3, 0.1)]);
+        apply_maxsim(&mut items, 3, &maxsim);
+        assert_eq!(order(&items), vec![1, 2, 3]);
+        assert!((items[1].score - 0.5).abs() < 1e-12);
+    }
+
+    /// Nothing scored: the fused order is left alone.
+    #[test]
+    fn no_scores_keep_the_fused_order() {
+        let mut items = vec![
+            item(1, RecallKind::Chunk, 0.9),
+            item(2, RecallKind::Chunk, 0.8),
+        ];
+        let outcome = apply_maxsim(&mut items, 2, &HashMap::new());
+        assert_eq!(outcome, MaxsimOutcome::NothingScored);
+        assert_eq!(order(&items), vec![1, 2]);
+        assert!((items[0].score - 0.9).abs() < 1e-12);
     }
 }
