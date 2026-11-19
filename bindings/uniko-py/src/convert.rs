@@ -58,6 +58,16 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
         Value::String(s) => s.into_py_any(py),
         Value::Bytes(b) => Ok(PyBytes::new(py, b).into_any().unbind()),
         Value::Vector(v) => v.clone().into_py_any(py),
+        // A learned-sparse vector (e.g. BGE-M3's `sparse_embedding`) keeps its
+        // aligned indices and weights, in the same `{indices, values}` shape
+        // uni-db accepts as a sparse query parameter.
+        Value::SparseVector { indices, values } => {
+            let dict = PyDict::new(py);
+            dict.set_item("indices", indices.clone())?;
+            dict.set_item("values", values.clone())?;
+            Ok(dict.into_any().unbind())
+        }
+        Value::BinaryVector(b) => Ok(PyBytes::new(py, b).into_any().unbind()),
         Value::List(items) => {
             let list = PyList::empty(py);
             for item in items {
@@ -100,18 +110,18 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<Py<PyAny>> {
         // `temporal_epoch_millis()` (the same path
         // `uniko_store::datetime_from_value` uses) to a tz-aware UTC datetime.
         // Variants without an epoch (a bare date, a duration, a BTIC interval)
-        // have no clean datetime mapping and fall back to `None` rather than
-        // guessing.
-        Value::Temporal(t) => match temporal_epoch_millis(t) {
-            Some(millis) => match DateTime::<Utc>::from_timestamp_millis(millis) {
+        // have no clean datetime mapping, so they come back as their string
+        // form rather than as `None`, which would read as a database null.
+        Value::Temporal(t) => {
+            match temporal_epoch_millis(t).and_then(DateTime::<Utc>::from_timestamp_millis) {
                 Some(dt) => Ok(utc_datetime_to_py(py, dt)?.unbind()),
-                None => Ok(py.None()),
-            },
-            None => Ok(py.None()),
-        },
-        // `Value` is `#[non_exhaustive]` upstream; surface unknown variants as
-        // `None` rather than failing the whole row.
-        _ => Ok(py.None()),
+                None => t.to_string().into_py_any(py),
+            }
+        }
+        // `Value` is `#[non_exhaustive]` upstream. A variant added later comes
+        // back as its string form: a populated value must never read as a
+        // database null (issue #71).
+        other => other.to_string().into_py_any(py),
     }
 }
 
