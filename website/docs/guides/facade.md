@@ -241,6 +241,57 @@ A degraded stage in streamed work (see [Ingest diagnostics](#ingest-diagnostics)
 report on, so it is counted in `memory.health()`: `ingest.degradations` maps `stage:code` to a
 count since start, over items that succeeded (a failed item goes to the dead-letter queue).
 
+### Dead letters — recovering failed streamed items
+
+A streamed item whose ingest fails is kept as a dead letter, with its payload, so it can be
+inspected, retried and resolved:
+
+```rust
+use uniko_memory::{DeadLetterFilter, DeadLetterStatus};
+
+let dl = memory.dead_letters();
+for letter in dl.list(&DeadLetterFilter::new().status(DeadLetterStatus::Pending)).await? {
+    println!("{} failed in {}: {} ({:?})", letter.id, letter.step, letter.error, letter.error_kind);
+}
+dl.retry(&id, false).await?;          // resubmit one; its outcome lands on the letter
+let report = dl.retry_pending(100).await?;  // or every pending one that can succeed
+dl.resolve(&id, Some("source was corrupt")).await?;  // give up, keeping the record
+session.flush().await?;               // waits for retries already started
+```
+
+| Status | Meaning |
+|---|---|
+| `pending` | Waiting for a retry; `next_retry_at` says when one is due. |
+| `retrying` | A retry has been resubmitted. |
+| `exhausted` | Out of retries (`dead_letter_max_retries`, default 3), or failed in a way a retry can't fix. |
+| `resolved` | A retry succeeded (`resolution = "retried"`), or `resolve` was called. |
+| `legacy` | Written by an earlier uniko that didn't keep payloads: can be resolved, not retried. |
+
+- **Which failures can be retried.** An id conflict, an unsupported or invalid payload, and
+  configuration or schema errors fail the same way every time. They're stored `exhausted` with
+  `retriable = false`, and `retry` refuses them unless `force` is set. Model, timeout, storage and
+  internal failures are retriable.
+- **What a retry does.** It resubmits the stored payload unchanged, so the item keeps its message
+  id, sender, agent and source. Ingest dedups by id and content, so a retry never writes twice.
+- **Retry limit.** Each retry counts, and a letter stops at the limit. A retry that can't be
+  queued because the ingest queue is full isn't counted.
+- **Restarts.** Letters persist. One left `retrying` when the process stopped goes back to
+  `pending` the next time a streaming instance retries anything.
+- **What `resolve` changes.** Only the letter.
+- **Health.** `memory.health()` counts `dead_lettered`, `retries` and `retries_succeeded` since
+  start. `dl.counts()` gives the stored totals per status.
+
+**Automatic retries** are off by default. With `dead_letter_auto_retry = true`, a background task
+retries pending, retriable letters once their backoff has elapsed:
+- the first retry waits `dead_letter_retry_backoff_ms` (default 30 s);
+- each later retry waits twice as long, up to `dead_letter_retry_max_backoff_ms` (default 1 h);
+- each pass takes at most 32 letters, and letters still stop at the retry limit;
+- permanent failures are never retried automatically.
+
+The schedule is stored on the letters, so it carries across restarts. `flush` waits for a retry
+the task has already started, but not for one that isn't due yet. Retry claims are serialized
+within one process; don't run two processes that both retry against one store.
+
 ### Ingest diagnostics
 
 Ingest is best-effort in the same way recall is: without the NLP model, rules extract entities

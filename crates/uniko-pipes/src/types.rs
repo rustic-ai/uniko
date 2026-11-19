@@ -308,7 +308,10 @@ impl IngestSource {
 }
 
 /// A task submitted to the ingest pipeline.
-#[derive(Debug, Clone)]
+///
+/// Serializable so a dead-lettered task can be stored and replayed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "task", rename_all = "snake_case")]
 pub enum IngestTask {
     /// Ingest a conversation message.
     Message(IngestMessage),

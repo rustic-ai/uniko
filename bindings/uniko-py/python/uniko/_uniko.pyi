@@ -7,6 +7,7 @@ the async method returns an awaitable driven by ``asyncio``; its ``*_sync``
 twin blocks the calling thread and returns the resolved value directly.
 """
 
+import builtins
 import datetime
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Awaitable, Literal, final
@@ -14,6 +15,7 @@ from typing import Any, Awaitable, Literal, final
 from uniko.models.config import UnikoConfigModel
 from uniko.types import (
     CircuitState,
+    DeadLetterStatus,
     GoalPhase,
     IngestKind,
     RecallKind,
@@ -335,6 +337,49 @@ class WorkerHealth:
     items_failed: int
     avg_latency_ms: float
     degradations: dict[str, int]
+    dead_lettered: int
+    retries: int
+    retries_succeeded: int
+    def __repr__(self) -> str: ...
+
+@final
+class DeadLetter:
+    id: str
+    step: str
+    error: str
+    error_kind: str | None
+    retriable: bool
+    status: DeadLetterStatus
+    retry_count: int
+    max_retries: int
+    ingest_type: str | None
+    agent_id: str | None
+    replayable: bool
+    created_at: datetime.datetime | None
+    updated_at: datetime.datetime | None
+    next_retry_at: datetime.datetime | None
+    resolved_at: datetime.datetime | None
+    resolution: str | None
+    def __repr__(self) -> str: ...
+
+@final
+class DeadLetters:
+    def list(
+        self, *, status: DeadLetterStatus | None = None, limit: int | None = None
+    ) -> Awaitable[builtins.list[DeadLetter]]: ...
+    def list_sync(
+        self, *, status: DeadLetterStatus | None = None, limit: int | None = None
+    ) -> builtins.list[DeadLetter]: ...
+    def get(self, id: str) -> Awaitable[DeadLetter | None]: ...
+    def get_sync(self, id: str) -> DeadLetter | None: ...
+    def counts(self) -> Awaitable[dict[str, int]]: ...
+    def counts_sync(self) -> dict[str, int]: ...
+    def retry(self, id: str, *, force: bool = False) -> Awaitable[None]: ...
+    def retry_sync(self, id: str, *, force: bool = False) -> None: ...
+    def retry_pending(self, limit: int = 100) -> Awaitable[dict[str, Any]]: ...
+    def retry_pending_sync(self, limit: int = 100) -> dict[str, Any]: ...
+    def resolve(self, id: str, note: str | None = None) -> Awaitable[bool]: ...
+    def resolve_sync(self, id: str, note: str | None = None) -> bool: ...
     def __repr__(self) -> str: ...
 
 @final
@@ -1130,6 +1175,8 @@ class Uniko:
     def agent(self, agent_id: str) -> Agent: ...
     def config(self) -> dict[str, Any]: ...
     def health(self) -> PipelineHealth | None: ...
+    @property
+    def dead_letters(self) -> DeadLetters: ...
     def add_team_member(self, participant_id: str, team_id: str) -> Awaitable[bool]: ...
     def add_team_member_sync(self, participant_id: str, team_id: str) -> bool: ...
     def remove_team_member(
@@ -1197,6 +1244,8 @@ __all__ = [
     "SummarizeReport",
     "PipelineHealth",
     "WorkerHealth",
+    "DeadLetter",
+    "DeadLetters",
     "ConsolidationReport",
     "PromotionReport",
     "TopicReport",

@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..types import (
     CircuitState,
+    DeadLetterStatus,
     GoalPhase,
     IngestKind,
     RecallKind,
@@ -576,9 +577,39 @@ class WorkerHealth(BaseModel):
     items_failed: int
     avg_latency_ms: float
     degradations: dict[str, int] = Field(default_factory=dict)
+    dead_lettered: int = 0
+    retries: int = 0
+    retries_succeeded: int = 0
 
     @classmethod
     def from_native(cls, native: Any) -> "WorkerHealth":
+        return cls.model_validate(native)
+
+
+class DeadLetter(BaseModel):
+    """One dead-lettered streaming item (native ``DeadLetter``)."""
+
+    model_config = _OUT
+
+    id: str
+    step: str
+    error: str
+    error_kind: Optional[str] = None
+    retriable: bool
+    status: DeadLetterStatus
+    retry_count: int
+    max_retries: int
+    ingest_type: Optional[str] = None
+    agent_id: Optional[str] = None
+    replayable: bool
+    created_at: Optional[datetime.datetime] = None
+    updated_at: Optional[datetime.datetime] = None
+    next_retry_at: Optional[datetime.datetime] = None
+    resolved_at: Optional[datetime.datetime] = None
+    resolution: Optional[str] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "DeadLetter":
         return cls.model_validate(native)
 
 
@@ -753,6 +784,7 @@ __all__ = [
     "SummarizeReport",
     "WorkerHealth",
     "PipelineHealth",
+    "DeadLetter",
     "PromotionReport",
     "TopicReport",
     "ConsolidationReport",

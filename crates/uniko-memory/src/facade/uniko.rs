@@ -236,6 +236,13 @@ impl Uniko {
         self.streaming.as_ref().map(|pipeline| pipeline.health())
     }
 
+    /// The streaming pipeline's dead letters: list, count, retry and
+    /// resolve ingest items that failed. See [`DeadLetters`](crate::DeadLetters).
+    #[must_use]
+    pub fn dead_letters(&self) -> crate::DeadLetters {
+        crate::DeadLetters::new(&self.kb, self.streaming.clone())
+    }
+
     /// Fill `Chunk.search_text` for chunks written before it existed, so
     /// the lexical recall channel and [`Sources::search`](crate::Sources::search)
     /// see them. Run it once after opening a store from an earlier release;

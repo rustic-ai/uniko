@@ -22,6 +22,7 @@ native method has no counterpart here.
 
 from __future__ import annotations
 
+import builtins
 import datetime
 from collections.abc import Sequence
 from typing import Any, Literal, Optional
@@ -46,6 +47,7 @@ from .outputs import (
     FactUpsert,
     MatchedProcedure,
     PipelineHealth,
+    DeadLetter,
     RuleView,
     SummarizeReport,
     TaskView,
@@ -97,6 +99,57 @@ class TypedData:
 
 
 # ── Sources ────────────────────────────────────────────────────────────────
+
+
+class TypedDeadLetters:
+    """Typed wrapper over the native ``DeadLetters`` handle."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def list(
+        self, *, status: Optional[str] = None, limit: Optional[int] = None
+    ) -> builtins.list[DeadLetter]:
+        rows = await self._inner.list(status=status, limit=limit)
+        return [DeadLetter.from_native(r) for r in rows]
+
+    def list_sync(
+        self, *, status: Optional[str] = None, limit: Optional[int] = None
+    ) -> builtins.list[DeadLetter]:
+        rows = self._inner.list_sync(status=status, limit=limit)
+        return [DeadLetter.from_native(r) for r in rows]
+
+    async def get(self, id: str) -> Optional[DeadLetter]:
+        native = await self._inner.get(id)
+        return None if native is None else DeadLetter.from_native(native)
+
+    def get_sync(self, id: str) -> Optional[DeadLetter]:
+        native = self._inner.get_sync(id)
+        return None if native is None else DeadLetter.from_native(native)
+
+    async def counts(self) -> dict[str, int]:
+        return await self._inner.counts()
+
+    def counts_sync(self) -> dict[str, int]:
+        return self._inner.counts_sync()
+
+    async def retry(self, id: str, *, force: bool = False) -> None:
+        await self._inner.retry(id, force=force)
+
+    def retry_sync(self, id: str, *, force: bool = False) -> None:
+        self._inner.retry_sync(id, force=force)
+
+    async def retry_pending(self, limit: int = 100) -> dict[str, Any]:
+        return await self._inner.retry_pending(limit)
+
+    def retry_pending_sync(self, limit: int = 100) -> dict[str, Any]:
+        return self._inner.retry_pending_sync(limit)
+
+    async def resolve(self, id: str, note: Optional[str] = None) -> bool:
+        return await self._inner.resolve(id, note)
+
+    def resolve_sync(self, id: str, note: Optional[str] = None) -> bool:
+        return self._inner.resolve_sync(id, note)
 
 
 class TypedSources:
@@ -903,6 +956,10 @@ class TypedUniko:
         native = self._inner.health()
         return None if native is None else PipelineHealth.from_native(native)
 
+    @property
+    def dead_letters(self) -> TypedDeadLetters:
+        return TypedDeadLetters(self._inner.dead_letters)
+
     async def add_team_member(self, participant_id: str, team_id: str) -> bool:
         return await self._inner.add_team_member(participant_id, team_id)
 
@@ -983,4 +1040,5 @@ __all__ = [
     "TypedSession",
     "TypedData",
     "TypedGoals",
+    "TypedDeadLetters",
 ]

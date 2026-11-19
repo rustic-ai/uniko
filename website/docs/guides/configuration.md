@@ -405,9 +405,14 @@ and `IvfRq` for different scale / recall / memory trade-offs.
 | `consolidation_queue_capacity`| `32`     | Bounded channel capacity for the consolidation worker. |
 | `circuit_failure_threshold`   | `5`      | Consecutive failures before the circuit breaker opens. |
 | `circuit_recovery_ms`         | `60000`  | Milliseconds the breaker stays open before probing. |
+| `dead_letter_max_retries`     | `3`      | Retries a dead-lettered streaming item gets before it is `exhausted`. |
+| `dead_letter_auto_retry`      | `false`  | Retry dead letters in the background once their backoff elapses. |
+| `dead_letter_retry_backoff_ms`| `30000`  | Wait before a dead letter's first retry; doubles on each later one. |
+| `dead_letter_retry_max_backoff_ms` | `3600000` | Longest wait between retries of one dead letter. |
 
 These configure the streaming pipeline (`streaming(true)` on the builder).
-`validate()` rejects a queue capacity of `0`.
+`validate()` rejects a queue capacity of `0`, and a retry backoff of `0` or one longer than the
+maximum backoff.
 
 ### Blob storage and external files
 

@@ -135,6 +135,12 @@ class UnikoConfigModel(BaseModel):
     circuit_failure_threshold: int = 5
     circuit_recovery_ms: int = 60_000
 
+    # Dead letters.
+    dead_letter_max_retries: int = 3
+    dead_letter_auto_retry: bool = False
+    dead_letter_retry_backoff_ms: int = 30_000
+    dead_letter_retry_max_backoff_ms: int = 3_600_000
+
     # Chunking.
     message_chunk_threshold: int = 1024
     action_output_artifact_threshold: int = 256

@@ -15,11 +15,19 @@ use uniko_pipes::step::{PipelineContext, Step};
 use uniko_pipes::types::{
     ConsolidationTask, IngestTask, ItemResult, ObservationsReady, StepErrorPolicy, StepOutcome,
 };
-use uniko_store::KnowledgeBase;
+use uniko_store::{KnowledgeBase, UnikoError};
+
+/// One item on the ingest channel: a task, and the dead letter it retries
+/// when it is a retry.
+#[derive(Debug)]
+pub(crate) struct IngestJob {
+    pub(crate) task: IngestTask,
+    pub(crate) retry_of: Option<String>,
+}
 
 /// Long-running ingest worker receiving tasks via a bounded channel.
 pub(crate) struct IngestWorker {
-    rx: mpsc::Receiver<IngestTask>,
+    rx: mpsc::Receiver<IngestJob>,
     steps: Arc<Vec<Box<dyn Step>>>,
     semaphore: Arc<Semaphore>,
     cancel: CancellationToken,
@@ -27,7 +35,6 @@ pub(crate) struct IngestWorker {
     llm_breaker: Arc<CircuitBreaker>,
     dlq: Arc<DeadLetterQueue>,
     health: Arc<Mutex<HealthTracker>>,
-    dlq_max_retries: u32,
     /// Sender for notifying the consolidation worker that a batch of
     /// Observations landed. Without this the per-agent counter never
     /// advances and neither the threshold nor the periodic timer fires.
@@ -46,7 +53,7 @@ impl IngestWorker {
         reason = "constructor assembles all worker dependencies"
     )]
     pub(crate) fn new(
-        rx: mpsc::Receiver<IngestTask>,
+        rx: mpsc::Receiver<IngestJob>,
         steps: Vec<Box<dyn Step>>,
         concurrency: usize,
         cancel: CancellationToken,
@@ -54,7 +61,6 @@ impl IngestWorker {
         llm_breaker: Arc<CircuitBreaker>,
         dlq: Arc<DeadLetterQueue>,
         health: Arc<Mutex<HealthTracker>>,
-        dlq_max_retries: u32,
         consolidation_tx: mpsc::Sender<ConsolidationTask>,
         inflight: Arc<AtomicUsize>,
     ) -> Self {
@@ -67,7 +73,6 @@ impl IngestWorker {
             llm_breaker,
             dlq,
             health,
-            dlq_max_retries,
             consolidation_tx,
             inflight,
         }
@@ -87,7 +92,7 @@ impl IngestWorker {
 
                 task = self.rx.recv() => {
                     match task {
-                        Some(task) => self.process(task),
+                        Some(job) => self.process(job),
                         None => {
                             tracing::info!("ingest channel closed");
                             break;
@@ -100,7 +105,8 @@ impl IngestWorker {
     }
 
     /// Spawn a concurrent task for one ingest item.
-    fn process(&self, task: IngestTask) {
+    fn process(&self, job: IngestJob) {
+        let IngestJob { task, retry_of } = job;
         let permit = self.semaphore.clone();
         let steps = self.steps.clone();
         let item_cancel = self.cancel.child_token();
@@ -108,7 +114,6 @@ impl IngestWorker {
         let breaker = self.llm_breaker.clone();
         let dlq = self.dlq.clone();
         let health = self.health.clone();
-        let dlq_max = self.dlq_max_retries;
         let consolidation_tx = self.consolidation_tx.clone();
         let inflight = self.inflight.clone();
 
@@ -155,10 +160,10 @@ impl IngestWorker {
             populate_ingest_metadata(&task, &mut ctx);
 
             metrics::emit_ingest_item();
-            let (result, diagnostics) =
-                uniko_store::diagnostics::collect(run_step_chain(&steps, &mut ctx, &dlq, dlq_max))
-                    .await;
+            let ((result, dead), diagnostics) =
+                uniko_store::diagnostics::collect(run_step_chain(&steps, &mut ctx)).await;
             let elapsed_ms = start.elapsed().as_millis() as f64;
+            record_dead_letter(&dlq, &health, &task, retry_of.as_deref(), dead, ctx.node_id).await;
 
             // Tell the consolidation worker that new Observations landed, so
             // its per-agent counter advances and the threshold / periodic
@@ -251,14 +256,15 @@ fn populate_ingest_metadata(task: &IngestTask, ctx: &mut PipelineContext) {
 ///
 /// Each step's failure is handled according to its
 /// [`StepErrorPolicy`].  The chain continues unless `Abort` is
-/// declared or the cancellation token fires.
+/// declared or the cancellation token fires. Returns the item's result and
+/// every failure whose policy is `DeadLetter`, with its error intact so the
+/// dead letter can record whether a retry may succeed.
 pub(crate) async fn run_step_chain(
     steps: &[Box<dyn Step>],
     ctx: &mut PipelineContext,
-    dlq: &DeadLetterQueue,
-    dlq_max_retries: u32,
-) -> ItemResult {
+) -> (ItemResult, Vec<(String, UnikoError)>) {
     let mut result = ItemResult::new(ctx.node_id);
+    let mut dead = Vec::new();
 
     for step in steps {
         if ctx.cancel.is_cancelled() {
@@ -282,55 +288,63 @@ pub(crate) async fn run_step_chain(
                 result.steps_skipped.push(step_name);
                 continue;
             }
-            Ok(StepOutcome::Failed { error, policy }) => (error, policy),
+            // A step's own failure report carries only text, so it is
+            // treated as one a retry may fix.
+            Ok(StepOutcome::Failed { error, policy }) => (UnikoError::Internal(error), policy),
             // Transport-level failure (Step::execute returned Err). No
             // StepOutcome to consult — default to DeadLetter so the item
             // is preserved for inspection / retry.
-            Err(e) => (e.to_string(), StepErrorPolicy::DeadLetter),
+            Err(e) => (e, StepErrorPolicy::DeadLetter),
         };
-        if handle_failure(
-            &step_name,
-            &error,
-            policy,
-            ctx,
-            dlq,
-            dlq_max_retries,
-            &mut result,
-        )
-        .await
-        {
-            break;
+        tracing::warn!(error = %error, policy = ?policy, "step failed");
+        result
+            .steps_failed
+            .push((step_name.clone(), error.to_string()));
+        match policy {
+            StepErrorPolicy::Skip => {}
+            StepErrorPolicy::DeadLetter => dead.push((step_name, error)),
+            StepErrorPolicy::Abort => break,
         }
     }
-    result
+    (result, dead)
 }
 
-/// Handle a step failure. Returns `true` if the chain should abort.
-async fn handle_failure(
-    step_name: &str,
-    error: &str,
-    policy: StepErrorPolicy,
-    ctx: &PipelineContext,
+/// Record the outcome of an item against the dead-letter queue.
+///
+/// - A new item with a dead-letter failure becomes one letter (the first
+///   such failure; later ones in the same chain are only logged).
+/// - A retry updates the letter it retries: resolved when nothing failed,
+///   otherwise back to pending or exhausted.
+///
+/// A queue write failure is logged, never raised: the item itself has
+/// already been processed.
+async fn record_dead_letter(
     dlq: &DeadLetterQueue,
-    dlq_max_retries: u32,
-    result: &mut ItemResult,
-) -> bool {
-    tracing::warn!(error = %error, policy = ?policy, "step failed");
-    result
-        .steps_failed
-        .push((step_name.to_owned(), error.to_owned()));
-
-    match policy {
-        StepErrorPolicy::Skip => false,
-        StepErrorPolicy::DeadLetter => {
-            if let Err(e) = dlq
-                .store(step_name, error, ctx.node_id, dlq_max_retries)
-                .await
-            {
-                tracing::error!(error = %e, "failed to store dead letter");
+    health: &Mutex<HealthTracker>,
+    task: &IngestTask,
+    retry_of: Option<&str>,
+    dead: Vec<(String, UnikoError)>,
+    node_ref: uniko_store::NodeId,
+) {
+    match (retry_of, dead.into_iter().next()) {
+        (Some(id), None) => {
+            if let Err(e) = dlq.retry_succeeded(id).await {
+                tracing::error!(error = %e, dead_letter = id, "failed to resolve dead letter");
             }
-            false
+            health.lock().unwrap().record_retry_success();
         }
-        StepErrorPolicy::Abort => true,
+        (Some(id), Some((step, err))) => {
+            if let Err(e) = dlq.retry_failed(id, &step, &err).await {
+                tracing::error!(error = %e, dead_letter = id, "failed to update dead letter");
+            }
+        }
+        (None, Some((step, err))) => match dlq.store(&step, &err, Some(task), node_ref).await {
+            Ok(id) => {
+                tracing::info!(dead_letter = %id, step = %step, "item dead-lettered");
+                health.lock().unwrap().record_dead_letter();
+            }
+            Err(e) => tracing::error!(error = %e, "failed to store dead letter"),
+        },
+        (None, None) => {}
     }
 }

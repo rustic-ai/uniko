@@ -122,6 +122,15 @@ pymethods_with_sync! {
             config_to_py(py, uniko.config())
         }
 
+        /// The streaming pipeline's dead letters: list, count, retry and
+        /// resolve ingest items that failed.
+        #[getter]
+        fn dead_letters(&self) -> PyResult<crate::dead_letters::PyDeadLetters> {
+            let guard = self.inner.lock().expect("Uniko mutex poisoned");
+            let uniko = guard.as_ref().ok_or_else(closed)?;
+            Ok(crate::dead_letters::PyDeadLetters::wrap(uniko.dead_letters()))
+        }
+
         /// A health snapshot of the streaming pipeline, or `None` when the
         /// instance was built without `streaming(True)`.
         fn health(&self, py: Python<'_>) -> PyResult<Option<Py<PyPipelineHealth>>> {

@@ -56,11 +56,11 @@ pub use consolidation::{CycleStats, TripleSource};
 pub use episode::{RecordEpisodeParams, record_episode};
 #[doc(inline)]
 pub use facade::{
-    ArtifactView, Capabilities, Data, FinalizeReport, GoalContext, GoalPhase, GoalView, Goals,
-    LlmSpec, MessageView, ObserveResult, Outline, OutlineEntry, ReadRange, ReadResult, RecallScope,
-    Requirement, SearchHit, SearchOptions, Session, SourceRef, Sources, SummarizeReport, TaskPhase,
-    TaskView, ToolCall, ToolCallResult, ToolCallView, ToolOutput, Turn, TurnUnit, Uniko,
-    UnikoBuilder, UnitResult,
+    ArtifactView, Capabilities, Data, DeadLetters, FinalizeReport, GoalContext, GoalPhase,
+    GoalView, Goals, LlmSpec, MessageView, ObserveResult, Outline, OutlineEntry, ReadRange,
+    ReadResult, RecallScope, Requirement, SearchHit, SearchOptions, Session, SourceRef, Sources,
+    SummarizeReport, TaskPhase, TaskView, ToolCall, ToolCallResult, ToolCallView, ToolOutput, Turn,
+    TurnUnit, Uniko, UnikoBuilder, UnitResult,
 };
 #[doc(inline)]
 pub use fact::{AssertFactParams, InvalidateFactParams, assert_fact, invalidate_fact};
@@ -83,6 +83,8 @@ pub use uniko_extract::ingest::{
     PdfIngestResult, TextExtractor, ingest_source, resolve_mime,
 };
 // Content-type taxonomy shared by ingest routing and recall channels.
+/// What [`DeadLetters::retry_pending`] did.
+pub use pipeline::RetryReport;
 /// Cortex sweep outcomes, part of [`ConsolidationReport`].
 pub use uniko_cortex::{
     procedures::{MatchedProcedure, PromotionReport},
@@ -92,6 +94,10 @@ pub use uniko_cortex::{
 pub use uniko_pipes::CircuitState;
 #[doc(no_inline)]
 pub use uniko_pipes::content::{ContentType, Mime, Modality};
+/// Dead-letter views and options, used by [`DeadLetters`].
+pub use uniko_pipes::dead_letter::{
+    DeadLetter, DeadLetterCounts, DeadLetterFilter, DeadLetterStatus,
+};
 /// Streaming-pipeline health, returned by [`Uniko::health`].
 pub use uniko_pipes::health::{PipelineHealth, WorkerHealth, WorkerStatus};
 #[doc(no_inline)]
