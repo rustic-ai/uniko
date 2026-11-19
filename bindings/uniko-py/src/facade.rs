@@ -98,6 +98,100 @@ pymethods_with_sync! {
             })
         }
 
+        /// What the store at ``path`` was built with, and whether a config
+        /// can open it as is. ``config`` is a partial config dict over the
+        /// defaults and ``embedding`` a preset name or embedding section, as
+        /// on the builder. Reads only: nothing is written and no model loads.
+        #[staticmethod]
+        #[pyo3(signature = (path, config=None, *, embedding=None))]
+        fn inspect_store<'py>(
+            py: Python<'py>,
+            path: String,
+            config: Option<Bound<'py, PyAny>>,
+            embedding: Option<Bound<'py, PyAny>>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let target = crate::store::target_config(config.as_ref(), embedding.as_ref())?;
+            bridge!(py, _g = (), {
+                let report = Uniko::inspect_store(&path, &target).await.map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyStoreReport::from_rust(py, &report))
+            })
+        }
+
+        /// Blocking variant of ``inspect_store``.
+        #[staticmethod]
+        #[pyo3(signature = (path, config=None, *, embedding=None))]
+        fn inspect_store_sync<'py>(
+            py: Python<'py>,
+            path: String,
+            config: Option<Bound<'py, PyAny>>,
+            embedding: Option<Bound<'py, PyAny>>,
+        ) -> PyResult<Py<crate::store::PyStoreReport>> {
+            let target = crate::store::target_config(config.as_ref(), embedding.as_ref())?;
+            bridge_sync!(py, _g = (), {
+                let report = Uniko::inspect_store(&path, &target).await.map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyStoreReport::from_rust(py, &report))
+            })
+        }
+
+        /// Bring the store at ``path`` in line with a config in place:
+        /// ``"enable_hybrid"`` (add and fill the sparse and ColBERT columns,
+        /// same model) or ``"rebuild_vector_indexes"`` (new metric,
+        /// algorithm, query prefix or batch size; a document prefix change
+        /// needs a fresh store). Raises ``IncompatibleStoreError`` when the
+        /// migration can't resolve the differences; a rerun resumes.
+        ///
+        /// ``progress`` is called with a dict (``migration``, ``phase``,
+        /// ``label``, ``done``, ``total``) after each phase and batch. It
+        /// can't cancel the migration: an exception it raises
+        /// (``KeyboardInterrupt`` and ``SystemExit`` included) or a panic it
+        /// sets off is printed to stderr and ignored. An ``async def``
+        /// callback is not awaited. The callback must not call other
+        /// ``_sync`` uniko methods.
+        #[staticmethod]
+        #[pyo3(signature = (path, migration, config=None, *, embedding=None, progress=None))]
+        fn migrate_store<'py>(
+            py: Python<'py>,
+            path: String,
+            migration: String,
+            config: Option<Bound<'py, PyAny>>,
+            embedding: Option<Bound<'py, PyAny>>,
+            progress: Option<Py<PyAny>>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let target = crate::store::target_config(config.as_ref(), embedding.as_ref())?;
+            let migration = crate::store::migration_from_str(&migration)?;
+            bridge!(py, _g = (), {
+                let report = Uniko::migrate_store(&path, target, migration, crate::store::progress_fn(progress))
+                    .await
+                    .map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyMigrationReport::from_rust(py, &report))
+            })
+        }
+
+        /// Blocking variant of ``migrate_store``, with the same ``progress``
+        /// rules: exceptions and panics in the callback are printed to
+        /// stderr and ignored, the callback can't cancel the migration, an
+        /// ``async def`` callback is not awaited, and the callback must not
+        /// call other ``_sync`` uniko methods.
+        #[staticmethod]
+        #[pyo3(signature = (path, migration, config=None, *, embedding=None, progress=None))]
+        fn migrate_store_sync<'py>(
+            py: Python<'py>,
+            path: String,
+            migration: String,
+            config: Option<Bound<'py, PyAny>>,
+            embedding: Option<Bound<'py, PyAny>>,
+            progress: Option<Py<PyAny>>,
+        ) -> PyResult<Py<crate::store::PyMigrationReport>> {
+            let target = crate::store::target_config(config.as_ref(), embedding.as_ref())?;
+            let migration = crate::store::migration_from_str(&migration)?;
+            bridge_sync!(py, _g = (), {
+                let report = Uniko::migrate_store(&path, target, migration, crate::store::progress_fn(progress))
+                    .await
+                    .map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyMigrationReport::from_rust(py, &report))
+            })
+        }
+
         /// Start a builder for non-default construction.
         #[staticmethod]
         fn builder() -> PyUnikoBuilder {
@@ -184,6 +278,19 @@ pymethods_with_sync! {
                     .remove_team_member(&participant_id, &team_id)
                     .await
                     .map_err(to_pyerr)
+
+            }
+        }
+
+        /// What this instance's store was built with.
+        fn store_info / store_info_sync(&self, py) -> Py<crate::store::PyStoreInfo> {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                let info = instance.store_info().await.map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyStoreInfo::from_rust(py, &info))
 
             }
         }

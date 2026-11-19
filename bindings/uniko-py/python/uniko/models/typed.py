@@ -24,10 +24,10 @@ from __future__ import annotations
 
 import builtins
 import datetime
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Optional
 
-from ..types import DeadLetterStatus
+from ..types import DeadLetterStatus, MigrationName, MigrationProgressEvent
 from .config import UnikoConfigModel
 from .outputs import (
     AbductionResult,
@@ -50,6 +50,9 @@ from .outputs import (
     PipelineHealth,
     DeadLetter,
     Registration,
+    StoreInfo,
+    StoreReport,
+    MigrationReport,
     DeadLetterCounts,
     RetryReport,
     RuleView,
@@ -945,6 +948,62 @@ class TypedUniko:
         from uniko import _uniko
 
         return TypedUnikoBuilder(_uniko.Uniko.builder())
+
+    @staticmethod
+    async def inspect_store(
+        path: str, config: Any = None, *, embedding: Any = None
+    ) -> StoreReport:
+        from uniko import _uniko
+
+        native = await _uniko.Uniko.inspect_store(path, config, embedding=embedding)
+        return StoreReport.from_native(native)
+
+    @staticmethod
+    def inspect_store_sync(
+        path: str, config: Any = None, *, embedding: Any = None
+    ) -> StoreReport:
+        from uniko import _uniko
+
+        native = _uniko.Uniko.inspect_store_sync(path, config, embedding=embedding)
+        return StoreReport.from_native(native)
+
+    @staticmethod
+    async def migrate_store(
+        path: str,
+        migration: MigrationName,
+        config: Any = None,
+        *,
+        embedding: Any = None,
+        progress: Optional[Callable[[MigrationProgressEvent], object]] = None,
+    ) -> MigrationReport:
+        from uniko import _uniko
+
+        native = await _uniko.Uniko.migrate_store(
+            path, migration, config, embedding=embedding, progress=progress
+        )
+        return MigrationReport.from_native(native)
+
+    @staticmethod
+    def migrate_store_sync(
+        path: str,
+        migration: MigrationName,
+        config: Any = None,
+        *,
+        embedding: Any = None,
+        progress: Optional[Callable[[MigrationProgressEvent], object]] = None,
+    ) -> MigrationReport:
+        from uniko import _uniko
+
+        native = _uniko.Uniko.migrate_store_sync(
+            path, migration, config, embedding=embedding, progress=progress
+        )
+        return MigrationReport.from_native(native)
+
+    async def store_info(self) -> StoreInfo:
+        return StoreInfo.from_native(await self._inner.store_info())
+
+    def store_info_sync(self) -> StoreInfo:
+        return StoreInfo.from_native(self._inner.store_info_sync())
 
     def agent(self, agent_id: str) -> TypedAgent:
         return TypedAgent(self._inner.agent(agent_id))

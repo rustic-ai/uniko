@@ -397,6 +397,13 @@ The default is `HnswSq { m: 16, ef_construction: 100 }` with `Cosine`
 distance. Other variants cover `HnswFlat`, `HnswPq`, `IvfSq`, `IvfPq`,
 and `IvfRq` for different scale / recall / memory trade-offs.
 
+Reopening a store with a different algorithm or metric, `embedding.query_prefix` or
+`embedding.batch_size` is refused with `UnikoError::IncompatibleStore` until you run the
+`rebuild_vector_indexes` migration. A PQ variant with `sub_vectors: 0` (automatic) is compared
+with the count uni-db resolved and stored, so it reopens unchanged. Changing the embedding model,
+its dimensions or `embedding.document_prefix` needs a fresh store, since the stored vectors were
+made with the old ones. See [Changing the Embedding Model](model-migration.md).
+
 ### Pipelines and circuit breaker
 
 | Field                         | Default  | Meaning |
@@ -420,7 +427,7 @@ maximum backoff.
 |---------------------------|----------------|---------|
 | `blob_storage`            | `BlobStorage::Lance` | Backend for `:ArtifactContent` bytes; persisted on first open. Reopening with a different variant is a hard error (no implicit migration). |
 | `catalog_path`            | `None`         | Override the built-in xervo model catalog with a JSON file. |
-| `schema_path`             | `None`         | Load the schema from a JSON file instead of registering it programmatically. |
+| `schema_path`             | `None`         | Load the schema from a JSON file instead of registering it programmatically. Skips the open-time store compatibility check (a changed model or dimensions is still refused, with `Config`), and `migrate_store` refuses a config that sets it. |
 | `observation_rules_path`  | `None`         | Load observation-extraction patterns from a YAML file instead of the bundled `english.yml`. |
 
 !!! warning "`schema_path` and the tracked snapshot"

@@ -204,5 +204,5 @@ def test_reopen_with_a_different_embedding_raises(tmp_path) -> None:
     store = str(tmp_path / "store")
     uniko.Uniko.builder().path(store).build_sync().shutdown_sync()
     builder = uniko.Uniko.builder().path(store).embedding({"model_id": "SomethingElse"})
-    with pytest.raises(uniko.ConfigError, match="embedding mismatch"):
+    with pytest.raises(uniko.ConfigError, match="incompatible store"):
         builder.build_sync()

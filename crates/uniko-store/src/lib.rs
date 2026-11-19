@@ -45,8 +45,12 @@ pub use model_state::{ModelState, ModelStatus};
 pub use readiness::{ReadinessCode, ReadinessFailure};
 pub use shared_runtime::{PrefetchPolicy, SharedRuntime};
 pub use storage::KnowledgeBase;
+pub use storage::compatibility::{
+    Compatibility, Migration, StoreDifference, StoreInfo, StoredEmbedding, Verdict,
+};
 #[doc(inline)]
 pub use storage::deletion::DeletionReport;
+pub use storage::migrate_store::{MigrationProgress, MigrationReport};
 // Diagnostic batch-recording surface, only present with the
 // `batch-record` feature (used by the bulk-vs-UNWIND benchmark).
 #[cfg(feature = "batch-record")]

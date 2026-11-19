@@ -25,5 +25,6 @@ mod scope_tests;
 mod search_tests;
 mod session_setup_lock_tests;
 mod storage_tests;
+mod store_compatibility;
 mod traversal_tests;
 mod unwind_batch_test;

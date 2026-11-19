@@ -33,6 +33,7 @@ mod outputs;
 mod scope;
 mod session;
 mod sources;
+mod store;
 mod tool;
 
 use pyo3::prelude::*;
@@ -167,6 +168,7 @@ fn _uniko(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<session::PyTurn>()?;
     m.add_class::<tool::PyToolCall>()?;
     sources::register(m)?;
+    store::register(m)?;
     m.add_class::<data::PyData>()?;
     m.add_class::<dead_letters::PyDeadLetters>()?;
     m.add_class::<dead_letters::PyDeadLetter>()?;
