@@ -37,12 +37,16 @@ WorkerStatus = Literal["healthy", "degraded", "backpressured", "stalled"]
 #: The LLM circuit breaker's state (``PipelineHealth.llm_circuit``).
 CircuitState = Literal["closed", "open", "half_open"]
 
+#: What ``Agent.register`` did (``Registration.outcome``).
+RegistrationOutcome = Literal["created", "upgraded", "existing"]
+
 #: Where a dead letter is in its lifecycle (``DeadLetter.status``).
 DeadLetterStatus = Literal["pending", "retrying", "exhausted", "resolved", "legacy"]
 
 __all__ = [
     "CircuitState",
     "DeadLetterStatus",
+    "RegistrationOutcome",
     "GoalPhase",
     "IngestKind",
     "RecallKind",

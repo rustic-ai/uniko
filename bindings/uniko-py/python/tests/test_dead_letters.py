@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 
 import uniko
-from uniko.models import DeadLetter
+from uniko.models import DeadLetter, DeadLetterCounts, RetryReport
 from uniko.models.typed import TypedUniko
 
 PNG = bytes([0x42] * 16)
@@ -58,7 +58,7 @@ def test_a_failure_is_listed_retried_and_resolved() -> None:
     assert letter.ingest_type == "source"
     assert (letter.retry_count, letter.max_retries) == (0, 3)
     assert letter.next_retry_at is not None
-    assert uni.dead_letters.counts_sync()["pending"] == 1
+    assert uni.dead_letters.counts_sync().pending == 1
 
     extractor.failing = False
     uni.dead_letters.retry_sync(letter_id)
@@ -89,14 +89,14 @@ async def test_async_resolve_and_retry_pending() -> None:
     dl = uni.dead_letters
     [letter] = await dl.list(status="pending")
     report = await dl.retry_pending()
-    assert report["retried"] == [letter.id] and report["refused"] == []
+    assert report.retried == [letter.id] and report.refused == []
     await session.flush()
     letter = await dl.get(letter.id)
     assert letter is not None and letter.status == "pending"
     assert letter.retry_count == 1
     assert await dl.resolve(letter.id, "not worth keeping")
     assert not await dl.resolve(letter.id)
-    assert (await dl.counts())["resolved"] == 1
+    assert (await dl.counts()).resolved == 1
 
 
 def test_retry_needs_streaming_and_bad_status_is_rejected() -> None:
@@ -119,5 +119,42 @@ def test_typed_dead_letters() -> None:
     [letter] = typed.dead_letters.list_sync()
     assert isinstance(letter, DeadLetter)
     assert letter.status == "pending"
+    counts = typed.dead_letters.counts_sync()
+    assert isinstance(counts, DeadLetterCounts) and counts.pending == 1
+    report = typed.dead_letters.retry_pending_sync()
+    assert isinstance(report, RetryReport) and report.retried == [letter.id]
     health = typed.health()
     assert health is not None and health.ingest.dead_lettered == 1
+
+
+def test_retries_stop_at_the_limit_and_force_goes_past_it() -> None:
+    uni = (
+        uniko.Uniko.builder()
+        .in_memory()
+        .streaming(True)
+        .config({"dead_letter_max_retries": 1})
+        .extractor("image", Flaky())
+        .build_sync()
+    )
+    session, letter_id = _fail_one(uni, "img-4")
+    dl = uni.dead_letters
+    dl.retry_sync(letter_id)
+    session.flush_sync()
+    letter = dl.get_sync(letter_id)
+    assert letter is not None
+    assert (letter.status, letter.retry_count) == ("exhausted", 1)
+    with pytest.raises(uniko.ConfigError):
+        dl.retry_sync(letter_id)
+    dl.retry_sync(letter_id, force=True)
+    session.flush_sync()
+    letter = dl.get_sync(letter_id)
+    assert letter is not None
+    assert (letter.status, letter.retry_count) == ("exhausted", 2)
+    assert dl.resolve_sync(letter_id, "gave up")
+    letter = dl.get_sync(letter_id)
+    assert letter is not None
+    assert (letter.status, letter.resolution, letter.replayable) == (
+        "resolved",
+        "gave up",
+        False,
+    )

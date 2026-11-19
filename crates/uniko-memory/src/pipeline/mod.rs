@@ -65,6 +65,10 @@ pub struct PipelineSystem {
     started_at: Instant,
     config: PipelineConfig,
     retrier: Arc<retry::Retrier>,
+    /// Cancels every worker when the system is dropped, even without
+    /// [`shutdown`](Self::shutdown): otherwise the retry scheduler, which
+    /// holds its own sender and store handle, would keep running.
+    _cancel_on_drop: tokio_util::sync::DropGuard,
 }
 
 /// What [`PipelineSystem::retry_pending`] did.
@@ -74,7 +78,17 @@ pub struct RetryReport {
     /// Letters resubmitted for a retry.
     pub retried: Vec<String>,
     /// Letters that could not be resubmitted, with the reason.
-    pub refused: Vec<(String, String)>,
+    pub refused: Vec<RetryRefusal>,
+}
+
+/// A dead letter [`PipelineSystem::retry_pending`] could not resubmit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RetryRefusal {
+    /// The letter's id.
+    pub id: String,
+    /// Why it was not resubmitted.
+    pub reason: String,
 }
 
 impl PipelineSystem {
@@ -95,11 +109,11 @@ impl PipelineSystem {
         ));
         let dlq = Arc::new(DeadLetterQueue::with_policy(
             kb.clone(),
-            RetryPolicy {
-                max_retries: config.dead_letter_max_retries,
-                backoff_ms: config.dead_letter_retry_backoff_ms,
-                max_backoff_ms: config.dead_letter_retry_max_backoff_ms,
-            },
+            RetryPolicy::new(
+                config.dead_letter_max_retries,
+                config.dead_letter_retry_backoff_ms,
+                config.dead_letter_retry_max_backoff_ms,
+            ),
         ));
 
         // Bounded channels with backpressure.
@@ -142,6 +156,11 @@ impl PipelineSystem {
             ingest_inflight.clone(),
             ingest_health.clone(),
         ));
+        // Return retries a stopped process left mid-flight to `pending`
+        // now, so they can be resolved or retried without waiting for this
+        // pipeline's first retry.
+        let reset = retrier.clone();
+        tokio::spawn(async move { reset.reset_interrupted_once().await });
         let mut workers = vec![ingest_handle, consolidation_handle];
         if config.dead_letter_auto_retry {
             workers.push(
@@ -151,6 +170,7 @@ impl PipelineSystem {
             );
         }
 
+        let cancel_on_drop = shutdown.cancel_on_drop();
         Self {
             shutdown,
             ingest_tx,
@@ -163,6 +183,7 @@ impl PipelineSystem {
             started_at: Instant::now(),
             config,
             retrier,
+            _cancel_on_drop: cancel_on_drop,
         }
     }
 

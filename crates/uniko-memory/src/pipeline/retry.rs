@@ -12,8 +12,8 @@ use uniko_pipes::dead_letter::DeadLetterQueue;
 use uniko_pipes::health::HealthTracker;
 use uniko_store::UnikoError;
 
-use super::RetryReport;
 use super::ingest_worker::IngestJob;
+use super::{RetryRefusal, RetryReport};
 
 /// Letters the scheduler resubmits per pass, so a large backlog drains over
 /// several passes instead of flooding the ingest queue at once.
@@ -21,6 +21,10 @@ const SCHEDULER_BATCH: usize = 32;
 
 /// Longest gap between scheduler passes.
 const MAX_POLL: Duration = Duration::from_secs(60);
+
+/// Shortest gap between scheduler passes, so a tiny backoff can't turn the
+/// scheduler into a busy loop over the store.
+const MIN_POLL: Duration = Duration::from_secs(1);
 
 /// Everything a retry needs, shared by [`PipelineSystem`](super::PipelineSystem)
 /// and the scheduler task.
@@ -52,13 +56,14 @@ impl Retrier {
 
     /// Queue `job` and count it in flight, so `quiesce` waits for it.
     pub(crate) fn submit_job(&self, job: IngestJob) -> Result<(), UnikoError> {
-        self.ingest_tx
-            .try_send(job)
-            .map_err(|e| UnikoError::Pipeline(format!("ingest channel: {e}")))?;
-        // Count the item only once accepted; the worker decrements when it
-        // finishes (see `IngestWorker`'s drop guard).
+        // Count the item before it can reach the worker, which decrements
+        // when it finishes (see `IngestWorker`'s drop guard); counting after
+        // the send let `quiesce` see zero while it was already running.
         self.ingest_inflight.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        self.ingest_tx.try_send(job).map_err(|e| {
+            self.ingest_inflight.fetch_sub(1, Ordering::SeqCst);
+            UnikoError::Pipeline(format!("ingest channel: {e}"))
+        })
     }
 
     pub(crate) async fn retry(&self, id: &str, force: bool) -> Result<(), UnikoError> {
@@ -90,33 +95,44 @@ impl Retrier {
             match self.retry(&id, false).await {
                 Ok(()) => report.retried.push(id),
                 Err(e @ UnikoError::Pipeline(_)) => {
-                    report.refused.push((id, e.to_string()));
+                    report.refused.push(RetryRefusal {
+                        id,
+                        reason: e.to_string(),
+                    });
                     break;
                 }
-                Err(e) => report.refused.push((id, e.to_string())),
+                Err(e) => report.refused.push(RetryRefusal {
+                    id,
+                    reason: e.to_string(),
+                }),
             }
         }
         Ok(report)
     }
 
-    async fn reset_interrupted_once(&self) {
-        self.interrupted_reset
-            .get_or_init(|| async {
-                match self.dlq.reset_interrupted().await {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!(count = n, "dead letters interrupted mid-retry reset"),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "could not reset interrupted dead letters");
-                    }
+    /// Reset letters a stopped process left `retrying`, once. A failed
+    /// reset is attempted again on the next call.
+    pub(crate) async fn reset_interrupted_once(&self) {
+        let outcome = self
+            .interrupted_reset
+            .get_or_try_init(|| async {
+                let n = self.dlq.reset_interrupted().await?;
+                if n > 0 {
+                    tracing::info!(count = n, "dead letters interrupted mid-retry reset");
                 }
+                Ok::<(), UnikoError>(())
             })
             .await;
+        if let Err(e) = outcome {
+            tracing::warn!(error = %e, "could not reset interrupted dead letters; will retry");
+        }
     }
 
     /// Spawn the background scheduler: every pass retries the letters whose
     /// backoff has elapsed, until `cancel` fires.
     ///
-    /// Passes run at the base backoff, at most a minute apart. Only
+    /// Passes run every base backoff, kept between one second and one
+    /// minute; the first runs one interval after start. Only
     /// retriable letters under their retry limit are picked, so a letter
     /// stops at `max_retries` exactly as with explicit retries. A retry it
     /// starts counts as in flight; one not yet due does not, so `quiesce`
@@ -126,7 +142,7 @@ impl Retrier {
         cancel: CancellationToken,
         backoff_ms: u64,
     ) -> JoinHandle<()> {
-        let poll = Duration::from_millis(backoff_ms.max(1)).min(MAX_POLL);
+        let poll = Duration::from_millis(backoff_ms).clamp(MIN_POLL, MAX_POLL);
         tokio::spawn(async move {
             tracing::info!(
                 poll_ms = poll.as_millis() as u64,

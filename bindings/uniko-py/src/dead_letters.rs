@@ -1,7 +1,7 @@
 //! `DeadLetters`: inspect, retry and resolve streaming-ingest failures.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::PyList;
 use uniko_api::tools::{
     DeadLetter, DeadLetterCounts, DeadLetterFilter, DeadLetterStatus, DeadLetters, RetryReport,
 };
@@ -11,18 +11,8 @@ use crate::errors::to_pyerr;
 use crate::macros::pymethods_with_sync;
 
 fn status_from_str(status: &str) -> PyResult<DeadLetterStatus> {
-    Ok(match status {
-        "pending" => DeadLetterStatus::Pending,
-        "retrying" => DeadLetterStatus::Retrying,
-        "exhausted" => DeadLetterStatus::Exhausted,
-        "resolved" => DeadLetterStatus::Resolved,
-        "legacy" => DeadLetterStatus::Legacy,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unknown dead-letter status '{other}'; expected pending, retrying, \
-                 exhausted, resolved or legacy"
-            )));
-        }
+    status.parse().map_err(|e: uniko_api::tools::UnikoError| {
+        pyo3::exceptions::PyValueError::new_err(e.to_string())
     })
 }
 
@@ -124,28 +114,114 @@ impl PyDeadLetter {
     }
 }
 
-fn counts_to_py(py: Python<'_>, c: &DeadLetterCounts) -> PyResult<Py<PyAny>> {
-    let d = PyDict::new(py);
-    d.set_item("pending", c.pending)?;
-    d.set_item("retrying", c.retrying)?;
-    d.set_item("exhausted", c.exhausted)?;
-    d.set_item("resolved", c.resolved)?;
-    d.set_item("legacy", c.legacy)?;
-    Ok(d.into_any().unbind())
+/// How many dead letters are in each status, from ``DeadLetters.counts``.
+#[pyclass(name = "DeadLetterCounts", module = "uniko", frozen)]
+pub struct PyDeadLetterCounts {
+    /// Waiting for a retry.
+    #[pyo3(get)]
+    pending: u64,
+    /// Being retried.
+    #[pyo3(get)]
+    retrying: u64,
+    /// Out of retries, or failed in a way a retry can't fix.
+    #[pyo3(get)]
+    exhausted: u64,
+    /// Retried successfully or resolved.
+    #[pyo3(get)]
+    resolved: u64,
+    /// Written before payloads were kept.
+    #[pyo3(get)]
+    legacy: u64,
 }
 
-fn report_to_py(py: Python<'_>, r: &RetryReport) -> PyResult<Py<PyAny>> {
-    let d = PyDict::new(py);
-    d.set_item("retried", PyList::new(py, &r.retried)?)?;
-    let refused = PyList::empty(py);
-    for (id, reason) in &r.refused {
-        let item = PyDict::new(py);
-        item.set_item("id", id)?;
-        item.set_item("reason", reason)?;
-        refused.append(item)?;
+impl PyDeadLetterCounts {
+    fn from_rust(py: Python<'_>, c: &DeadLetterCounts) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                pending: c.pending,
+                retrying: c.retrying,
+                exhausted: c.exhausted,
+                resolved: c.resolved,
+                legacy: c.legacy,
+            },
+        )
     }
-    d.set_item("refused", refused)?;
-    Ok(d.into_any().unbind())
+}
+
+#[pymethods]
+impl PyDeadLetterCounts {
+    fn __repr__(&self) -> String {
+        format!(
+            "DeadLetterCounts(pending={}, retrying={}, exhausted={}, resolved={}, legacy={})",
+            self.pending, self.retrying, self.exhausted, self.resolved, self.legacy
+        )
+    }
+}
+
+/// A dead letter ``retry_pending`` could not resubmit.
+#[pyclass(name = "RetryRefusal", module = "uniko", frozen)]
+pub struct PyRetryRefusal {
+    /// The letter's id.
+    #[pyo3(get)]
+    id: String,
+    /// Why it was not resubmitted.
+    #[pyo3(get)]
+    reason: String,
+}
+
+#[pymethods]
+impl PyRetryRefusal {
+    fn __repr__(&self) -> String {
+        format!("RetryRefusal(id='{}', reason='{}')", self.id, self.reason)
+    }
+}
+
+/// What ``DeadLetters.retry_pending`` did.
+#[pyclass(name = "RetryReport", module = "uniko", frozen)]
+pub struct PyRetryReport {
+    /// Letters resubmitted for a retry.
+    #[pyo3(get)]
+    retried: Vec<String>,
+    /// Letters that could not be resubmitted.
+    #[pyo3(get)]
+    refused: Vec<Py<PyRetryRefusal>>,
+}
+
+impl PyRetryReport {
+    fn from_rust(py: Python<'_>, r: &RetryReport) -> PyResult<Py<Self>> {
+        let refused = r
+            .refused
+            .iter()
+            .map(|x| {
+                Py::new(
+                    py,
+                    PyRetryRefusal {
+                        id: x.id.clone(),
+                        reason: x.reason.clone(),
+                    },
+                )
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Py::new(
+            py,
+            Self {
+                retried: r.retried.clone(),
+                refused,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyRetryReport {
+    fn __repr__(&self) -> String {
+        format!(
+            "RetryReport(retried={}, refused={})",
+            self.retried.len(),
+            self.refused.len()
+        )
+    }
 }
 
 /// The streaming pipeline's dead letters, from ``Uniko.dead_letters``.
@@ -208,12 +284,12 @@ pymethods_with_sync! {
             }
         }
 
-        /// How many letters are in each status, as a dict keyed by status.
-        fn counts / counts_sync(&self, py) -> Py<PyAny> {
+        /// How many letters are in each status.
+        fn counts / counts_sync(&self, py) -> Py<PyDeadLetterCounts> {
             prepare {}
             run(dl = self.inner.clone()) {
                 let counts = dl.counts().await.map_err(to_pyerr)?;
-                Python::attach(|py| counts_to_py(py, &counts))
+                Python::attach(|py| PyDeadLetterCounts::from_rust(py, &counts))
 
             }
         }
@@ -235,14 +311,13 @@ pymethods_with_sync! {
         }
 
         /// Retry up to ``limit`` pending letters whose failure a retry can
-        /// fix, without waiting for their backoff. Returns
-        /// ``{"retried": [...], "refused": [{"id", "reason"}]}``.
+        /// fix, without waiting for their backoff.
         #[pyo3(signature = (limit=100))]
-        fn retry_pending / retry_pending_sync(&self, py, limit: usize) -> Py<PyAny> {
+        fn retry_pending / retry_pending_sync(&self, py, limit: usize) -> Py<PyRetryReport> {
             prepare {}
             run(dl = self.inner.clone()) {
                 let report = dl.retry_pending(limit).await.map_err(to_pyerr)?;
-                Python::attach(|py| report_to_py(py, &report))
+                Python::attach(|py| PyRetryReport::from_rust(py, &report))
 
             }
         }

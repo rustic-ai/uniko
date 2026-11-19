@@ -435,28 +435,32 @@ let out = ctx.llm_breaker.call(|| async { provider.complete(prompt).await }).awa
 
 `DeadLetterQueue` (`crates/uniko-pipes/src/dead_letter.rs`) stores each failed streaming item as a standalone `DeadLetter` node, with no edges. It keeps the serialized `IngestTask` as `payload`.
 
-**What gets stored.** The worker keeps each step's `UnikoError` instead of only its string (`run_step_chain`). `record_dead_letter` (`crates/uniko-memory/src/pipeline/ingest_worker.rs:321`):
-- stores one letter per new item: its first `DeadLetter`-policy failure;
-- for a retry, updates the letter the retry came from instead.
+**What the worker records.** `run_step_chain` keeps each step's `UnikoError` and reports how the chain ended: completed, cancelled, or aborted. `record_dead_letter` (`crates/uniko-memory/src/pipeline/ingest_worker.rs:366`) then:
+- for a new item, stores one letter: its first `DeadLetter`-policy failure;
+- for a retry, updates the letter it came from:
+  - **completed with no failure:** resolved;
+  - **failed or aborted:** `retry_failed`;
+  - **cancelled by shutdown:** the claim is released, uncounted, since the payload never fully ran.
 
-**Retriable or permanent.** `is_retriable` (`dead_letter.rs:200`) marks `IdConflict`, `Unsupported`, `Pipeline`, `Config`, `Schema` and `Locy` as permanent; every other kind is retriable. `store` (`:300`) writes:
-- a retriable failure as `pending`, with `next_retry_at = now + backoff`;
-- a permanent one as `exhausted`.
+**Retriable or permanent.** `is_retriable` (`dead_letter.rs:239`) marks `IdConflict`, `Unsupported`, `Pipeline`, `Config`, `Schema` and `Locy` as permanent; every other kind is retriable. `store` (`:365`) writes:
+- `pending`, with `next_retry_at = now + backoff`, only when the failure is retriable, the payload serialized, and `max_retries > 0`;
+- `exhausted` otherwise.
 
 **The lifecycle.**
-- `begin_retry` (`:432`) refuses a letter that is resolved, retrying, legacy, past `max_retries` or permanent; `force` overrides the last two. Otherwise it increments `retry_count`, sets `retrying` and returns the task.
-- `release_claim` (`:488`) undoes a claim whose resubmit hit a full queue.
-- `retry_failed` (`:521`) returns the letter to `pending` with the doubled backoff, or `exhausted` once out of retries or permanent.
-- `reset_interrupted` (`:628`) runs once per pipeline, before its first claim, and moves `retrying` back to `pending`.
+- `begin_retry` (`:524`) refuses a letter that is resolved, retrying, legacy, past `max_retries` or permanent; `force` overrides the last two. Otherwise it increments `retry_count`, sets `retrying`, records the id as in flight, and returns the task.
+- `release_claim` (`:581`) undoes a claim without counting it: a full queue, or a cancelled retry.
+- `retry_failed` (`:620`) returns the letter to `pending` with the doubled backoff, or `exhausted` once out of retries or permanent.
+- `resolve` (`:686`) refuses only a retry in flight in this process. It also clears the payload, as `mark_resolved` (`:756`) does for a successful retry.
+- `reset_interrupted` (`:737`) returns letters other processes left `retrying` to `pending`, uncounted. A pipeline spawns it at start (`Retrier::reset_interrupted_once`, `crates/uniko-memory/src/pipeline/retry.rs:115`), and a failed attempt runs again later.
 
-All transitions are serialized by a per-queue mutex, which holds within one process only.
+The in-flight set and every transition sit behind one mutex per queue, which holds within one process only. `list` (`:428`) and `due` (`:712`) read every field except `payload`.
 
-**The background scheduler** is opt-in: `dead_letter_auto_retry`, `Retrier::spawn_scheduler` (`crates/uniko-memory/src/pipeline/retry.rs:124`). It:
-- polls at the base backoff, at most every 60 s;
-- retries up to `SCHEDULER_BATCH` (32) letters from `due` (`dead_letter.rs:604`) each pass;
+**The background scheduler** is opt-in: `dead_letter_auto_retry`, `Retrier::spawn_scheduler` (`retry.rs:140`). It:
+- polls every base backoff, clamped to 1–60 s;
+- retries up to `SCHEDULER_BATCH` (32) due letters per pass;
 - stops with the ingest cancellation token.
 
-Retries go through the same channel as submitted items and count toward `ingest_inflight`, so `quiesce` waits for retries that have started and not for ones that aren't due.
+`PipelineSystem` cancels its token tree when dropped (`ShutdownCoordinator::cancel_on_drop`), so the scheduler can't outlive an instance that wasn't shut down. Retries count toward `ingest_inflight` before they are sent, so `quiesce` waits for retries that have started and not for ones that aren't due.
 
 Rows from before #65 have no `dead_letter_id`, payload or status. They decode as `legacy` with id `legacy:{node_id}` and can only be resolved.
 
@@ -630,7 +634,13 @@ Notes on the less-obvious labels:
 - **`Source`** (`schema/sources.rs`) is the *logical* origin of a record — a web page, a dataset, an uploaded file, an upstream system — kept separate from the `Artifact` that holds one fetch of it, because the source outlives any single revision of its bytes. Properties: `source_id` (caller-supplied stable identity, hash-indexed), nullable `name`/`uri`, `first_seen`, nullable `last_seen`, and nullable `retired_at` (retiring stops every revision of a source from grounding a current answer without deleting anything). Message, Artifact, Observation, and Fact also carry a denormalised nullable `source_id` (and `revision_id`) beside the `FROM_SOURCE` edge, so a recall scope filter is a property predicate instead of a traversal in every candidate query.
 - **`ArtifactContent`** holds the content-addressed bytes for the default Lance blob backend. It is shared/deduped: dropped only when its reference count reaches 1. `Page`/`Block` form the PDF document-IR (`Artifact → HAS_PAGE → Page → CONTAINS → Block`, blocks chained by `NEXT_IN_READING_ORDER`).
 - **`Pattern`** and the `CONTRADICTED_BY` edge back the `episode_pattern_detector` and `contradiction_detector` stdlib Locy rules. They are the two additions most often missed when the downstream catalogs are updated.
-- **`DeadLetter`** is a *standalone* node with **no edges** — it records a failed pipeline step (`step`, `error`, `node_ref`, `retry_count`, `max_retries`) and is not wired into the graph. `retry_count` is always written `0` and never read; DLQ retry is data-only and unimplemented (`crates/uniko-pipes/src/dead_letter.rs`).
+- **`DeadLetter`** is a *standalone* node with **no edges**. It records a failed streaming item:
+  - its `dead_letter_id`, `step`, `error` and `error_kind`;
+  - whether it's `retriable`, and its `status`;
+  - `retry_count` / `max_retries` and `next_retry_at`;
+  - the serialized `IngestTask` as `payload`, dropped on resolve.
+
+  It is retried and resolved through `DeadLetterQueue` (`crates/uniko-pipes/src/dead_letter.rs`); see *The dead-letter queue and retries*.
 
 #### Session / Participant / Message as first-class
 
@@ -769,7 +779,7 @@ Reference: `website/docs/reference/schema.md`. Property/index specifics from the
 
 **Index families** (`schema.md`):
 
-- **Hash** — every id prop except `Chunk.chunk_id` (unindexed — chunks are reached via `HAS_CHUNK`, vector, or BM25, never by id; `DeadLetter` has no id at all), plus `Entity.name`, `Fact.subject`/`predicate`, `Entity.unstable`.
+- **Hash** — every id prop except `Chunk.chunk_id` (unindexed — chunks are reached via `HAS_CHUNK`, vector, or BM25, never by id; `DeadLetter` rows are looked up by the hash-indexed `dead_letter_id` and filtered by the hash-indexed `status`), plus `Entity.name`, `Fact.subject`/`predicate`, `Entity.unstable`.
 - **BTree** — `Message.timestamp`, `Session.started_at`, `Fact.confidence`, `Observation.temporal_anchor`.
 - **FullText/BM25** — `Message.content`, `Chunk.text`, `Observation.content`, `Summary.text`, `Fact.subject`.
 - **Vector** — `HnswSq`, Cosine metric, 384-d by default.
@@ -1531,9 +1541,9 @@ access control filters the bundle afterwards. Recording sites:
 Ingest stages are recorded in `uniko-extract` (and `record_action` in `uniko-memory`) and collected
 by the facade's `Session::commit_unit` (and so `observe`), `Session::ingest`, `Session::observe_tool`
 and `record_action`; a replayed unit or deduplicated source drops them. The streaming worker
-collects each item (`crates/uniko-memory/src/pipeline/ingest_worker.rs:183`) and, for items that
+collects each item (`crates/uniko-memory/src/pipeline/ingest_worker.rs:196`) and, for items that
 succeed, counts degraded ones in `HealthTracker::record_degradations`
-(`crates/uniko-pipes/src/health.rs:99`).
+(`crates/uniko-pipes/src/health.rs:127`).
 
 | Stage | Site |
 |---|---|
@@ -1600,7 +1610,7 @@ let agent = memory.agent("assistant-1");
 | `LlmSpec::llamacpp(alias, model, base_url)` | A llama.cpp `llama-server` over its OpenAI-compatible routes (`base_url` includes `/v1`) |
 | `LlmSpec::llamacpp_with_key_env(alias, model, base_url, key_env)` | Same, for a server started with `--api-key` |
 
-`llamacpp` is a **remote** provider (`remote/llamacpp`): inference runs in a `llama-server` the operator starts, so no inference kernels compile into the host process and no CUDA or Metal toolchain is needed at build time. That makes it the route to open-weights generation from the base CPU wheel, with no feature enabled (`crates/uniko-memory/src/facade/uniko.rs:393-440`). A `llama-server` holds one loaded model, so `model_id` is only echoed back in the request body.
+`llamacpp` is a **remote** provider (`remote/llamacpp`): inference runs in a `llama-server` the operator starts, so no inference kernels compile into the host process and no CUDA or Metal toolchain is needed at build time. That makes it the route to open-weights generation from the base CPU wheel, with no feature enabled (`crates/uniko-memory/src/facade/uniko.rs:400-447`). A `llama-server` holds one loaded model, so `model_id` is only echoed back in the request body.
 
 **Handle graph.** `Uniko::agent(id)` returns an `Agent` bound to `(kb, agent_id)`, which caches its resolved `Viewer` for `AsAgent` scope. From `Agent` you reach `session(id) -> Session`, `goals() -> Goals`, `data() -> Data`, plus the read verbs and Locy surface.
 
@@ -1827,7 +1837,7 @@ Consolidation is idempotent via `PROCESSED` edges — safe to call repeatedly; e
 
 ### 6.5 The pipeline — ingest & consolidation workers
 
-`PipelineSystem::new(config, Arc<kb>, steps)` (`pipeline/mod.rs:69`) spawns an `IngestWorker` and a `ConsolidationWorker` on bounded mpsc channels, sharing a `CircuitBreaker` and a `DeadLetterQueue`. Submit work via `submit_ingest`/`submit_consolidation`; `quiesce()` is a barrier; `health()` and `shutdown()` complete the surface.
+`PipelineSystem::new(config, Arc<kb>, steps)` (`pipeline/mod.rs:98`) spawns an `IngestWorker` and a `ConsolidationWorker` on bounded mpsc channels, sharing a `CircuitBreaker` and a `DeadLetterQueue`. Submit work via `submit_ingest`/`submit_consolidation`; `quiesce()` is a barrier; `health()` and `shutdown()` complete the surface.
 
 **Ingest worker** (`pipeline/ingest_worker.rs`). A `biased` `tokio::select!` (shutdown > recv). Each item is spawned under a `Semaphore(concurrency)`. An `InflightGuard` (RAII) decrements an `AtomicUsize` on every exit path, incremented at submit; `quiesce()` polls it to 0. `populate_ingest_metadata` serializes the typed payload into the `PipelineContext` so the generic `IngestStep` can deserialize it, then `run_step_chain` executes the chain honoring `StepErrorPolicy` (Skip / DeadLetter / Abort). Note: `run_step_chain` is the actual `Step` executor and lives *here*, not in `uniko-pipes` — that crate only defines the trait and outcome vocabulary. A transport-level `Err` from a step is defensively coerced to `DeadLetter`; Skip and DeadLetter both **continue** the chain, only Abort short-circuits; cancellation is cooperative and checked only *between* steps.
 
@@ -2999,7 +3009,7 @@ uniko is configured in three layers, in increasing order of specificity:
 
 #### 10.1.1 `UnikoConfig` at a glance
 
-`UnikoConfig` (config.rs:616) is the root runtime config. Its sub-configs and their spec-mandated defaults (config.rs:826–895):
+`UnikoConfig` (config.rs:616) is the root runtime config. Its sub-configs and their spec-mandated defaults (config.rs:840–909):
 
 | Area | Field(s) | Default |
 |---|---|---|
@@ -3370,7 +3380,7 @@ Never silently work around a uni-db bug without a repro that pins it there.
 
 #### Invariant 4 — config defaults come from `UnikoConfig::default()`
 
-Effective runtime defaults are what the pipeline actually builds: `RecallConfig::from_uniko_config(...)`, seeded from `UnikoConfig::default()` (`crates/uniko-store/src/config.rs`, defaults around `config.rs:846-913`). The standalone `RecallConfig::default()` and `ChunkConfig::default()` **differ** and must not be quoted as runtime behavior. One trap in particular: `config.rs:654` has a stale comment saying the reranker is "disabled by default," but the `Default` impl sets `enabled: true` (`config.rs:452`; ms-marco-MiniLM-L-6-v2, top_n=50). Trust the code.
+Effective runtime defaults are what the pipeline actually builds: `RecallConfig::from_uniko_config(...)`, seeded from `UnikoConfig::default()` (`crates/uniko-store/src/config.rs`, defaults around `config.rs:860-927`). The standalone `RecallConfig::default()` and `ChunkConfig::default()` **differ** and must not be quoted as runtime behavior. One trap in particular: `config.rs:654` has a stale comment saying the reranker is "disabled by default," but the `Default` impl sets `enabled: true` (`config.rs:452`; ms-marco-MiniLM-L-6-v2, top_n=50). Trust the code.
 
 Two more AGENTS.md house rules: **never `cargo test`** (nextest is the runner of record), and **never commit/push without explicit maintainer approval** — and never add AI-attribution trailers to any artifact.
 
@@ -3514,7 +3524,7 @@ These are the sharp edges spread across the layers. They fall into a few familie
 
 #### Pipeline semantics
 
-- **There is no retry module.** Despite the crate description, `uniko-pipes` has no `retry.rs`. The only automatic recovery is the circuit breaker's Open→HalfOpen probe. DLQ retry is data-only: `retry_count` is always written `0` and never read.
+- **Dead-letter retry is explicit by default.** `DeadLetters::retry` / `retry_pending` resubmit stored payloads. The background scheduler (`crates/uniko-memory/src/pipeline/retry.rs`) runs only with `dead_letter_auto_retry`. Besides that, the circuit breaker's Open→HalfOpen probe is the only automatic recovery.
 - **The Step runner lives downstream.** `run_step_chain` is in `uniko-memory`'s `ingest_worker.rs`, not in `uniko-pipes`. `uniko-pipes` defines only the vocabulary.
 - **`Err` from `Step::execute` is coerced to `DeadLetter`** — a transport error can't declare its own policy, so it never `Abort`s. Only an explicit `StepOutcome::Failed{policy: Abort}` stops the chain. `Skip` and `DeadLetter` both *continue* the remaining steps on a partially-populated context.
 - **Cancellation is cooperative and checked only between steps** — a long-running LLM call runs to completion after cancel unless it observes `ctx.cancel` itself.
@@ -3612,7 +3622,7 @@ Two bench-specific gotchas worth carrying into any perf investigation: **a share
 
 **coverage gate** — Per-phase recall exit test: coverage = 0.4·facet_coverage + 0.3·mean_score + 0.3·diversity; Phase 1 gate 0.75, Phase 2 gate 0.65, each also requiring ≥3 items.
 
-**DLQ (DeadLetterQueue)** — uniko-pipes wrapper that persists an unrecoverably-failed step as a standalone `DeadLetter` node (step/error/node_ref/retry_count=0/max_retries). Retry/list/clear surfaces are intentionally not implemented — `retry_count` is written 0 and never read.
+**DLQ (DeadLetterQueue)** — uniko-pipes queue that persists a failed streaming item as a standalone `DeadLetter` node with its payload, and lists, retries (bounded by `max_retries`) and resolves it. It is exposed as `Uniko::dead_letters()`.
 
 **drift (F39, entity)** — Cumulative INVALIDATES edges on an Entity within a rolling 30-day window; exceeding DRIFT_THRESHOLD (4) flips `Entity.unstable=true`, which recall reads to force Phase 2+.
 

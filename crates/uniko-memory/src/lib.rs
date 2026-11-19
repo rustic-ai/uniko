@@ -76,22 +76,22 @@ pub use recall::{
 // Method return / field types surfaced so the facade exposes no
 // un-nameable types: `Agent::assert_fact` -> FactUpsert, the `Session`
 // ingest verbs -> *IngestResult.
+/// What [`DeadLetters::retry_pending`] did.
+pub use pipeline::{RetryRefusal, RetryReport};
+/// Cortex sweep outcomes, part of [`ConsolidationReport`].
+pub use uniko_cortex::{
+    procedures::{MatchedProcedure, PromotionReport},
+    topics::TopicReport,
+};
 #[doc(no_inline)]
 pub use uniko_extract::ingest::{
     ArtifactIngestResult, AtomicIngestResult, ExtractFn, ExtractRequest, IngestContext, IngestData,
     IngestOutcome, IngestSource, ModalityExtractor, ModalityPrepared, ModalityRegistry,
     PdfIngestResult, TextExtractor, ingest_source, resolve_mime,
 };
-// Content-type taxonomy shared by ingest routing and recall channels.
-/// What [`DeadLetters::retry_pending`] did.
-pub use pipeline::RetryReport;
-/// Cortex sweep outcomes, part of [`ConsolidationReport`].
-pub use uniko_cortex::{
-    procedures::{MatchedProcedure, PromotionReport},
-    topics::TopicReport,
-};
 /// LLM circuit-breaker state, part of [`PipelineHealth`].
 pub use uniko_pipes::CircuitState;
+// Content-type taxonomy shared by ingest routing and recall channels.
 #[doc(no_inline)]
 pub use uniko_pipes::content::{ContentType, Mime, Modality};
 /// Dead-letter views and options, used by [`DeadLetters`].

@@ -94,14 +94,15 @@ pymethods_with_sync! {
         /// Register this agent as a participant of kind ``agent`` without
         /// recording a session, message or action.
         ///
-        /// Idempotent and safe to call concurrently. Returns ``"created"``
-        /// the first time, ``"existing"`` afterwards, and ``"upgraded"`` when
-        /// the participant already existed with kind ``unknown`` (for example
+        /// Idempotent and safe to call concurrently. Returns a
+        /// ``Registration`` whose ``outcome`` is ``"created"`` the first
+        /// time, ``"existing"`` afterwards, and ``"upgraded"`` when the
+        /// participant already existed with kind ``unknown`` (for example
         /// from ``add_org_member``). ``name`` is set only when the
         /// participant has none; memberships are kept. Goals, tasks, actions
         /// and tool calls ensure the agent themselves, so this is optional.
         #[pyo3(signature = (*, name=None))]
-        fn register / register_sync(&self, py, name: Option<String>) -> &'static str {
+        fn register / register_sync(&self, py, name: Option<String>) -> Py<crate::outputs::PyRegistration> {
             prepare {
                 let mut opts = AgentRegistration::new();
                 if let Some(n) = name {
@@ -111,7 +112,7 @@ pymethods_with_sync! {
             }
             run(agent = self.inner.clone()) {
                 let reg = agent.register(opts).await.map_err(to_pyerr)?;
-                Ok(reg.outcome.as_str())
+                Python::attach(|py| crate::outputs::PyRegistration::from_rust(py, &reg))
 
             }
         }

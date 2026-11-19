@@ -30,6 +30,7 @@ from ..types import (
     IngestKind,
     RecallKind,
     RecallSourceKind,
+    RegistrationOutcome,
     TaskPhase,
     WorkerStatus,
 )
@@ -586,6 +587,57 @@ class WorkerHealth(BaseModel):
         return cls.model_validate(native)
 
 
+class DeadLetterCounts(BaseModel):
+    """Dead letters per status (native ``DeadLetterCounts``)."""
+
+    model_config = _OUT
+
+    pending: int
+    retrying: int
+    exhausted: int
+    resolved: int
+    legacy: int
+
+    @classmethod
+    def from_native(cls, native: Any) -> "DeadLetterCounts":
+        return cls.model_validate(native)
+
+
+class RetryRefusal(BaseModel):
+    """A dead letter ``retry_pending`` could not resubmit."""
+
+    model_config = _OUT
+
+    id: str
+    reason: str
+
+
+class RetryReport(BaseModel):
+    """What ``DeadLetters.retry_pending`` did (native ``RetryReport``)."""
+
+    model_config = _OUT
+
+    retried: list[str] = Field(default_factory=list)
+    refused: list[RetryRefusal] = Field(default_factory=list)
+
+    @classmethod
+    def from_native(cls, native: Any) -> "RetryReport":
+        return cls.model_validate(native)
+
+
+class Registration(BaseModel):
+    """What ``Agent.register`` did (native ``Registration``)."""
+
+    model_config = _OUT
+
+    participant_id: str
+    outcome: RegistrationOutcome
+
+    @classmethod
+    def from_native(cls, native: Any) -> "Registration":
+        return cls.model_validate(native)
+
+
 class DeadLetter(BaseModel):
     """One dead-lettered streaming item (native ``DeadLetter``)."""
 
@@ -785,6 +837,10 @@ __all__ = [
     "WorkerHealth",
     "PipelineHealth",
     "DeadLetter",
+    "Registration",
+    "DeadLetterCounts",
+    "RetryReport",
+    "RetryRefusal",
     "PromotionReport",
     "TopicReport",
     "ConsolidationReport",

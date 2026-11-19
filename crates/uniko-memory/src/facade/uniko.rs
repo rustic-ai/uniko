@@ -279,7 +279,7 @@ impl Uniko {
             match Arc::try_unwrap(pipeline) {
                 Ok(pipeline) => pipeline.shutdown().await.map_err(UnikoError::Pipeline)?,
                 Err(_) => tracing::warn!(
-                    "Uniko::shutdown: pipeline still shared by Agent/Session handles; \
+                    "Uniko::shutdown: pipeline still shared by Agent, Session or DeadLetters handles; \
                      skipping pipeline drain (drop those handles first)"
                 ),
             }
@@ -289,7 +289,7 @@ impl Uniko {
             // actionable guidance — this is a usage issue, not a bug.
             UnikoError::Internal(msg) if msg.contains("outstanding references") => {
                 UnikoError::Config(
-                    "Uniko::shutdown requires all Agent and Session handles to be dropped first"
+                    "Uniko::shutdown requires all Agent, Session and DeadLetters handles to be dropped first"
                         .to_string(),
                 )
             }

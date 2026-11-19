@@ -1147,6 +1147,27 @@ mod tests {
     /// `embedding_dimensions` agreeing with the struct's `dimensions`
     /// (the column width recall indexes against).
     #[test]
+    fn dead_letter_backoff_must_be_positive_and_ordered() {
+        for (base, max) in [(0, 10), (100, 50)] {
+            let c = UnikoConfig {
+                dead_letter_retry_backoff_ms: base,
+                dead_letter_retry_max_backoff_ms: max,
+                ..UnikoConfig::default()
+            };
+            assert!(
+                matches!(c.validate(), Err(UnikoError::Config(_))),
+                "backoff {base}..{max} accepted"
+            );
+        }
+        let ok = UnikoConfig {
+            dead_letter_retry_backoff_ms: 10,
+            dead_letter_retry_max_backoff_ms: 10,
+            ..UnikoConfig::default()
+        };
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
     fn llamacpp_embedding_emits_the_required_options() {
         let cfg = EmbeddingConfig::llamacpp("bge-small", "http://127.0.0.1:8080/v1", 384, 512);
 

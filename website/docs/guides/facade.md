@@ -253,44 +253,72 @@ let dl = memory.dead_letters();
 for letter in dl.list(&DeadLetterFilter::new().status(DeadLetterStatus::Pending)).await? {
     println!("{} failed in {}: {} ({:?})", letter.id, letter.step, letter.error, letter.error_kind);
 }
-dl.retry(&id, false).await?;          // resubmit one; its outcome lands on the letter
+dl.retry(&first, false).await?;             // resubmit one; its outcome lands on the letter
 let report = dl.retry_pending(100).await?;  // or every pending one that can succeed
-dl.resolve(&id, Some("source was corrupt")).await?;  // give up, keeping the record
-session.flush().await?;               // waits for retries already started
+session.flush().await?;                     // waits for the retries just started
+dl.resolve(&second, Some("source was corrupt")).await?;  // give up on another, keeping the record
 ```
 
 | Status | Meaning |
 |---|---|
 | `pending` | Waiting for a retry; `next_retry_at` says when one is due. |
 | `retrying` | A retry has been resubmitted. |
-| `exhausted` | Out of retries (`dead_letter_max_retries`, default 3), or failed in a way a retry can't fix. |
+| `exhausted` | Out of retries, or failed in a way a retry can't fix. |
 | `resolved` | A retry succeeded (`resolution = "retried"`), or `resolve` was called. |
 | `legacy` | Written by an earlier uniko that didn't keep payloads: can be resolved, not retried. |
 
-- **Which failures can be retried.** An id conflict, an unsupported or invalid payload, and
-  configuration or schema errors fail the same way every time. They're stored `exhausted` with
-  `retriable = false`, and `retry` refuses them unless `force` is set. Model, timeout, storage and
-  internal failures are retriable.
-- **What a retry does.** It resubmits the stored payload unchanged, so the item keeps its message
-  id, sender, agent and source. Ingest dedups by id and content, so a retry never writes twice.
-- **Retry limit.** Each retry counts, and a letter stops at the limit. A retry that can't be
-  queued because the ingest queue is full isn't counted.
-- **Restarts.** Letters persist. One left `retrying` when the process stopped goes back to
-  `pending` the next time a streaming instance retries anything.
-- **What `resolve` changes.** Only the letter.
-- **Health.** `memory.health()` counts `dead_lettered`, `retries` and `retries_succeeded` since
-  start. `dl.counts()` gives the stored totals per status.
+**Which failures can be retried.**
+- **Permanent:** an id conflict, an unsupported or invalid payload, and configuration, schema or
+  Locy errors fail the same way every time. They're stored `exhausted` with `retriable = false`,
+  and `retry` refuses them unless `force` is set.
+- **Retriable:** every other kind, for example model, timeout, storage, search or internal
+  failures.
+- **No payload:** a payload that can't be stored, such as a file path that isn't valid UTF-8,
+  leaves a letter that is kept for inspection but is `exhausted` and not replayable.
+
+**What a retry does.**
+- It resubmits the stored payload unchanged, so a message keeps its id, sender, source and the
+  agent it was submitted under.
+- `submit_source` records no agent, so a document or file letter has `agent_id = None`.
+- Ingest dedups by id and content, so replaying an item that partly landed doesn't write it twice.
+
+**The retry limit.**
+- Each retry counts, and a letter stops at `dead_letter_max_retries` (default 3).
+- The limit is fixed on each letter when it's stored, so changing the config later doesn't affect
+  existing letters.
+- With a limit of 0, retriable failures are stored `exhausted`.
+- A retry that never ran to the end isn't counted: one that couldn't be queued because the ingest
+  queue was full, one cut short by shutdown, or one interrupted by a crash.
+
+**Restarts.** Letters persist. When a streaming instance starts, any letter left `retrying` by a
+process that stopped goes back to `pending`. A non-streaming instance can still resolve such a
+letter.
+
+**Resolving.**
+- `resolve` changes only the letter, and drops its stored payload.
+- It refuses a letter whose retry this process is still running.
+- Resolved letters are kept. There's no purge yet.
+
+**Health.** `memory.health()` counts `dead_lettered`, `retries` and `retries_succeeded` since
+start. `dl.counts()` gives the stored totals per status.
+
+**Handles.** Like an `Agent` or `Session`, a `DeadLetters` handle shares the instance, so drop it
+before `memory.shutdown()`.
 
 **Automatic retries** are off by default. With `dead_letter_auto_retry = true`, a background task
 retries pending, retriable letters once their backoff has elapsed:
 - the first retry waits `dead_letter_retry_backoff_ms` (default 30 s);
 - each later retry waits twice as long, up to `dead_letter_retry_max_backoff_ms` (default 1 h);
+- the task runs every backoff interval, at most once a second and at least once a minute;
 - each pass takes at most 32 letters, and letters still stop at the retry limit;
 - permanent failures are never retried automatically.
 
 The schedule is stored on the letters, so it carries across restarts. `flush` waits for a retry
-the task has already started, but not for one that isn't due yet. Retry claims are serialized
-within one process; don't run two processes that both retry against one store.
+the task has already started, but not for one that isn't due yet. The task stops when the
+instance shuts down or is dropped. Retry claims are tracked within one process, so don't run two
+processes that both retry against one store.
+
+Binary payloads are stored as JSON, about three to four times their size, until they're resolved.
 
 ### Ingest diagnostics
 
