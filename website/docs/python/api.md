@@ -681,6 +681,7 @@ One call of one tool. Reusable, like `Turn`.
 | Setter | Signature | Default / Notes |
 | --- | --- | --- |
 | `.call_id` | `.call_id(call_id: str)` | Derived from the session, turn, tool, arguments and result if unset. |
+| `.performer` | `.performer(participant_id: str)` | The turn's sender, or the session's agent for `observe_tool`. The turn keeps its sender; the performer is created as kind `agent` if needed. The same call id under a different performer raises `IdConflictError`. |
 | `.arguments` | `.arguments(arguments: Any)` | Any JSON-shaped value. |
 | `.json_output` / `.text_output` / `.bytes_output` | `.json_output(value)`, `.text_output(text)`, `.bytes_output(data, mime)` | The result, stored verbatim. |
 | `.status` / `.error` | `.status(status: str)`, `.error(error: str)` | — |

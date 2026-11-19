@@ -235,6 +235,7 @@ impl Session {
                 extractors: &self.extractors,
                 session_id: &session_id,
                 turn_message_id: Some(&message_id),
+                default_performer: &turn.sender_id,
                 inline_threshold: self.kb.config().action_output_artifact_threshold,
             };
             let mut tools = Vec::with_capacity(calls.len());
@@ -453,6 +454,7 @@ impl Session {
             extractors: &self.extractors,
             session_id: &self.ctx.session_id,
             turn_message_id: None,
+            default_performer: &self.agent_id,
             inline_threshold: self.kb.config().action_output_artifact_threshold,
         };
         let prepared = super::tool::prepare_tool_call(&tool_ctx, call).await?;

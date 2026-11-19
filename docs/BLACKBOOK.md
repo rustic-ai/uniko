@@ -634,8 +634,11 @@ Because who-said-what is structural, uniko can answer cross-session provenance q
 
 It is called with kind `unknown` by ingest's sender setup (`crates/uniko-extract/src/ingest/session.rs:59`, which also updates `last_seen`). It is called with kind `agent` by:
 - `ensure_agent_participant` (`crates/uniko-memory/src/agent/ops.rs:95`), behind `Agent::register` (`:177`) and goal/task creation (`facade/goals.rs:438`);
+- explicit tool-call performers (`crates/uniko-extract/src/ingest/tool.rs:331`).
 
 `add_membership`'s `ensure_group_node` is create-only and also uses kind `unknown`.
+
+**Tool-call performer.** An embedded call is `PERFORMED_BY` its turn's sender, and an `observe_tool` call by the session's agent, unless the call names a `performer`. Named performers are ensured outside the unit transaction, alongside the senders (`ingest/unit.rs:222`). A performer other than the default is folded into the call's `payload_hash` (`crates/uniko-memory/src/facade/tool.rs:341`), so the same `action_id` under another performer is an `IdConflict`. The derived `action_id` doesn't include the performer.
 
 Ensuring the Session and sender exist is a cold-path, first-sight-only operation guarded by `lock_session_setup` (a striped RMW lock) to avoid duplicate `Session`/`Participant`/`PARTICIPATED_IN` and SSI antidependency aborts under concurrent ingest. On the warm path (both ids cached in the in-memory `SessionContext`), it does no DB work.
 

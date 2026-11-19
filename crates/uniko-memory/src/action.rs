@@ -192,6 +192,7 @@ async fn record_action_collecting(
         previous_action_id: params.previous_action_id.clone(),
         chain_in_session: false,
         visibility: None,
+        performer_id: None,
     };
     let outcomes = ingest_tool_calls(
         kb,

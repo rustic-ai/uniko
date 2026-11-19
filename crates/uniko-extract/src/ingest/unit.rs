@@ -219,6 +219,13 @@ pub async fn ingest_turns_atomic(
         session_nid = snid;
         sender_nids.insert(turn.message.sender_id.clone(), pnid);
     }
+    // Explicit tool-call performers, set up the same way as senders.
+    let mut performer_nids: HashMap<String, NodeId> = HashMap::new();
+    for turn in unit {
+        for (id, nid) in super::tool::ensure_performers(kb, &turn.tools).await? {
+            performer_nids.insert(id, nid);
+        }
+    }
 
     // ── P3. Recipients, per turn, over a PROGRESSIVE participant view. ──
     // `resolve_recipients`'s inference branch returns every cached
@@ -438,8 +445,15 @@ pub async fn ingest_turns_atomic(
                     triggered_by_nid: Some(message_nids[i]),
                 };
                 tool_outcomes.push(
-                    super::tool::write_tool_calls_in_tx(kb, &tx, &turn.tools, ctx, &mut seen)
-                        .await?,
+                    super::tool::write_tool_calls_in_tx(
+                        kb,
+                        &tx,
+                        &turn.tools,
+                        ctx,
+                        &performer_nids,
+                        &mut seen,
+                    )
+                    .await?,
                 );
             }
             if std::env::var_os(FAIL_AFTER_TOOLS_ENV).is_some() {

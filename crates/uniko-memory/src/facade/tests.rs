@@ -6121,10 +6121,10 @@ mod hybrid_regressions {
     }
 }
 
-/// Agent registration (#67).
+/// Agent registration (#67) and explicit tool-call performers (#68).
 mod registration_and_performer {
     use super::*;
-    use crate::{AgentRegistration, EnsureOutcome};
+    use crate::{AgentRegistration, EnsureOutcome, ToolCall};
 
     async fn memory_or_skip() -> Option<Uniko> {
         match Uniko::in_memory().await {
@@ -6338,6 +6338,148 @@ mod registration_and_performer {
         let again = agent.register(AgentRegistration::new()).await.unwrap();
         assert_eq!(again.outcome, EnsureOutcome::Existing);
         drop(agent);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    fn reporter_call() -> ToolCall {
+        ToolCall::new("search")
+            .call_id("call")
+            .text_output("Evidence")
+            .performer("reporter")
+    }
+
+    async fn performed_by(kb: &KnowledgeBase, call_id: &str, who: &str) -> i64 {
+        count_query(
+            kb,
+            &format!(
+                "MATCH (:Action {{action_id: '{call_id}'}})-[r:PERFORMED_BY]->\
+                 (:Participant {{participant_id: '{who}'}}) RETURN count(r) AS c"
+            ),
+        )
+        .await
+    }
+
+    /// The issue's reproduction: a user turn in the reporter's session keeps
+    /// its sender while its embedded call is performed by the reporter, and
+    /// a replay after a reopen adds no edges.
+    #[tokio::test]
+    async fn an_embedded_call_can_name_its_performer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        let Some(memory) = build_or_skip(Uniko::builder().path(&path)).await else {
+            return;
+        };
+        let unit = || {
+            vec![
+                Turn::new("user", "Question")
+                    .id("question")
+                    .tool_call(reporter_call()),
+            ]
+        };
+        let mut session = memory.agent("reporter").session("research");
+        match session.commit_unit(unit()).await {
+            Ok(r) => assert!(!r.was_replay),
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable");
+                return;
+            }
+            Err(e) => panic!("commit_unit failed: {e}"),
+        }
+        let kb = memory.agent("reporter").kb().clone();
+        assert_eq!(performed_by(&kb, "call", "reporter").await, 1);
+        assert_eq!(performed_by(&kb, "call", "user").await, 0);
+        assert_eq!(
+            count_query(
+                &kb,
+                "MATCH (:Message {message_id: 'question'})-[:SENT_BY]->\
+                 (:Participant {participant_id: 'user'}) RETURN count(*) AS c"
+            )
+            .await,
+            1,
+            "the turn keeps its sender"
+        );
+        assert_eq!(participants(&kb, "reporter", "agent").await, 1);
+        drop((session, kb));
+        memory.shutdown().await.expect("shutdown");
+
+        let Some(memory) = build_or_skip(Uniko::builder().path(&path)).await else {
+            return;
+        };
+        let mut session = memory.agent("reporter").session("research");
+        let replay = session.commit_unit(unit()).await.expect("replay");
+        assert!(replay.was_replay);
+        let kb = memory.agent("reporter").kb().clone();
+        assert_eq!(
+            count_query(
+                &kb,
+                "MATCH (:Action {action_id: 'call'})-[r:PERFORMED_BY]->() RETURN count(r) AS c"
+            )
+            .await,
+            1,
+            "replay adds no PERFORMED_BY edge"
+        );
+        drop((session, kb));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// Re-recording a call under another performer is refused, so the
+    /// stored PERFORMED_BY edge never silently disagrees with the caller.
+    #[tokio::test]
+    async fn the_same_call_with_another_performer_is_a_conflict() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let session = memory.agent("reporter").session("research");
+        match session
+            .observe_tool(reporter_call().performer("auditor"))
+            .await
+        {
+            Ok(r) => assert!(!r.was_replay),
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable");
+                return;
+            }
+            Err(e) => panic!("observe_tool failed: {e}"),
+        }
+        let kb = memory.agent("reporter").kb().clone();
+        assert_eq!(performed_by(&kb, "call", "auditor").await, 1);
+        assert_eq!(participants(&kb, "auditor", "agent").await, 1);
+
+        let replay = session
+            .observe_tool(reporter_call().performer("auditor"))
+            .await
+            .expect("same performer replays");
+        assert!(replay.was_replay);
+        for call in [reporter_call(), reporter_call().performer("someone-else")] {
+            let err = session.observe_tool(call).await.unwrap_err();
+            assert!(
+                matches!(err, UnikoError::IdConflict { .. }),
+                "expected IdConflict, got {err:?}"
+            );
+        }
+        // Naming the default performer explicitly is the same call as naming
+        // none.
+        let plain = session
+            .observe_tool(
+                ToolCall::new("search")
+                    .call_id("plain")
+                    .text_output("Evidence"),
+            )
+            .await
+            .unwrap();
+        assert!(!plain.was_replay);
+        let explicit = session
+            .observe_tool(
+                ToolCall::new("search")
+                    .call_id("plain")
+                    .text_output("Evidence")
+                    .performer("reporter"),
+            )
+            .await
+            .unwrap();
+        assert!(explicit.was_replay);
+        assert_eq!(performed_by(&kb, "plain", "reporter").await, 1);
+        drop((session, kb));
         memory.shutdown().await.expect("shutdown");
     }
 }
