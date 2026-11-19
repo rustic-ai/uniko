@@ -63,8 +63,6 @@ def test_sync_data_roundtrip() -> None:
 def test_sync_goals() -> None:
     uni = uniko.Uniko.in_memory_sync()
     agent = uni.agent("assistant")
-    # Seed the agent's participant so goal ownership resolves.
-    agent.session("s1").observe_sync(uniko.Turn("assistant", "planning session"))
 
     goal_id = agent.goals.create_sync("ship the sync API", description="phase 4")
     assert isinstance(goal_id, int)
@@ -85,7 +83,6 @@ def test_sync_goals() -> None:
 def test_sync_create_views_return_generated_ids() -> None:
     uni = uniko.Uniko.in_memory_sync()
     agent = uni.agent("assistant")
-    agent.session("s1").observe_sync(uniko.Turn("assistant", "planning session"))
 
     goal = agent.goals.create_view_sync("ship the sync API")
     assert goal.goal_id

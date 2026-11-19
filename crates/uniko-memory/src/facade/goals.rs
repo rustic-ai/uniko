@@ -433,21 +433,35 @@ impl<'a> Goals<'a> {
 
     // ── Create ───────────────────────────────────────────────────────
 
+    /// Goals and tasks hang off the agent's participant; make sure it
+    /// exists so a fresh store needs no prior turn or registration.
+    async fn ensure_agent(&self) -> Result<(), UnikoError> {
+        crate::agent::ensure_agent_participant(self.kb, self.agent_id).await?;
+        Ok(())
+    }
+
     /// Create a goal owned by this agent. Returns its node id.
+    ///
+    /// The agent's participant is created first if it doesn't exist yet,
+    /// as [`Agent::register`](crate::Agent::register) would.
     ///
     /// # Errors
     ///
     /// Returns [`UnikoError`] when creation fails.
     pub async fn create(&self, params: CreateGoalParams) -> Result<NodeId, UnikoError> {
+        self.ensure_agent().await?;
         create_goal(self.kb, self.agent_id, params).await
     }
 
     /// Create a task assigned to this agent. Returns its node id.
     ///
+    /// The agent's participant is created first if it doesn't exist yet.
+    ///
     /// # Errors
     ///
     /// Returns [`UnikoError`] when creation fails.
     pub async fn create_task(&self, params: CreateTaskParams) -> Result<NodeId, UnikoError> {
+        self.ensure_agent().await?;
         create_task(self.kb, self.agent_id, params).await
     }
 
@@ -471,6 +485,7 @@ impl<'a> Goals<'a> {
     /// Returns [`UnikoError`] when creation fails, or
     /// [`UnikoError::Internal`] if the goal cannot be read back.
     pub async fn create_view(&self, mut params: CreateGoalParams) -> Result<GoalView, UnikoError> {
+        self.ensure_agent().await?;
         let goal_id = params.goal_id.get_or_insert_with(new_id).clone();
         keep_on_embedding_failure(create_goal(self.kb, self.agent_id, params).await, &goal_id)?;
         self.get(&goal_id).await?.ok_or_else(|| {
@@ -502,6 +517,7 @@ impl<'a> Goals<'a> {
         &self,
         mut params: CreateTaskParams,
     ) -> Result<TaskView, UnikoError> {
+        self.ensure_agent().await?;
         let task_id = params.task_id.get_or_insert_with(new_id).clone();
         keep_on_embedding_failure(create_task(self.kb, self.agent_id, params).await, &task_id)?;
         self.task(&task_id).await?.ok_or_else(|| {

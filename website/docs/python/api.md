@@ -354,6 +354,7 @@ builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoni
 | Method | Signature | Sync | Description |
 | --- | --- | --- | --- |
 | `session` | `session(session_id: str) -> Session` | — (sync) | Open a conversation thread. |
+| `register` | `register(*, name: str \| None = None) -> Awaitable[Literal["created", "upgraded", "existing"]]` | `register_sync` | Record this agent as a participant of kind `agent`, writing nothing else. Idempotent; a participant of kind `unknown` (for example from `add_org_member`) becomes `agent`, keeping its name and memberships. `name` is set only when the participant has none. Optional: goals, tasks, actions and tool calls create the participant themselves. |
 | `delete_session` | `delete_session(session_id: str) -> Awaitable[DeletionReport]` | `delete_session_sync` | Hard-delete a session and cascade. |
 | `finalize_session` | `finalize_session(session_id: str) -> Awaitable[FinalizeReport]` | `finalize_session_sync` | Build/refresh a session's retrieval surfaces without its `Session` handle. |
 | `retire_source` | `retire_source(source_id: str) -> Awaitable[bool]` | `retire_source_sync` | Hide everything recorded under a source id from recall, reversibly. |
@@ -680,6 +681,7 @@ One call of one tool. Reusable, like `Turn`.
 | Setter | Signature | Default / Notes |
 | --- | --- | --- |
 | `.call_id` | `.call_id(call_id: str)` | Derived from the session, turn, tool, arguments and result if unset. |
+| `.performer` | `.performer(participant_id: str)` | The turn's sender, or the session's agent for `observe_tool`. The turn keeps its sender; the performer is created as kind `agent` if needed. The same call id under a different performer raises `IdConflictError`. |
 | `.arguments` | `.arguments(arguments: Any)` | Any JSON-shaped value. |
 | `.json_output` / `.text_output` / `.bytes_output` | `.json_output(value)`, `.text_output(text)`, `.bytes_output(data, mime)` | The result, stored verbatim. |
 | `.status` / `.error` | `.status(status: str)`, `.error(error: str)` | — |

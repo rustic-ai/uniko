@@ -8,9 +8,6 @@ import uniko
 async def test_goals_lifecycle() -> None:
     uni = await uniko.Uniko.in_memory()
     agent = uni.agent("assistant")
-    # Goals are OWNED_BY the agent's Participant, which must exist first — it is
-    # created when the agent sends a turn.
-    await agent.session("setup").observe(uniko.Turn("assistant", "kicking off"))
     goals = agent.goals
 
     gid = await goals.create(
@@ -57,7 +54,6 @@ async def test_create_views_return_generated_ids() -> None:
     """``create_view`` / ``create_task_view`` hand back usable ids (#64)."""
     uni = await uniko.Uniko.in_memory()
     agent = uni.agent("assistant")
-    await agent.session("setup").observe(uniko.Turn("assistant", "kicking off"))
     goals = agent.goals
 
     goal = await goals.create_view("Ship the Python SDK", status="planned")

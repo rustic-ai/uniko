@@ -60,13 +60,30 @@ transaction as the turn: if the turn fails, neither is written.
 A call recorded apart from any turn uses `Session::observe_tool` (`session.observe_tool` in Python),
 naming its triggering message with `triggered_by` when there is one.
 
+### Who performed the call
+
+A call inside a turn is performed by the turn's sender, and one recorded with `observe_tool` by the
+session's agent. When someone else made the call, name them with `.performer(...)`. For example, a
+user's turn can carry a call the reporting agent made:
+
+```rust
+let call = ToolCall::new("search").call_id("call").text_output("Evidence").performer("reporter");
+session.commit_unit(vec![Turn::new("user", "Question").id("question").tool_call(call)]).await?;
+// Message -[:SENT_BY]-> user;  Action -[:PERFORMED_BY]-> reporter
+```
+
+The turn keeps its sender. The performer is created as kind `agent` if it doesn't exist yet. It's
+also part of the call's replay key: recording the same call id again under a different performer is
+refused with `UnikoError::IdConflict`, rather than replaying with the old `PERFORMED_BY` edge. Naming
+the default performer explicitly is the same as naming none.
+
 What gets written:
 
 | Node / edge | What it holds |
 |---|---|
 | `Action` | `action_type = "tool_call"`, `tool_name`, `input` (the arguments), `status`, `error`, timing, and `payload_hash` |
 | `TRIGGERED_BY` → `Message` | the turn that made the call |
-| `IN_SESSION` → `Session`, `PERFORMED_BY` → `Participant` | the session, and the turn's sender |
+| `IN_SESSION` → `Session`, `PERFORMED_BY` → `Participant` | the session, and the turn's sender (or the call's `performer`) |
 | `NEXT_ACTION` | from the session's previous call (or the one named with `after`) |
 | `PRODUCED` → `Artifact {kind: "tool_output"}` | the result, verbatim, with its chunks |
 

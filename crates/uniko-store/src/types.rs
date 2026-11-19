@@ -132,3 +132,29 @@ pub fn optional_datetime_from_row(
         _ => None,
     }
 }
+
+/// What [`KnowledgeBase::ensure_participant`](crate::KnowledgeBase::ensure_participant)
+/// did to the Participant row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum EnsureOutcome {
+    /// No participant had that id; one was created with the given kind.
+    Created,
+    /// The participant existed with kind `unknown` and now has the given kind.
+    Upgraded,
+    /// The participant existed with a known kind, which was kept.
+    Existing,
+}
+
+impl EnsureOutcome {
+    /// The stable lowercase name: `created`, `upgraded` or `existing`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Upgraded => "upgraded",
+            Self::Existing => "existing",
+        }
+    }
+}

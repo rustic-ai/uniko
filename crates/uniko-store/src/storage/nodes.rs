@@ -281,14 +281,7 @@ impl KnowledgeBase {
         // and each create their own node, producing duplicate rows.
         // The lock also covers the subsequent update path so a later
         // RMW on the same logical row is consistent.
-        let mut lock_key =
-            Vec::with_capacity(5 + label.len() + 1 + ext_id_field.len() + 1 + ext_id.len());
-        lock_key.extend_from_slice(b"node:");
-        lock_key.extend_from_slice(label.as_bytes());
-        lock_key.push(0);
-        lock_key.extend_from_slice(ext_id_field.as_bytes());
-        lock_key.push(0);
-        lock_key.extend_from_slice(ext_id.as_bytes());
+        let lock_key = node_lock_key(label, ext_id_field, ext_id);
         let _rmw_guard = self.rmw_locks.lock(&lock_key).await;
 
         // Explicit get-then-(update|create) rather than a single MERGE.
@@ -313,6 +306,74 @@ impl KnowledgeBase {
             .entry(ext_id_field.to_string())
             .or_insert_with(|| Value::String(ext_id.to_string()));
         self.create_node(label, &all_props).await
+    }
+
+    /// Make sure a Participant with `participant_id` exists, without
+    /// overwriting what is already known about it.
+    ///
+    /// - **Absent:** created with `kind` and every property in
+    ///   `if_absent` and `always`.
+    /// - **Present with kind `unknown`:** its kind becomes `kind`
+    ///   ([`EnsureOutcome::Upgraded`]), unless `kind` is `unknown` too.
+    /// - **Present with any other kind:** that kind is kept.
+    ///
+    /// An existing row also gets each `if_absent` property it has no value
+    /// for, and every `always` property (such as `last_seen`). Memberships
+    /// and other edges are never touched. The check and the write run under
+    /// the same lock as [`merge_node`](Self::merge_node), so concurrent
+    /// callers create one row and exactly one of them sees
+    /// [`EnsureOutcome::Created`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`] on database failure.
+    pub async fn ensure_participant(
+        &self,
+        participant_id: &str,
+        kind: &str,
+        if_absent: &HashMap<String, Value>,
+        always: &HashMap<String, Value>,
+    ) -> Result<(NodeId, crate::types::EnsureOutcome)> {
+        use crate::schema::labels::PARTICIPANT;
+        use crate::types::EnsureOutcome;
+        const ID: &str = "participant_id";
+        const UNKNOWN: &str = "unknown";
+
+        let lock_key = node_lock_key(PARTICIPANT, ID, participant_id);
+        let _rmw_guard = self.rmw_locks.lock(&lock_key).await;
+
+        if let Some((nid, props)) = self
+            .get_node_by_ext_id(PARTICIPANT, ID, participant_id)
+            .await?
+        {
+            let mut update = always.clone();
+            for (k, v) in if_absent {
+                if matches!(props.get(k), None | Some(Value::Null)) {
+                    update.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            let stored_kind = match props.get("kind") {
+                Some(Value::String(s)) => s.as_str(),
+                _ => UNKNOWN,
+            };
+            let outcome = if stored_kind == UNKNOWN && kind != UNKNOWN {
+                update.insert("kind".to_string(), Value::String(kind.to_string()));
+                EnsureOutcome::Upgraded
+            } else {
+                EnsureOutcome::Existing
+            };
+            if !update.is_empty() {
+                self.update_node(nid, &update).await?;
+            }
+            return Ok((nid, outcome));
+        }
+
+        let mut all = if_absent.clone();
+        all.extend(always.iter().map(|(k, v)| (k.clone(), v.clone())));
+        all.insert("kind".to_string(), Value::String(kind.to_string()));
+        all.insert(ID.to_string(), Value::String(participant_id.to_string()));
+        let nid = self.create_node(PARTICIPANT, &all).await?;
+        Ok((nid, EnsureOutcome::Created))
     }
 
     /// Query nodes of a given label, optionally filtered and limited.
@@ -359,4 +420,19 @@ impl KnowledgeBase {
         }
         Ok(nodes)
     }
+}
+
+/// The `rmw_locks` key that serializes a check-then-create of one node by
+/// its external id. [`KnowledgeBase::merge_node`] and
+/// [`KnowledgeBase::ensure_participant`] share it, so they exclude each
+/// other on the same row.
+fn node_lock_key(label: &str, ext_id_field: &str, ext_id: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(5 + label.len() + 1 + ext_id_field.len() + 1 + ext_id.len());
+    key.extend_from_slice(b"node:");
+    key.extend_from_slice(label.as_bytes());
+    key.push(0);
+    key.extend_from_slice(ext_id_field.as_bytes());
+    key.push(0);
+    key.extend_from_slice(ext_id.as_bytes());
+    key
 }
