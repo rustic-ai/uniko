@@ -19,8 +19,8 @@ The repo has three buildable surfaces:
 
 Install once, for any surface that touches the native stack:
 
-- **Rust ≥ 1.91** (edition 2024) — `rustup toolchain install stable`. The MSRV is
-  pinned by `rust-version = "1.91"` in the root `Cargo.toml`.
+- **Rust ≥ 1.95** (edition 2024) — `rustup toolchain install stable`. The MSRV is
+  pinned by `rust-version = "1.95"` in the root `Cargo.toml`.
 - **A C/C++ toolchain** — required by native ML dependencies (`ort` / ONNX
   Runtime, `tokenizers`).
 - **`protobuf-compiler` (`protoc`)** — must be on `PATH`. The stack statically

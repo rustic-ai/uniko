@@ -19,7 +19,7 @@ selection, and GPU acceleration — that you reach for only when you need them.
 uniko publishes six crates to crates.io. Depend on the `uniko-api` facade and you get the whole
 stack; the lower layers are published too if you want to reach one directly.
 
-Requires **Rust >= 1.91** (edition 2024) — the workspace's `rust-version`.
+Requires **Rust >= 1.95** (edition 2024) — the workspace's `rust-version`.
 
 === "crates.io"
 
@@ -55,7 +55,7 @@ few tools must be present before `cargo build`:
 
 | Requirement | Why |
 |---|---|
-| **Rust ≥ 1.91** (edition 2024) | the workspace `rust-version` |
+| **Rust ≥ 1.95** (edition 2024) | the workspace `rust-version` |
 | **A C/C++ toolchain** | ONNX Runtime and other native crates |
 | **`protoc`** (protobuf-compiler) on `PATH` | `ort` needs it at build time |
 | **`mold`** — Linux only | `.cargo/config.toml` sets `-C link-arg=-fuse-ld=mold` unconditionally, so the link step fails without it |

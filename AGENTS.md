@@ -18,8 +18,8 @@ cargo build
 ```
 
 - **Rust:** stable channel (pinned in `rust-toolchain.toml`), **edition 2024**,
-  **MSRV `1.91`** (`rust-version` in the workspace `Cargo.toml`).
-- `cargo build` pulls `uni-db` (`^5.2` — the latest 5.x) and `uni-xervo` (`0.19.2`)
+  **MSRV `1.95`** (`rust-version` in the workspace `Cargo.toml`).
+- `cargo build` pulls `uni-db` (`^5.2` — the latest 5.x) and `uni-xervo` (`0.20.0`)
   straight from crates.io — **no token, private repo, or credentials required.**
   Those are the requirements in the workspace `Cargo.toml`; `Cargo.lock` has the
   exact resolved versions.

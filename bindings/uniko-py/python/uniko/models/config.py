@@ -93,6 +93,7 @@ class OcrConfigModel(BaseModel):
     det_artifact: str = "detection/v5/det.onnx"
     image_height: int = 48
     image_width: int = 320
+    max_image_width: Optional[int] = None
     normalization: str = "siglip"
     execution_providers: Optional[list[str]] = None
 

@@ -880,6 +880,11 @@ class TypedUnikoBuilder:
         self._inner = self._inner.readiness_timeout(seconds)
         return self
 
+    def verify_remote(self, on: bool) -> "TypedUnikoBuilder":
+        """Also check required remote models' endpoints and credentials."""
+        self._inner = self._inner.verify_remote(on)
+        return self
+
     async def build_runtime(self) -> Any:
         """A native ``SharedRuntime`` for this builder's models."""
         return await self._inner.build_runtime()

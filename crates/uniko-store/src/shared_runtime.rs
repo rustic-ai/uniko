@@ -9,7 +9,7 @@ use crate::ModelRuntime;
 use crate::config::UnikoConfig;
 use crate::error::{Result, UnikoError};
 use crate::model::ModelEntry;
-use crate::model_state::{self, ModelStates};
+use crate::model_state;
 
 /// When a store (or a [`SharedRuntime`]) loads its models.
 #[non_exhaustive]
@@ -21,7 +21,7 @@ pub enum PrefetchPolicy {
     Eager,
     /// Load nothing up front; each model loads on first use. A catalog-file
     /// entry with `warmup: eager` is still loaded by uni-xervo while the
-    /// runtime is built, and reads as not loaded until the store uses it.
+    /// runtime is built.
     Lazy,
     /// Return at once and load every model on a task spawned on the
     /// current tokio runtime, which must outlive the load (a runtime
@@ -40,35 +40,22 @@ impl PrefetchPolicy {
     pub(crate) async fn run(
         self,
         catalog: Arc<[ModelAliasSpec]>,
-        states: ModelStates,
         runtime: Arc<ModelRuntime>,
     ) -> Option<tokio::task::AbortHandle> {
         match self {
             Self::Lazy => None,
             Self::Eager => {
-                prefetch_through(&catalog, &states, runtime).await;
+                model_state::prefetch_each(catalog, runtime).await;
                 None
             }
             Self::Background => Some(
                 tokio::spawn(async move {
-                    prefetch_through(&catalog, &states, runtime).await;
+                    model_state::prefetch_each(catalog, runtime).await;
                 })
                 .abort_handle(),
             ),
         }
     }
-}
-
-async fn prefetch_through(
-    catalog: &[ModelAliasSpec],
-    states: &ModelStates,
-    runtime: Arc<ModelRuntime>,
-) {
-    model_state::prefetch_each(catalog, states, |alias| {
-        let runtime = runtime.clone();
-        async move { runtime.prefetch(&[alias.as_str()]).await }
-    })
-    .await;
 }
 
 /// A model runtime several stores can share, so each model loads once.
@@ -90,7 +77,6 @@ async fn prefetch_through(
 pub struct SharedRuntime {
     pub(crate) runtime: Arc<ModelRuntime>,
     pub(crate) catalog: Arc<[ModelAliasSpec]>,
-    pub(crate) states: ModelStates,
     answer_alias: Option<String>,
 }
 
@@ -129,16 +115,12 @@ impl SharedRuntime {
             .await
             .map_err(|e| UnikoError::Config(format!("model catalog is invalid: {e}")))?;
         let catalog: Arc<[ModelAliasSpec]> = catalog.into();
-        let states = model_state::new_states(&catalog);
         // A shared runtime outlives any one store, so its background load
         // is left to finish rather than tied to a handle.
-        let _ = prefetch
-            .run(catalog.clone(), states.clone(), runtime.clone())
-            .await;
+        let _ = prefetch.run(catalog.clone(), runtime.clone()).await;
         Ok(Self {
             runtime,
             catalog,
-            states,
             answer_alias: None,
         })
     }

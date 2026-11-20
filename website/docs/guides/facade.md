@@ -130,8 +130,8 @@ the load state in `capabilities()` is shared across them.
 
 One layer down, `SharedRuntime::build(&config, extra, policy)` with
 `KnowledgeBase::in_memory_shared` / `open_shared` does the same. `build_shared_runtime` and
-`open_with_runtime` are deprecated: they skip that check, and `model_status()` returns `None` for
-a store opened that way.
+`open_with_runtime` are deprecated: they skip that check, and a store opened that way does not
+know its catalog, so `model_status()` lists every alias the runtime holds.
 
 !!! note "Capabilities, not wiring"
     You never construct a `KnowledgeBase`, a pipeline, or a model catalog. The builder is the only
@@ -604,7 +604,8 @@ supporting evidence it's soft-invalidated with a recorded reason, not silently d
 
 - the optional engine features this build compiled in;
 - the modalities with a registered extractor;
-- each catalog model alias with its load state (`NotLoaded`, `Loaded` or `Failed` with the error);
+- each catalog model alias with its load state (`NotLoaded`, `Loading`, `Loaded` or `Failed` with
+  the error), as the model runtime reports it;
 - the answer alias, and whether OCR is compiled in and enabled.
 
 ```rust
@@ -615,11 +616,12 @@ for model in caps.models.unwrap_or_default() {
 ```
 
 Prefetch at open (with the default `PrefetchPolicy::Eager`) loads each alias in turn and keeps
-going past a failure, which it logs at `warn` and records as `Failed`; a later successful use
-clears it. A hybrid embedder that only uni-db's auto-embedding on write has used reads as
-`NotLoaded` until the first recall. `extractors` lists only extractors you registered; built-in
+going past a failure, which it logs at `warn`. The runtime records it, and a timed-out load, as
+`Failed` until a later load succeeds. The state counts every load, including one made only by
+uni-db's auto-embedding on write. `extractors` lists only extractors you registered; built-in
 text, code, markup, structured and PDF ingest are always available. Model entries never carry provider options; credentials show only as the
-`api_key_env` variable name and `base_url` loses any userinfo and query. The same per-alias report
+`api_key_env` variable name, and `base_url` (the configured endpoint, or a remote provider's
+default one) loses any userinfo and query. The same per-alias report
 is available one layer down as `KnowledgeBase::model_status()`.
 
 ### Require models at startup
@@ -655,7 +657,7 @@ if let Err(UnikoError::NotReady(failures)) = &built {
 | `Ocr` | `pdf-ocr` is compiled in, `ocr.enabled` is set, and `ocr/default` loads. |
 | `Generator` | The answer alias is set and loads. |
 | `Extractor(modality)` | An extractor is registered for the modality. |
-| `Accelerated(alias)` | The alias loads, and a non-CPU execution provider it asks for is among its active providers. This catches a build without the accelerator: `["cuda", "cpu"]` on a build without `gpu-cuda` runs on CPU and fails as `not_accelerated`. It cannot yet catch a GPU build whose GPU is missing or broken, because uni-xervo reports the providers compiled in, not the ones that attached (rustic-ai/uni-xervo#64). Only local ONNX embedding, hybrid-embedding and reranking models report providers; any other alias fails as `not_supported`. |
+| `Accelerated(alias)` | The alias loads, and a non-CPU execution provider it asks for is among the providers its sessions attached. `["cuda", "cpu"]` fails as `not_accelerated` when the model runs on CPU: on a build without `gpu-cuda`, on a GPU build whose CUDA libraries or driver are missing, or when the accelerator's output disagreed with CPU at load (uni-xervo then moves the model to CPU). Every `local/onnx` model reports its providers except document extraction; any other alias (a remote model, whisper.cpp) fails as `not_supported`. |
 
 A requirement the catalog, the compiled features or the registered extractors cannot meet fails
 before the store is created, without contacting any provider. The rest are checked after the store
@@ -665,8 +667,16 @@ the default `Eager` policy `build()` still waits for the rest afterwards. When a
 `build()` shuts the store down before returning, so a persistent path can be opened again.
 
 A remote model (an OpenAI-compatible endpoint, a hosted embedder) counts as loaded once its client
-is built and its API-key variable is set: nothing contacts the server, so readiness does not prove
-it is reachable (rustic-ai/uni-xervo#66).
+is built and its API-key variable is set: by default nothing contacts the server. Add
+`.verify_remote(true)` to the builder to also check that each required remote alias is reachable
+and accepts its credential. Each gets one cheap authenticated request (a model lookup for OpenAI
+and most providers, `/health` for llama.cpp), at most eight at a time, within `readiness_timeout`.
+A failure is `verification_failed`, and its `error` starts with the reason: `unauthorized`,
+`unreachable`, `not found`, `rate limited`, `timed out`, `unavailable`, `configuration error` or
+`failed`. A check still running when `readiness_timeout` runs out is cancelled and reported as
+`timed_out`.
+The setting also applies to every later `check_readiness` on the instance, so a frequent health
+probe makes these requests each time.
 
 Each failure carries a stable `code`:
 
@@ -680,6 +690,7 @@ Each failure carries a stable `code`:
 | `timed_out` | The model had not loaded when the timeout ran out. |
 | `nlp_unavailable` | The NLP models loaded but the pipeline could not start. |
 | `not_accelerated` | None of the accelerators the model asked for is among its active providers. |
+| `verification_failed` | With `verify_remote`, the remote endpoint could not be reached or rejected the credential; `error` holds the reason. |
 | `not_supported` | The check cannot be made for this model (an `Accelerated` requirement on a model that does not report providers). |
 
 `memory.check_readiness(&requirements, timeout).await` runs the same check on a built instance,

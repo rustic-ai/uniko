@@ -13,7 +13,7 @@ agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ### Prerequisites
 
-- **Rust ≥ 1.91** (edition 2024). Install via [rustup](https://rustup.rs/):
+- **Rust ≥ 1.95** (edition 2024). Install via [rustup](https://rustup.rs/):
 
   ```sh
   rustup toolchain install stable

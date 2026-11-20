@@ -541,6 +541,9 @@ impl Default for RerankerConfig {
     }
 }
 
+/// uni-xervo's default for [`OcrConfig::max_image_width`], in pixels.
+pub const DEFAULT_OCR_MAX_IMAGE_WIDTH: u32 = 3200;
+
 /// Pipeline-OCR model selection for tiered PDF extraction.
 ///
 /// When `enabled`, an `ocr/default` [`OcrModel`] alias is registered with
@@ -565,8 +568,15 @@ pub struct OcrConfig {
     pub det_artifact: String,
     /// Recognizer input height in pixels.
     pub image_height: u32,
-    /// Recognizer input width in pixels.
+    /// The narrowest a recognizer batch is, in pixels. Each text line keeps
+    /// its aspect ratio at `image_height` and is right-padded, so a long
+    /// line is read in full rather than squeezed to this width.
     pub image_width: u32,
+    /// The widest a text line is resized to, in pixels; a longer line is
+    /// squeezed to fit. `None` keeps uni-xervo's default
+    /// ([`DEFAULT_OCR_MAX_IMAGE_WIDTH`]). Must be at least `image_width`.
+    #[serde(default)]
+    pub max_image_width: Option<u32>,
     /// Recognizer normalization: `"imagenet"` or `"siglip"`. Defaults to
     /// `"siglip"`, which is what the PP-OCRv5 export expects.
     pub normalization: String,
@@ -587,6 +597,7 @@ impl Default for OcrConfig {
             det_artifact: "detection/v5/det.onnx".to_string(),
             image_height: 48,
             image_width: 320,
+            max_image_width: None,
             normalization: "siglip".to_string(),
             execution_providers: None,
         }
@@ -1043,6 +1054,24 @@ impl UnikoConfig {
     ///
     /// Returns `Err(UnikoError::Config)` if any constraint is violated.
     pub fn validate(&self) -> Result<()> {
+        if self.ocr.enabled {
+            let max = self
+                .ocr
+                .max_image_width
+                .unwrap_or(DEFAULT_OCR_MAX_IMAGE_WIDTH);
+            if self.ocr.image_width == 0 || self.ocr.image_height == 0 {
+                return Err(UnikoError::Config(
+                    "ocr.image_width and ocr.image_height must be positive".into(),
+                ));
+            }
+            if max < self.ocr.image_width {
+                return Err(UnikoError::Config(format!(
+                    "ocr.max_image_width ({max}) must be at least ocr.image_width ({})",
+                    self.ocr.image_width,
+                )));
+            }
+        }
+
         if self.embedding.dimensions == 0 {
             return Err(UnikoError::Config(
                 "embedding.dimensions must be positive".into(),
@@ -1140,6 +1169,52 @@ impl UnikoConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OCR widths are checked at `validate`, not at the first OCR load,
+    /// and only when OCR is on.
+    #[test]
+    fn ocr_widths_are_validated_when_ocr_is_enabled() {
+        let ocr = |image_width, max_image_width, enabled| UnikoConfig {
+            ocr: OcrConfig {
+                enabled,
+                image_width,
+                max_image_width,
+                ..OcrConfig::default()
+            },
+            ..UnikoConfig::default()
+        };
+        assert!(ocr(320, None, true).validate().is_ok());
+        assert!(ocr(640, Some(640), true).validate().is_ok());
+        let err = ocr(640, Some(320), true).validate().unwrap_err();
+        assert!(err.to_string().contains("max_image_width"), "{err}");
+        // Past uni-xervo's default cap with no explicit maximum.
+        assert!(ocr(4000, None, true).validate().is_err());
+        assert!(ocr(0, None, true).validate().is_err());
+        assert!(ocr(4000, None, false).validate().is_ok());
+    }
+
+    /// `max_image_width` reaches the OCR alias only when set, so uni-xervo
+    /// keeps its own default otherwise.
+    #[test]
+    fn ocr_max_image_width_reaches_the_catalog_only_when_set() {
+        let options = |max| {
+            let config = UnikoConfig {
+                ocr: OcrConfig {
+                    enabled: true,
+                    max_image_width: max,
+                    ..OcrConfig::default()
+                },
+                ..UnikoConfig::default()
+            };
+            crate::storage::embed_catalog(&config)
+                .into_iter()
+                .find(|s| s.alias == crate::schema::OCR_ALIAS)
+                .expect("OCR alias registered")
+                .options
+        };
+        assert!(options(None).get("max_image_width").is_none());
+        assert_eq!(options(Some(1600))["max_image_width"], 1600);
+    }
 
     /// `remote/llamacpp` requires `base_url`, `embedding_dimensions`
     /// and `max_input_tokens`, and rejects unknown keys — so the

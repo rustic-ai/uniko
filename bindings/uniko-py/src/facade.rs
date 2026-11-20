@@ -641,6 +641,16 @@ pymethods_with_sync! {
             Ok(slf)
         }
 
+        /// Also verify, when readiness runs, that each required remote
+        /// model can reach its endpoint with a valid credential: one cheap
+        /// request per alias, here and on every later `check_readiness`.
+        /// A failure is `verification_failed`, its reason in `error`. Off
+        /// by default.
+        fn verify_remote<'py>(slf: PyRef<'py, Self>, on: bool) -> PyResult<PyRef<'py, Self>> {
+            slf.map(|b| b.verify_remote(on))?;
+            Ok(slf)
+        }
+
         /// Enable the asynchronous streaming ingest pipeline.
         fn streaming<'py>(slf: PyRef<'py, Self>, on: bool) -> PyResult<PyRef<'py, Self>> {
             slf.map(|b| b.streaming(on))?;

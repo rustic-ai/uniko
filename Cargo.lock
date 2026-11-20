@@ -10430,9 +10430,9 @@ dependencies = [
 
 [[package]]
 name = "uni-xervo"
-version = "0.19.2"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a754c6566e43c332b4c6c832f8d90aa364c8a0159ba6fb9b78cce3d26b9047f"
+checksum = "83395d1380abbbc735e7aed4d31a88c1ceb2a53fa3a698b1c9183a582f03eb96"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10461,9 +10461,9 @@ dependencies = [
 
 [[package]]
 name = "uni-xervo-pdf"
-version = "0.19.2"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f403d07cc6c99f518803a4d56bd919e7e73dd6ad4adabab99246bc6287ba2305"
+checksum = "98803f1967259bb82fd053d740b81913410ea9d8b2c679303a125ce979fdc6e1"
 dependencies = [
  "async-trait",
  "hayro",

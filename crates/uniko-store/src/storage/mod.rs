@@ -116,9 +116,6 @@ pub struct KnowledgeBase {
     /// elsewhere ([`KnowledgeBase::open_with_runtime`]), whose catalog
     /// this store never saw.
     pub(crate) catalog: Option<Arc<[ModelAliasSpec]>>,
-    /// Per-alias load state for [`KnowledgeBase::model_status`]. Empty
-    /// when the catalog is unknown.
-    pub(crate) model_states: crate::model_state::ModelStates,
     /// The store's own background prefetch, cancelled at shutdown.
     pub(crate) prefetch_task: Option<tokio::task::AbortHandle>,
     /// Marks the path open in this process while any clone of this store
@@ -285,7 +282,6 @@ impl KnowledgeBase {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
-        let model_states = crate::model_state::new_states(&kept);
         let db = Uni::in_memory().xervo_catalog(catalog).build().await?;
         apply_schema(&db, &config).await?;
         let mut kb = Self {
@@ -295,7 +291,6 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
-            model_states,
             prefetch_task: None,
             open_path: None,
         };
@@ -362,7 +357,6 @@ impl KnowledgeBase {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
-        let model_states = crate::model_state::new_states(&kept);
         let open_path = OpenPath::claim(path.as_ref())?;
         let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_catalog(catalog);
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
@@ -380,7 +374,6 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
-            model_states,
             prefetch_task: None,
             open_path: None,
         }
@@ -455,7 +448,6 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(runtime.catalog.clone()),
-            model_states: runtime.states.clone(),
             prefetch_task: None,
             open_path: None,
         }
@@ -466,8 +458,7 @@ impl KnowledgeBase {
     /// Build a single model runtime that multiple KBs can share.
     ///
     /// Superseded by [`SharedRuntime::build`], whose handle also carries the
-    /// catalog, so stores over it can be checked against their config and
-    /// report [`model_status`](Self::model_status).
+    /// catalog, so stores over it can be checked against their config.
     ///
     /// # Errors
     ///
@@ -522,7 +513,6 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: None,
-            model_states: Arc::default(),
             prefetch_task: None,
             open_path: Some(open_path),
         }
@@ -542,9 +532,7 @@ impl KnowledgeBase {
         let (Some(catalog), Some(runtime)) = (self.catalog.clone(), self.model_runtime()) else {
             return None;
         };
-        policy
-            .run(catalog, self.model_states.clone(), runtime)
-            .await
+        policy.run(catalog, runtime).await
     }
 
     /// Run post-construction init steps. Currently:
@@ -1088,6 +1076,19 @@ pub fn embed_catalog(config: &UnikoConfig) -> Vec<ModelAliasSpec> {
         // `uni-xervo-pdf`. Option keys mirror uni-xervo's `local_onnx` OCR
         // loader (`onnx_path`/`char_dict_path`/`det_onnx_path`/…); defaults
         // target the English PP-OCRv5 export `monkt/paddleocr-onnx`.
+        let mut ocr_options = serde_json::json!({
+            "onnx_path": config.ocr.rec_artifact,
+            "char_dict_path": config.ocr.char_dict_path,
+            "det_onnx_path": config.ocr.det_artifact,
+            "image_height": config.ocr.image_height,
+            "image_width": config.ocr.image_width,
+            "normalization": config.ocr.normalization,
+            "blank_class": 0,
+            "execution_providers": ocr_eps,
+        });
+        if let Some(max) = config.ocr.max_image_width {
+            ocr_options["max_image_width"] = max.into();
+        }
         catalog.push(ModelAliasSpec {
             alias: OCR_ALIAS.to_string(),
             task: ModelTask::Ocr,
@@ -1099,16 +1100,7 @@ pub fn embed_catalog(config: &UnikoConfig) -> Vec<ModelAliasSpec> {
             timeout: None,
             load_timeout: None,
             retry: None,
-            options: serde_json::json!({
-                "onnx_path": config.ocr.rec_artifact,
-                "char_dict_path": config.ocr.char_dict_path,
-                "det_onnx_path": config.ocr.det_artifact,
-                "image_height": config.ocr.image_height,
-                "image_width": config.ocr.image_width,
-                "normalization": config.ocr.normalization,
-                "blank_class": 0,
-                "execution_providers": ocr_eps,
-            }),
+            options: ocr_options,
         });
     }
 

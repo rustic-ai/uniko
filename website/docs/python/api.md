@@ -124,7 +124,7 @@ The fields and their defaults are listed in the [configuration guide](../guides/
   `gpu-metal`, `candle`, `llm`, `batch-record`) and whether this build has it;
 - `extractors`: the modalities with a registered extractor;
 - `models`: one entry per catalog alias, with `alias`, `task`, `provider_id`, `model_id`,
-  `revision`, `state` (`"not_loaded"`, `"loaded"` or `"failed"`, with `error` when failed),
+  `revision`, `state` (`"not_loaded"`, `"loading"`, `"loaded"` or `"failed"`, with `error` when failed),
   `api_key_env`, `base_url`, and the requested and active ONNX execution providers;
 - `answer_alias`, `ocr_compiled` and `ocr_configured`.
 
@@ -137,9 +137,9 @@ that fails, so a single bad alias shows up here as `"failed"` instead of stoppin
 loading; a later successful use clears it. `extractors` lists only extractors registered with
 `extractor()`; built-in text, code, markup, structured and PDF ingest are always available. Model entries never include
 provider options; an API key appears only as its environment-variable name, and `base_url` has
-any userinfo and query string removed. `active_execution_providers` is only known for loaded
-local ONNX embedding and reranking models, and lists the providers requested minus those not
-compiled in, not proof that a GPU attached. `TypedUniko.capabilities()` returns the same as a
+any userinfo and query string removed. `active_execution_providers` is known once a local ONNX
+model has loaded, and lists the providers its sessions attached: one that failed to register, or
+whose output disagreed with CPU, is left out. `TypedUniko.capabilities()` returns the same as a
 `Capabilities` Pydantic model.
 
 !!! warning "`shutdown` needs sole ownership"
@@ -175,6 +175,7 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `runtime` | `runtime(runtime: SharedRuntime) -> UnikoBuilder` | — (sync) | Open over a runtime shared with other instances; `build()` raises `ConfigError` if it does not serve this builder's models. |
 | `require` | `require(requirements: list[Requirement]) -> UnikoBuilder` | — (sync) | Models or stages `build()` must have ready; it raises `ReadinessError` otherwise. Adds to earlier calls. |
 | `readiness_timeout` | `readiness_timeout(seconds: float \| None) -> UnikoBuilder` | — (sync) | How long `build()` waits for the required models to load; `None` or `math.inf` waits as long as loading takes. |
+| `verify_remote` | `verify_remote(on: bool) -> UnikoBuilder` | — (sync) | Also check that each required remote model is reachable and accepts its credential, at `build()` and every later `check_readiness`; a failure is `verification_failed`. Off by default. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
 | `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |

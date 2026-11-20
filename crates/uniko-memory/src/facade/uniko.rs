@@ -49,6 +49,9 @@ pub struct Uniko {
     streaming: Option<Arc<PipelineSystem>>,
     scope: RecallScope,
     pub(super) extractors: Arc<ModalityRegistry>,
+    /// Whether readiness checks also verify remote aliases
+    /// ([`UnikoBuilder::verify_remote`]).
+    pub(super) verify_remote: bool,
 }
 
 /// What [`Uniko::inspect_store`] found.
@@ -377,6 +380,7 @@ impl Uniko {
             streaming,
             scope,
             extractors,
+            verify_remote: false,
         }
     }
 }
@@ -430,6 +434,7 @@ pub struct UnikoBuilder {
     prefetch: PrefetchPolicy,
     requirements: Vec<super::Requirement>,
     readiness_timeout: Option<std::time::Duration>,
+    verify_remote: bool,
 }
 
 impl UnikoBuilder {
@@ -616,6 +621,29 @@ impl UnikoBuilder {
         self
     }
 
+    /// Also check, when readiness runs, that each required remote alias
+    /// can reach its endpoint with a valid credential. Off by default.
+    ///
+    /// Each required alias that loaded gets one cheap authenticated request
+    /// (a model lookup for OpenAI and most providers, `/health` for
+    /// llama.cpp), at most eight at a time, within the
+    /// [`readiness_timeout`](UnikoBuilder::readiness_timeout). A failure is
+    /// reported as `verification_failed`, with the reason (`unauthorized`,
+    /// `unreachable`, `not found`, ...) in its `error`. Local models pass
+    /// without any request.
+    ///
+    /// Applies to [`build`](UnikoBuilder::build) and to every later
+    /// [`check_readiness`](Uniko::check_readiness) on the instance, so a
+    /// health endpoint probing often makes these requests each time.
+    /// Without it, nothing contacts a remote provider before its first
+    /// request, and a remote alias reads as ready once its client is
+    /// configured.
+    #[must_use]
+    pub fn verify_remote(mut self, verify: bool) -> Self {
+        self.verify_remote = verify;
+        self
+    }
+
     /// Build a [`SharedRuntime`] for this builder's models (embedding,
     /// reranker, NLP, catalog file and LLMs), loading them as
     /// [`prefetch`](UnikoBuilder::prefetch) says. Pass it to
@@ -720,6 +748,7 @@ impl UnikoBuilder {
                 entries: &entries,
                 extractors: &self.extractors,
                 answer_alias: llm_alias.as_deref(),
+                verify_remote: self.verify_remote,
             },
         )?;
         let requirement_config = (!self.requirements.is_empty()).then(|| config.clone());
@@ -752,6 +781,7 @@ impl UnikoBuilder {
                 entries: &entries,
                 extractors: &self.extractors,
                 answer_alias: llm_alias.as_deref(),
+                verify_remote: self.verify_remote,
             };
             let failures =
                 super::readiness::check(&kb, &self.requirements, &cx, self.readiness_timeout).await;
@@ -785,9 +815,9 @@ impl UnikoBuilder {
             None
         };
 
-        Ok(Uniko::from_parts(
-            kb, llm_alias, streaming, self.scope, extractors,
-        ))
+        let mut memory = Uniko::from_parts(kb, llm_alias, streaming, self.scope, extractors);
+        memory.verify_remote = self.verify_remote;
+        Ok(memory)
     }
 }
 
