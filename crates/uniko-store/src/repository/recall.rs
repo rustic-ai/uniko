@@ -790,9 +790,11 @@ impl KnowledgeBase {
     /// no token vectors (not embedded yet, or a null column) is left out;
     /// the caller decides how to rank it.
     ///
-    /// This does not go through `uni.vector.query`, whose `_vid IN (…)`
-    /// filter is not applied to unflushed rows of a multi-vector column
-    /// (rustic-ai/uni-db#343).
+    /// This reads the candidates directly rather than going through
+    /// `uni.vector.query`: a rerank needs exact scores for exactly these
+    /// ids, which a filtered top-k search does not promise. (Before uni-db
+    /// 5.3 that search also leaked unflushed rows past its filter,
+    /// rustic-ai/uni-db#343.)
     ///
     /// `label`/`colbert_field`/`content_field` are trusted identifiers.
     /// Returns an empty vec when either input is empty.

@@ -6181,11 +6181,10 @@ mod hybrid_regressions {
         memory.shutdown().await.unwrap();
     }
 
-    /// #70: scoped recall should use the sparse channel. uni-db 5.2.1
-    /// rejects a filtered `uni.sparse.query`, so today this reports
-    /// `sparse: failed / query_failed`.
+    /// #70: scoped recall uses the sparse channel. Before uni-db 5.3 a
+    /// filtered `uni.sparse.query` was rejected (rustic-ai/uni-db#344), so
+    /// this reported `sparse: failed / query_failed`.
     #[tokio::test]
-    #[ignore = "waits on rustic-ai/uni-db#344"]
     async fn scoped_recall_applies_the_sparse_channel() {
         if !expensive() {
             return;

@@ -56,11 +56,11 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.5.1" }
 # provider-onnx (embeddings + NLP + reranker), and every remote provider.
 # GPU accelerators (gpu-cuda / gpu-metal) are opt-in via uniko-store /
 # uniko-bench passthrough features.
-# Tracks the latest 5.x release (^5.2.1 = >=5.2.1, <6.0.0); `cargo update -p uni-db`
+# Tracks the latest 5.x release (^5.3.0 = >=5.3.0, <6.0.0); `cargo update -p uni-db`
 # refreshes the lockfile to the newest compatible version. The floor is
-# required, not cosmetic: 5.2 is the first release built on uni-xervo 0.19.2,
-# 5.0 declared `provider-mistralrs`, which uni-xervo 0.19 removed, and 5.2.1
-# fixes the first store write failing on Windows (uni-db#338).
+# required, not cosmetic: 5.3 applies a search filter to unflushed rows in
+# multi-vector search (uni-db#343) and lets sparse search take a filter
+# (uni-db#344), which scoped hybrid recall relies on.
 #
 # NOTE (2026-06-28): default-features disabled to drop `provider-candle`.
 # It pulls candle-cuda kernels that nvcc (CUDA 13) cannot compile against this
@@ -77,7 +77,7 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.5.1" }
 # unconditionally rather than behind a uniko passthrough feature because it
 # costs nothing to compile: uni-xervo gates it on `reqwest` + `base64`, which
 # every other remote provider here already pulls in.
-uni-db = { version = "5.2.1", default-features = false, features = [
+uni-db = { version = "5.3.0", default-features = false, features = [
     "mimalloc",
     "lance-backend",
     "apoc-core",
