@@ -168,7 +168,46 @@ pub async fn ingest_turns_atomic(
     }
 
     if absent.is_empty() {
-        // Whole-unit replay. Advance the chain head to the unit's LAST turn:
+        // Whole-unit replay, but only of the same unit: every tool call must
+        // already be recorded with the same payload hash (which covers its
+        // result and a non-default performer). A call that changed, or one
+        // the stored unit never had, is a conflict, not a silent replay.
+        let mut replayed_calls: Vec<Vec<super::tool::ToolCallOutcome>> =
+            Vec::with_capacity(unit.len());
+        for turn in unit {
+            let mut outcomes = Vec::with_capacity(turn.tools.len());
+            for call in &turn.tools {
+                let stored = kb
+                    .get_node_by_ext_id("Action", "action_id", &call.action_id)
+                    .await?;
+                let Some((nid, props)) = stored else {
+                    return Err(UnikoError::id_conflict(
+                        "Action",
+                        "action_id",
+                        &call.action_id,
+                    ));
+                };
+                let stored_hash = match props.get("payload_hash") {
+                    Some(uniko_store::Value::String(h)) => Some(h.as_str()),
+                    _ => None,
+                };
+                if stored_hash != call.payload_hash.as_deref() {
+                    return Err(UnikoError::id_conflict(
+                        "Action",
+                        "action_id",
+                        &call.action_id,
+                    ));
+                }
+                outcomes.push(super::tool::ToolCallOutcome {
+                    action_id: call.action_id.clone(),
+                    action_node: nid,
+                    payload: None,
+                    was_replay: true,
+                });
+            }
+            replayed_calls.push(outcomes);
+        }
+        // Advance the chain head to the unit's LAST turn:
         // its NEXT edge already exists on disk, so a following unit chaining
         // off it is correct. (The single-message path leaves the head stale,
         // which costs the *next* turn its NEXT edge.)
@@ -193,7 +232,7 @@ pub async fn ingest_turns_atomic(
         return Ok(UnitIngestResult {
             turns,
             attachments: unit.iter().map(|_| Vec::new()).collect(),
-            tool_calls: unit.iter().map(|_| Vec::new()).collect(),
+            tool_calls: replayed_calls,
             was_replay: true,
             attempts: 0,
         });
