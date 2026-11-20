@@ -235,9 +235,10 @@ impl KnowledgeBase {
             return Some(Vec::new());
         };
         // `ModelRuntime::verify`'s future is not `Send` for every lifetime
-        // (its stream closure borrows `&&str`), so a caller that must be
-        // `Send`, like a spawned task, cannot hold it. Run it to completion
-        // on a blocking-pool thread instead, which needs no `Send` future.
+        // (its stream closure borrows `&&str`, rustic-ai/uni-xervo#73), so a
+        // caller that must be `Send`, like a spawned task, cannot hold it.
+        // Run it to completion on a blocking-pool thread instead, which
+        // needs no `Send` future.
         // The timeout is applied on that thread too, so a check cut off by
         // it is cancelled rather than left running.
         let owned: Vec<String> = aliases.iter().map(|a| (*a).to_string()).collect();

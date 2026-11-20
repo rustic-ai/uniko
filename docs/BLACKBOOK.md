@@ -337,7 +337,7 @@ The practical consequence: if a higher crate needs a new graph operation, you ad
 
 ### 2.4 The uni-db foundation
 
-Everything uniko does rests on `uni-db` (5.2.1 from crates.io, tracked as `^5.2.1`, with `default-features = false` and an explicit provider list in the workspace `Cargo.toml`), an **embedded multi-model engine that combines graph, vector, full-text, and a logic runtime in a single in-process store** — nothing to keep in sync, nothing to deploy. `uniko-store` is a typed façade over it. Concretely, uni-db provides:
+Everything uniko does rests on `uni-db` (5.3.0 from crates.io, tracked as `^5.3.0`, with `default-features = false` and an explicit provider list in the workspace `Cargo.toml`), an **embedded multi-model engine that combines graph, vector, full-text, and a logic runtime in a single in-process store** — nothing to keep in sync, nothing to deploy. `uniko-store` is a typed façade over it. Concretely, uni-db provides:
 
 - **A property graph with OpenCypher.** uniko's entire memory is one property graph — 26 node labels, 55 edge types. Generic CRUD in store builds parameterized Cypher (`build_inline_props`/`build_set_clause`), with `validate_label`/`validate_edge_type`/`validate_property_name` gating every interpolated identifier while values are always `$pN`-bound.
 - **Vector, full-text (BM25), sparse, and multi-vector (ColBERT) indexes** in the same store as the graph. Store wraps `uni.vector.query`, `uni.fts.query`, `uni.sparse.query`, and a ColBERT MaxSim path. A hybrid embedder (BGE-M3) fuses dense + sparse + per-token ColBERT columns into a *single* `EmbedHybrid` forward pass. Default vector index is `HnswSq{m:16, ef_construction:100}`, Cosine metric, 384 dimensions.
@@ -1407,7 +1407,7 @@ Items appearing in multiple lists accumulate. `hybrid_search_weighted(&[SearchTa
 **Recall reads** (`repository/recall.rs`, the largest read module) return decoded `ScoredRow`/`TemporalRow`/`NodeContentRow`:
 
 - `resolve_scope_allow_set(ScopeFilter)` — unions per-anchor-type MATCH arms (Message/Observation/Episode/Chunk) into an id allow-set; each candidate query then filters with `AND id(n) IN $allow`.
-- `recall_vector_search`, `recall_fulltext_search`, `recall_sparse_search` (`uni.sparse.query`), `recall_colbert_maxsim`. Sparse restricts at the *index* level via a `_vid IN (...)` SQL filter string — `_vid` equals Cypher `id(n)`; uni-db 5.2.1 rejects that filter (rustic-ai/uni-db#344), so scoped sparse recall reports `sparse: failed` today. ColBERT reads the candidates' `colbert_embedding` token vectors with `MATCH … WHERE id(node) IN $ids` and computes MaxSim in process (`repository/recall.rs:804`), because the filtered multi-vector `uni.vector.query` admits unflushed rows outside its filter (rustic-ai/uni-db#343).
+- `recall_vector_search`, `recall_fulltext_search`, `recall_sparse_search` (`uni.sparse.query`), `recall_colbert_maxsim`. Sparse restricts at the *index* level via a `_vid IN (...)` SQL filter string — `_vid` equals Cypher `id(n)`. uni-db 5.3 applies it (5.2.1 rejected it, rustic-ai/uni-db#344, so scoped sparse recall reported `sparse: failed`). ColBERT reads the candidates' `colbert_embedding` token vectors with `MATCH … WHERE id(node) IN $ids` and computes MaxSim in process (`repository/recall.rs:806`): a rerank needs exact scores for exactly those ids, which a filtered top-k search does not promise. (Before uni-db 5.3 that search also admitted unflushed rows outside its filter, rustic-ai/uni-db#343.)
 - `temporal_window_hits` — `btic_overlaps(f.valid_at, $qbtic)` UDF for Facts; BTree range for Observation/Episode.
 - `recall_chunk_and_entity_scoped`, `resolve_entity_seeds`, `any_unstable_entities` (drift override signal), `fetch_node_contents`, `query_cypher` (read-only decoded rows).
 
@@ -3135,7 +3135,7 @@ The `RECALL_PROF` `eprintln!` lines in `recall/mod.rs` and `recall.rs` are uncon
 - **`mold`** on Linux — `.cargo/config.toml` unconditionally sets `-C link-arg=-fuse-ld=mold`, so it is a hard build dependency, not an optimization.
 - **`uv`** for the Python bindings and the docs site.
 
-Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 5.2` and `uni-xervo 0.20.0`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
+Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 5.3` and `uni-xervo 0.20.0`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
 
 > **The first build is slow.** `ort`, `tokenizers`, and `half` compile at `opt-level=3` even in the dev profile.
 
@@ -3394,7 +3394,7 @@ Rules of the gate:
 
 #### Invariant 2 — never edit `../uni/`
 
-uni-db lives at `../uni/` (or `../uni-db/`) as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 5.2 and uni-xervo 0.20.0 from crates.io. When you hit a uni-db bug, the discipline is:
+uni-db lives at `../uni/` (or `../uni-db/`) as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 5.3 and uni-xervo 0.20.0 from crates.io. When you hit a uni-db bug, the discipline is:
 
 1. Build a **minimal, isolated reproduction test** in `uniko-store` (the canonical pattern is `crates/uniko-store/tests/unidb_bytes_return_repro.rs`).
 2. File it upstream against `rustic-ai/uni-db`.
