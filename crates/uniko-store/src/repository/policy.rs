@@ -314,14 +314,20 @@ impl KnowledgeBase {
         if id.trim().is_empty() {
             return Err(UnikoError::Config(format!("{id_field} must not be empty")));
         }
+        // A Participant goes through `ensure_participant`, which never sets
+        // a known kind back to `unknown`. `merge_node` with `{kind: unknown}`
+        // would, when a registration lands between a lookup and the merge.
+        if label == labels::PARTICIPANT {
+            let none = HashMap::new();
+            return Ok(self
+                .ensure_participant(id, "unknown", &none, &none)
+                .await?
+                .0);
+        }
         if let Some((nid, _)) = self.get_node_by_ext_id(label, id_field, id).await? {
             return Ok(nid);
         }
-        let mut props = HashMap::new();
-        if label == labels::PARTICIPANT {
-            props.insert("kind".to_string(), Value::String("unknown".to_string()));
-        }
-        self.merge_node(label, id_field, id, &props).await
+        self.merge_node(label, id_field, id, &HashMap::new()).await
     }
 
     async fn count_edges(&self, edge: &str, from: NodeId, to: NodeId) -> Result<i64> {
