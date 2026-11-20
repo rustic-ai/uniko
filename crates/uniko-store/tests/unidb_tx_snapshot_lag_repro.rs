@@ -23,7 +23,7 @@
 //!
 //! Run:
 //! ```sh
-//! cargo nextest run -p uniko-store --test unidb_tx_snapshot_lag_repro \
+//! cargo nextest run -p uniko-store --test integration unidb_tx_snapshot_lag_repro:: \
 //!   --run-ignored all --no-capture
 //! ```
 //!

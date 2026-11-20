@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.server
 import math
 from pathlib import Path
 from typing import Any
@@ -63,9 +64,17 @@ def test_a_timed_out_build_releases_the_path(tmp_path: Path) -> None:
         )
 
     # Cut the load off at once: the store must still be released.
-    with pytest.raises(uniko.ReadinessError) as info:
-        builder().require([R.embedder()]).readiness_timeout(0.0).build_sync()
-    failures = info.value.failures
+    try:
+        uni = builder().require([R.embedder()]).readiness_timeout(0.0).build_sync()
+    except uniko.ReadinessError as e:
+        failures = e.failures
+    else:
+        # The load is polled once before the deadline is checked. A model
+        # this process has already resolved can finish in that one poll,
+        # and then the build really is ready; the path must still reopen.
+        uni.shutdown_sync()
+        builder().build_sync().shutdown_sync()
+        return
     _skip_if_embedder_unavailable(failures)
     assert [(f["requirement"], f["code"]) for f in failures] == [
         ("embedder", "timed_out")
@@ -105,10 +114,72 @@ async def test_a_lazy_store_loads_what_is_required() -> None:
 
 def test_typed_check_readiness() -> None:
     uni = TypedUniko.builder().config(NO_RERANK).prefetch("lazy").build_sync()
-    failures = uni.check_readiness_sync([R.generator(), R.accelerated("nlp/default")])
+    failures = uni.check_readiness_sync([R.generator(), R.accelerated("embed/typo")])
     assert all(isinstance(f, ReadinessFailure) for f in failures)
     assert [(f.requirement, f.code) for f in failures] == [
         ("generator", "not_configured"),
-        ("accelerated:nlp/default", "not_supported"),
+        ("accelerated:embed/typo", "not_in_catalog"),
     ]
     uni.shutdown_sync()
+
+
+class _Status(http.server.BaseHTTPRequestHandler):
+    status = 200
+    hits = 0
+
+    def do_GET(self) -> None:  # noqa: N802 - the handler API's name
+        type(self).hits += 1
+        self.send_response(type(self).status)
+        self.send_header("content-length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        pass
+
+
+def _stub(status: int) -> tuple[Any, type[_Status]]:
+    import threading
+
+    handler = type("Handler", (_Status,), {"status": status, "hits": 0})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, handler
+
+
+def _remote(url: str) -> uniko.UnikoBuilder:
+    return (
+        uniko.Uniko.builder()
+        .config(NO_RERANK)
+        .prefetch("lazy")
+        .llm(uniko.LlmSpec.llamacpp("gen/a", "stub", url))
+        .require([R.alias("gen/a")])
+    )
+
+
+def test_verify_remote_is_opt_in_and_reports_why() -> None:
+    server, handler = _stub(503)
+    url = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    try:
+        _remote(url).build_sync().shutdown_sync()
+        assert handler.hits == 0, "nothing is contacted unless asked"
+
+        with pytest.raises(uniko.ReadinessError) as info:
+            _remote(url).verify_remote(True).build_sync()
+        [failure] = info.value.failures
+        assert failure["code"] == "verification_failed"
+        assert failure["error"].startswith("unavailable")
+    finally:
+        server.shutdown()
+
+    server, handler = _stub(200)
+    url = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    try:
+        uni = _remote(url).verify_remote(True).build_sync()
+        seen = handler.hits
+        assert seen >= 1
+        assert uni.check_readiness_sync([R.alias("gen/a")]) == []
+        assert handler.hits > seen
+        uni.shutdown_sync()
+    finally:
+        server.shutdown()

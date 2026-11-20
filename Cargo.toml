@@ -33,7 +33,7 @@ default-members = [
 [workspace.package]
 version = "0.5.1"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.95"
 license = "Apache-2.0"
 authors = ["Dragonscale Industries Inc. <dev@dragonscale.ai>"]
 repository = "https://github.com/rustic-ai/uniko"
@@ -98,16 +98,16 @@ uni-db = { version = "5.2.1", default-features = false, features = [
 # uses uni-xervo internally but does not re-export the type. This MUST
 # resolve to the same version uni-db picks, or `ModelRuntime` is two
 # distinct types and `open_with_runtime` stops type-checking.
-# The 0.19.2 floor matches uni-db 5.2.0 and brings the kniv v7 fix that keeps
-# titles and initials ("Sen. Robert F. Kennedy") inside one sentence; 0.19.0
-# is excluded anyway, since its ort auto-device policy let CoreML claim nodes
-# on CPU-only macOS builds.
-uni-xervo = { version = "0.19.2", default-features = false }
+# 0.20 reports the execution providers a session actually attached (for every
+# local/onnx task), exposes the runtime's per-alias load state and an opt-in
+# remote reachability check, fixes OCR spacing and long-line truncation, and
+# locks hf-hub cache downloads. uni-db 5.2.1 allows any `>=0.19.2, <1.0`.
+uni-xervo = { version = "0.20.0", default-features = false }
 # Tiered PDF extraction (native text -> OCR -> doc-VLM). Pulls only traits +
 # the pure-Rust native (lopdf) + rasterizer (hayro) tiers; the inference
 # providers ride on `uni-xervo` itself. Built against the same crates.io
-# uni-xervo 0.19.2, so the `OcrModel` / `ModelRuntime` types unify.
-uni-xervo-pdf = { version = "0.19.2", default-features = false, features = [
+# uni-xervo 0.20.0, so the `OcrModel` / `ModelRuntime` types unify.
+uni-xervo-pdf = { version = "0.20.0", default-features = false, features = [
     "pdf-input",
     "hayro",
 ] }
@@ -157,7 +157,7 @@ tree-sitter-javascript = "0.25"
 tree-sitter-typescript = "0.23"
 
 # ML / embedding
-# Pinned to the exact rc uni-xervo 0.19.1 requires (`=2.0.0-rc.15`). A lower
+# Pinned to the exact rc uni-xervo 0.19.1 through 0.20 require (`=2.0.0-rc.15`). A lower
 # floor resolves to a second, incompatible ort copy.
 ort = "2.0.0-rc.15"
 tiktoken-rs = "0.12"

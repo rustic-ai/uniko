@@ -2,7 +2,7 @@
 //! evidence messages that our single-hop retrieval misses.
 //!
 //! Run: cargo nextest run -p uniko-extract --features onnx \
-//!   --test obs_for_misses_test --nocapture --run-ignored all
+//!   --test integration obs_for_misses_test:: --nocapture --run-ignored all
 
 #[cfg(feature = "onnx")]
 mod onnx_tests {

@@ -11,6 +11,8 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Integration tests are modules of one binary (tests/integration.rs).
+autotests = false
 
 [dependencies]
 uniko-pipes = { workspace = true }
@@ -66,3 +68,7 @@ code-parse = [
     "dep:tree-sitter-javascript",
     "dep:tree-sitter-typescript",
 ]
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

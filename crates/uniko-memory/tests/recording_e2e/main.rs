@@ -6,7 +6,7 @@
 //! `tests/<name>.rs` file is included as a module so the suite links once
 //! instead of once per file.
 //!
-//! Run: `cargo nextest run -p uniko-memory --test recording_e2e`
+//! Run: `cargo nextest run -p uniko-memory --test integration recording_e2e::`
 
 mod action_e2e;
 mod episode_e2e;

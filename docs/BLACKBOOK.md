@@ -337,7 +337,7 @@ The practical consequence: if a higher crate needs a new graph operation, you ad
 
 ### 2.4 The uni-db foundation
 
-Everything uniko does rests on `uni-db` (5.1 from crates.io, tracked as `^5.1`, with `default-features = false` and an explicit provider list in the workspace `Cargo.toml`), an **embedded multi-model engine that combines graph, vector, full-text, and a logic runtime in a single in-process store** — nothing to keep in sync, nothing to deploy. `uniko-store` is a typed façade over it. Concretely, uni-db provides:
+Everything uniko does rests on `uni-db` (5.2.1 from crates.io, tracked as `^5.2.1`, with `default-features = false` and an explicit provider list in the workspace `Cargo.toml`), an **embedded multi-model engine that combines graph, vector, full-text, and a logic runtime in a single in-process store** — nothing to keep in sync, nothing to deploy. `uniko-store` is a typed façade over it. Concretely, uni-db provides:
 
 - **A property graph with OpenCypher.** uniko's entire memory is one property graph — 26 node labels, 55 edge types. Generic CRUD in store builds parameterized Cypher (`build_inline_props`/`build_set_clause`), with `validate_label`/`validate_edge_type`/`validate_property_name` gating every interpolated identifier while values are always `$pN`-bound.
 - **Vector, full-text (BM25), sparse, and multi-vector (ColBERT) indexes** in the same store as the graph. Store wraps `uni.vector.query`, `uni.fts.query`, `uni.sparse.query`, and a ColBERT MaxSim path. A hybrid embedder (BGE-M3) fuses dense + sparse + per-token ColBERT columns into a *single* `EmbedHybrid` forward pass. Default vector index is `HnswSq{m:16, ef_construction:100}`, Cosine metric, 384 dimensions.
@@ -345,7 +345,7 @@ Everything uniko does rests on `uni-db` (5.1 from crates.io, tracked as `^5.1`, 
 - **A native bitemporal type, `DataType::Btic`.** A `Fact`'s `valid_at` is one half-open interval `[lo, hi)` with per-bound granularity and certainty — *not* a `valid_from`/`valid_until` pair. Certainty upgrades `Approximate → Definite` once cumulative observation count crosses `CERTAINTY_THRESHOLD = 10`. Recall matches validity via the `btic_overlaps(f.valid_at, $window)` scalar Cypher function (Allen algebra: `a.lo < b.hi && b.lo < a.hi`).
 - **Serializable Snapshot Isolation (SSI) transactions** with retriable conflict classification, plus `bulk_insert_vertices`/`bulk_insert_edges` fast paths that bypass the Cypher executor. The bulk path is measured ~980× faster per row than Cypher (bulk ~150µs/edge vs Cypher ~147ms/edge at sess=24) because the VIDs are already known — but it doesn't return EIDs and doesn't re-validate property names, so ingest hot paths validate keys up front.
 
-Above uni-db sits **`uni-xervo`** (0.19.2), the model runtime: ONNX embedding/NLP/rerank/OCR plus remote providers (`openai`, `gemini`, `vertexai`, `mistral`, `anthropic`, `voyageai`, `cohere`, `azure-openai`, and `llamacpp` — an HTTP client for a `llama-server` the operator runs) and the in-process `candle` provider. uni-xervo 0.19 removed `mistralrs` entirely and uni-db 5.1+ no longer declares the feature; `provider-candle` is also off in this workspace (dropped with `default-features = false`) and returns only via the `candle` passthrough feature. Store reaches it internally via `db.xervo()` and exposes it through the `model.rs` seam (`embed`, `embed_multivector`, `generate`, `rerank`, `model_runtime`). The default stack: BGE-small-en-v1.5 (384d) embedder, `ms-marco-MiniLM-L-6-v2` cross-encoder reranker (enabled by default), and `kniv-deberta-xsmall` INT8 for the NLP cascade.
+Above uni-db sits **`uni-xervo`** (0.20.0), the model runtime: ONNX embedding/NLP/rerank/OCR plus remote providers (`openai`, `gemini`, `vertexai`, `mistral`, `anthropic`, `voyageai`, `cohere`, `azure-openai`, and `llamacpp` — an HTTP client for a `llama-server` the operator runs) and the in-process `candle` provider. uni-xervo 0.19 removed `mistralrs` entirely and uni-db 5.1+ no longer declares the feature; `provider-candle` is also off in this workspace (dropped with `default-features = false`) and returns only via the `candle` passthrough feature. Store reaches it internally via `db.xervo()` and exposes it through the `model.rs` seam (`embed`, `embed_multivector`, `generate`, `rerank`, `model_runtime`). The default stack: BGE-small-en-v1.5 (384d) embedder, `ms-marco-MiniLM-L-6-v2` cross-encoder reranker (enabled by default), and `kniv-deberta-xsmall` INT8 for the NLP cascade.
 
 #### Concurrency: why SSI alone isn't enough
 
@@ -1144,7 +1144,7 @@ Nodes written across the L3 write paths: `Message, Chunk, Entity, Observation, S
 
 The default embedder is `BGESmallENV15` (384-d, query-side prefix only). When a hybrid embedder (bge-m3) is configured, the schema adds `sparse_embedding` (`SparseVector`) and `colbert_embedding` (`List<Vector>`) columns on Chunk/Observation, all pointing at the same `embed/hybrid` alias so uni-db fuses them into one `EmbedHybrid` forward pass. The embedding dimension is fixed at DB creation (it is part of the on-disk vector index), so switching embedders requires a fresh KB.
 
-**Store compatibility (#66).** Every open path applies the schema through `apply_schema` (`crates/uniko-store/src/storage/mod.rs:922`). Unless the config sets `schema_path`, it first runs two steps on the schema already on disk:
+**Store compatibility (#66).** Every open path applies the schema through `apply_schema` (`crates/uniko-store/src/storage/mod.rs:913`). Unless the config sets `schema_path`, it first runs two steps on the schema already on disk:
 - `inspect_db` (`storage/compatibility.rs:245`) reads the `Chunk` column types, the `Chunk.embedding` index config and the stats row's model record and migration marker. Its `with_counts` flag is off here, so the open-time check reads the schema and the stats row only. `inspect`, `store_info` and `migrate` count `hybrid_backfill_pending`, which scans Chunk and Observation;
 - `check` (`:372`) compares them with the config.
 
@@ -1162,11 +1162,11 @@ A store with no recorded model id, from before the record existed, is otherwise 
 
 `Compatibility::migrations` returns nothing when any difference is `Incompatible`. The config's algorithm is compared through `VectorAlgorithm::to_index_type`, which resolves an automatic PQ `sub_vectors: 0` the way uni-db stores it, so such a store reopens.
 
-uni-db refuses at open a store whose indexes name an alias the catalog lacks. `build_or_explain` (`mod.rs:890`) turns that failure into the same report, so a hybrid store opened dense-only returns `IncompatibleStore` rather than uni-db's raw "Missing Uni-Xervo alias" error. It inspects through `inspect_unclaimed` (`migrate_store.rs:244`), since the opening path already holds its own claim.
+uni-db refuses at open a store whose indexes name an alias the catalog lacks. `build_or_explain` (`mod.rs:881`) turns that failure into the same report, so a hybrid store opened dense-only returns `IncompatibleStore` rather than uni-db's raw "Missing Uni-Xervo alias" error. It inspects through `inspect_unclaimed` (`migrate_store.rs:244`), since the opening path already holds its own claim.
 
 `KnowledgeBase::inspect` (`storage/migrate_store.rs:79`) and `migrate` (`:132`) need a local path: `reject_remote` (`:260`) returns `Unsupported` for any path containing `://`. Neither touches a local path that isn't a uni-db store: `is_store` (`:272`) requires uni-db's `catalog/schema.json` or a root `schema.json`, and `inspect` reports `exists: false` while `migrate` returns `Config`. On a real store, `inspect` applies no schema, changes no index or data and loads no model, but uni-db's own open and close still write bookkeeping files (a manifest, its WAL). `migrate` also refuses a `schema_path` config with `Config`, since the schema would come from that file rather than the config being migrated to.
 
-The in-process guard is two-way. `OPEN_PATHS` (`mod.rs:134`) maps each canonical store path to a claim: every path-backed open takes a shared one (`OpenPath::claim`), and `inspect` and `migrate` take the path exclusively through `claim_exclusive` (`mod.rs:174`), which checks and claims under the registry's one lock. So inspect or migrate is refused, with `Config`, while the store is open, inspected or migrated in this process, and opening is refused, with `Config`, while it is being inspected or migrated. Another process can't be detected, since uni-db takes no lock. Both open the store with `inspection_catalog` (`migrate_store.rs:210`): the config's catalog, plus an `embed/hybrid` alias when it lacks one. That alias is a lazy `local/onnx` stub, so stores on `remote/*` or `llamacpp` embedders can be inspected and migrated.
+The in-process guard is two-way. `OPEN_PATHS` (`mod.rs:133`) maps each canonical store path to a claim: every path-backed open takes a shared one (`OpenPath::claim`), and `inspect` and `migrate` take the path exclusively through `claim_exclusive` (`mod.rs:171`), which checks and claims under the registry's one lock. So inspect or migrate is refused, with `Config`, while the store is open, inspected or migrated in this process, and opening is refused, with `Config`, while it is being inspected or migrated. Another process can't be detected, since uni-db takes no lock. Both open the store with `inspection_catalog` (`migrate_store.rs:210`): the config's catalog, plus an `embed/hybrid` alias when it lacks one. That alias is a lazy `local/onnx` stub, so stores on `remote/*` or `llamacpp` embedders can be inspected and migrated.
 
 `EnableHybrid` applies the schema, then `backfill_label` (`migrate_store.rs:384`) walks each label's rows once, in node-id order, a batch per transaction. It rewrites the Chunk `text` / Observation `content` (`SET n.text = n.text`) of each row that `pending_predicate` (`compatibility.rs:322`) matches: a row whose sparse and/or ColBERT column, whichever the store has, is empty. That makes uni-db re-embed every auto-embed column of the row. A row that still comes back empty is counted in `MigrationReport::rows_unfilled` and passed over in that run. It doesn't loop or error, but it still counts as pending, so `hybrid_backfill_pending` doesn't reach 0 and a rerun tries it again; `completed` is still true when the only pending rows are the unfilled ones. Backfill progress events count rows done (filled plus unfilled) per label, and the final `done` event has `done == total == rows_backfilled + rows_unfilled`. The step is resumable. A `migration` marker on the stats row covers the run. It is set before the schema step when the store already has the `migration` column, and after it otherwise, since an older store gets the column from that step. Only the kind that set a marker clears it, so a `RebuildVectorIndexes` run leaves an unfinished `EnableHybrid` marker in place; `MigrationReport::migration_in_progress` names such a marker, which is why `completed` can be false after a run that did its own part.
 
@@ -1221,7 +1221,7 @@ cargo nextest run -p uniko-extract --features onnx
 | `ModelAliasSpec`, `ModelTask`, `WarmupPolicy` | Naming a model alias when registering an extra model (what the facade's `LlmSpec` builds) |
 | `ModelRuntime` | Shared ONNX/model runtime handle |
 
-A CI grep gate forbids `use uni_db` and `KnowledgeBase::db()` in the `src/` of product crates. `.db() -> &Uni` remains a `pub` escape hatch but is documented as tests/benchmark-only (`storage/mod.rs:564-575`). Reviewed exceptions are tagged `// ALLOW:` on the same line. If a product crate needs a new graph operation, the operation is added *here* rather than by reaching past the seal.
+A CI grep gate forbids `use uni_db` and `KnowledgeBase::db()` in the `src/` of product crates. `.db() -> &Uni` remains a `pub` escape hatch but is documented as tests/benchmark-only (`storage/mod.rs:555-566`). Reviewed exceptions are tagged `// ALLOW:` on the same line. If a product crate needs a new graph operation, the operation is added *here* rather than by reaching past the seal.
 
 The crate is deliberately **policy-free for scoring**: recall/working-memory/consolidation reads return *decoded* Rust structs (never raw `Record`s), and the ranking math — RRF fusion, tier weights, MMR, coverage — lives one layer up in `uniko-memory`. What lives here is the schema, the graph walks, bitemporal Facts, idempotent id derivation, and the concurrency primitives.
 
@@ -1235,12 +1235,11 @@ pub struct KnowledgeBase {
     rmw_locks: Arc<StripedLocks>,           // check-then-create serialization
     setup_locks: Arc<StripedLocks>,         // session/sender setup (separate table, #36)
     catalog: Option<Arc<[ModelAliasSpec]>>, // the catalog handed to uni-db, if known
-    model_states: ModelStates,              // per-alias load state for model_status
     prefetch_task: Option<AbortHandle>,     // background prefetch, cancelled at shutdown
     open_path: Option<Arc<OpenPath>>,       // shared claim on the path (#66); None in memory
 }
 ```
-(`storage/mod.rs:83-128`). It is `Clone` (the `Arc<Uni>` is shared).
+(`storage/mod.rs:84-127`). It is `Clone` (the `Arc<Uni>` is shared).
 
 **Constructors** (all validate config, build the xervo catalog via `load_catalog`→file or `embed_catalog`, open `Uni`, `apply_schema`, optionally `prefetch_models`, then `finalize_init`→`init_kb_stats`):
 
@@ -1251,9 +1250,9 @@ pub struct KnowledgeBase {
 | `open_with_xervo[_no_prefetch]` / `open_with_prefetch(.., PrefetchPolicy)` | Persistent + explicit catalog |
 | `SharedRuntime::build(cfg, specs, policy)` + `in_memory_shared` / `open_shared` | Share ONE model runtime (one ONNX session / VRAM arena) across many KBs |
 
-`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and shares the runtime's per-alias load state, so `model_status()` works on every store over it. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`. (It was also once the only open path that let a BGE-M3 hybrid KB reopen, uni-db #130. That is fixed upstream: `crates/uniko-store/tests/unidb_hybrid_reopen_repro.rs` asserts both paths reopen one, and `store_compatibility::a_hybrid_store_reopens` checks it at the `KnowledgeBase` level.) (`open_shared` and `over_shared`, `crates/uniko-store/src/storage/mod.rs:430` and `:449`).
+`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and `model_status()` reads each alias's load state from the runtime's own snapshot (`ModelRuntime::aliases`), so every store over it sees one load history, whichever path loaded a model. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`. (It was also once the only open path that let a BGE-M3 hybrid KB reopen, uni-db #130. That is fixed upstream: `crates/uniko-store/tests/unidb_hybrid_reopen_repro.rs` asserts both paths reopen one, and `store_compatibility::a_hybrid_store_reopens` checks it at the `KnowledgeBase` level.) (`open_shared` and `over_shared`, `crates/uniko-store/src/storage/mod.rs:425` and `:444`).
 
-Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`apply_perf_knobs_from_env`, `mod.rs:29-52`, applied at `:368`, `:440` and `:513`, and by `migrate_store.rs:283` for inspect and migrate).
+Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`apply_perf_knobs_from_env`, `mod.rs:29-52`, applied at `:364`, `:435` and `:507`, and by `migrate_store.rs:283` for inspect and migrate).
 
 ### 5.3 Concurrency: SSI + striped locks + retry
 
@@ -1305,7 +1304,7 @@ with lock_entity_ids([X]):
 
 ### 5.4 Write paths: Cypher vs bulk
 
-Generic CRUD builds **parameterized** Cypher via `build_inline_props` / `build_set_clause` (`storage/mod.rs:1253-1281`). Every interpolated *identifier* (label, edge type, property name) is gated by `validate_label` / `validate_edge_type` / `validate_property_name`; *values* are always `$pN`-bound.
+Generic CRUD builds **parameterized** Cypher via `build_inline_props` / `build_set_clause` (`storage/mod.rs:1248-1276`). Every interpolated *identifier* (label, edge type, property name) is gated by `validate_label` / `validate_edge_type` / `validate_property_name`; *values* are always `$pN`-bound.
 
 | API | Path | Notes |
 |---|---|---|
@@ -3130,13 +3129,13 @@ The `RECALL_PROF` `eprintln!` lines in `recall/mod.rs` and `recall.rs` are uncon
 
 #### 10.3.1 Toolchain and system prerequisites
 
-- **Rust ≥ 1.91, edition 2024**, pinned via `rust-version` in the root `Cargo.toml` and `rust-toolchain.toml` (stable channel).
+- **Rust ≥ 1.95, edition 2024**, pinned via `rust-version` in the root `Cargo.toml` and `rust-toolchain.toml` (stable channel).
 - A **C/C++ toolchain** (the ONNX Runtime and native crates need it).
 - **`protoc`** (protobuf-compiler) on `PATH` — the stack statically links ONNX Runtime via `ort`, which requires `protoc` at build time.
 - **`mold`** on Linux — `.cargo/config.toml` unconditionally sets `-C link-arg=-fuse-ld=mold`, so it is a hard build dependency, not an optimization.
 - **`uv`** for the Python bindings and the docs site.
 
-Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 5.2` and `uni-xervo 0.19.2`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
+Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 5.2` and `uni-xervo 0.20.0`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
 
 > **The first build is slow.** `ort`, `tokenizers`, and `half` compile at `opt-level=3` even in the dev profile.
 
@@ -3395,7 +3394,7 @@ Rules of the gate:
 
 #### Invariant 2 — never edit `../uni/`
 
-uni-db lives at `../uni/` (or `../uni-db/`) as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 5.2 and uni-xervo 0.19.2 from crates.io. When you hit a uni-db bug, the discipline is:
+uni-db lives at `../uni/` (or `../uni-db/`) as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 5.2 and uni-xervo 0.20.0 from crates.io. When you hit a uni-db bug, the discipline is:
 
 1. Build a **minimal, isolated reproduction test** in `uniko-store` (the canonical pattern is `crates/uniko-store/tests/unidb_bytes_return_repro.rs`).
 2. File it upstream against `rustic-ai/uni-db`.
@@ -3429,7 +3428,7 @@ Two more AGENTS.md house rules: **never `cargo test`** (nextest is the runner of
 
 **Prerequisites:**
 
-- Rust ≥ 1.91, edition 2024 (pinned via `rust-version` in the root `Cargo.toml` + `rust-toolchain.toml`, stable channel).
+- Rust ≥ 1.95, edition 2024 (pinned via `rust-version` in the root `Cargo.toml` + `rust-toolchain.toml`, stable channel).
 - A C/C++ toolchain and **`protobuf-compiler` (`protoc`) on `PATH`** — the stack statically links ONNX Runtime via `ort`.
 - `uv` for Python and docs.
 - No tokens, private repos, or credentials: uni-db and uni-xervo come from crates.io.

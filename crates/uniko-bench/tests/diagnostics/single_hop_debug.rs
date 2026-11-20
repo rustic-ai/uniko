@@ -1,6 +1,6 @@
 //! Debug retrieval for remaining single-hop misses.
 //!
-//! Run: cargo nextest run -p uniko-bench --test diagnostics single_hop_debug --nocapture --run-ignored all
+//! Run: cargo nextest run -p uniko-bench --test integration diagnostics::single_hop_debug --nocapture --run-ignored all
 
 use crate::common::load_kb;
 use uniko_memory::recall::{RecallConfig, recall};

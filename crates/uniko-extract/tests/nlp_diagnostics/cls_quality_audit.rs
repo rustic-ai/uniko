@@ -10,7 +10,7 @@
 //!      as Greeting/Question/Acknowledgment, with confidence.
 //!
 //! Run: cargo nextest run -p uniko-extract --features onnx \
-//!     --test cls_quality_audit --run-ignored all --nocapture
+//!     --test integration cls_quality_audit:: --run-ignored all --nocapture
 
 #[cfg(feature = "onnx")]
 mod audit {

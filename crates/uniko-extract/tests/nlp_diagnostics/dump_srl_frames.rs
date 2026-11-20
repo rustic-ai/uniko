@@ -9,7 +9,7 @@
 //! acceptable.
 //!
 //! Run: cargo test -p uniko-extract --features onnx \
-//!     --test dump_srl_frames -- --ignored --nocapture
+//!     --test integration dump_srl_frames:: -- --ignored --nocapture
 
 #[cfg(feature = "onnx")]
 mod onnx_dump {

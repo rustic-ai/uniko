@@ -4,7 +4,7 @@
 //! extracted entities to assess NER accuracy.
 //!
 //! Run: cargo nextest run -p uniko-extract --features onnx \
-//!   --test ner_quality_test --nocapture --run-ignored all
+//!   --test integration ner_quality_test:: --nocapture --run-ignored all
 
 #[cfg(feature = "onnx")]
 mod onnx_tests {

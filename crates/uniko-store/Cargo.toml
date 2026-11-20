@@ -11,6 +11,8 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Integration tests are modules of one binary (tests/integration.rs).
+autotests = false
 
 [features]
 default = []
@@ -46,3 +48,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = "3"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

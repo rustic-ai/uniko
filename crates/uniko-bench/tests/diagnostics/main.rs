@@ -12,12 +12,10 @@
 //! file; a member that needs to belongs in `src/*_main.rs` instead.
 //!
 //! Run an individual tool, e.g.:
-//! `cargo nextest run -p uniko-bench --test diagnostics graph_debug --run-ignored all --no-capture`
+//! `cargo nextest run -p uniko-bench --test integration diagnostics::graph_debug --run-ignored all --no-capture`
 
 // Shared helpers live in `tests/common/mod.rs`; include them once for the
 // whole binary so each member can reach them via `crate::common::*`.
-#[path = "../common/mod.rs"]
-mod common;
 
 mod dump_obs_chunks;
 mod graph_debug;

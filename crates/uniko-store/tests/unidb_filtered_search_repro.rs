@@ -12,7 +12,7 @@
 //! (rustic-ai/uni-db#343, #344); the flushed and dense controls run always.
 //!
 //! Run:
-//!   cargo nextest run -p uniko-store --test unidb_filtered_search_repro \
+//!   cargo nextest run -p uniko-store --test integration unidb_filtered_search_repro:: \
 //!       --run-ignored all --no-capture
 
 use std::collections::HashMap;

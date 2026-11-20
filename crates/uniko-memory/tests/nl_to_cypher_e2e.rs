@@ -7,8 +7,6 @@
 //! can't talk to the model, the test must report that, not pretend
 //! to pass.
 
-mod common;
-
 use uniko_memory::nl_to_cypher::{is_safe_read_only, translate};
 use uniko_store::UnikoError;
 

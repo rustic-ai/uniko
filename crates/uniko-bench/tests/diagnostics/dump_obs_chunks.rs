@@ -1,6 +1,6 @@
 //! Dump all observation chunks to a file for analysis.
 //!
-//! Run: cargo nextest run -p uniko-bench --test diagnostics dump_obs_chunks --nocapture --run-ignored all
+//! Run: cargo nextest run -p uniko-bench --test integration diagnostics::dump_obs_chunks --nocapture --run-ignored all
 
 use crate::common::load_kb;
 

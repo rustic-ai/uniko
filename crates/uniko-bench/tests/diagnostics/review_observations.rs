@@ -1,6 +1,6 @@
 //! One-shot quality review of Observation nodes from conv-26 KB.
 //!
-//! Run: cargo nextest run -p uniko-bench --test diagnostics review_observations \
+//! Run: cargo nextest run -p uniko-bench --test integration diagnostics::review_observations \
 //!   --no-capture --run-ignored all
 
 use crate::common::load_kb;

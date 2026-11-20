@@ -322,7 +322,7 @@ class ModelStatus(BaseModel):
     provider_id: str
     model_id: str
     revision: Optional[str] = None
-    state: str = Field(description="'not_loaded', 'loaded' or 'failed'.")
+    state: str = Field(description="'not_loaded', 'loading', 'loaded' or 'failed'.")
     error: Optional[str] = Field(
         default=None, description="Set when state is 'failed'."
     )
@@ -363,12 +363,14 @@ class ReadinessFailure(BaseModel):
     )
     code: str = Field(
         description="'not_in_catalog', 'not_configured', 'not_compiled', "
-        "'no_extractor', 'load_failed', 'timed_out', 'nlp_unavailable' "
-        "or 'not_accelerated'."
+        "'no_extractor', 'load_failed', 'timed_out', 'nlp_unavailable', "
+        "'not_accelerated', 'verification_failed' or 'not_supported'."
     )
     alias: Optional[str] = None
     error: Optional[str] = Field(
-        default=None, description="The redacted load error, for 'load_failed'."
+        default=None,
+        description="The redacted load error for 'load_failed', or the reason "
+        "for 'verification_failed'.",
     )
 
     @classmethod

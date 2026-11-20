@@ -21,7 +21,7 @@
 //!
 //! ```sh
 //! UNIKO_DEADLOCK_KB=/abs/path/to/kb/conv-30 \
-//!   cargo nextest run --release -p uniko-memory --test recall_deadlock_bisect \
+//!   cargo nextest run --release -p uniko-memory --test integration recall_deadlock_bisect:: \
 //!   --run-ignored all --no-capture
 //! ```
 //!

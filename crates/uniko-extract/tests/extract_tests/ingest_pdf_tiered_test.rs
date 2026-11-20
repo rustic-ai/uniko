@@ -135,8 +135,8 @@ async fn tiered_ingest_builds_doc_ir_graph() {
 /// OCR tier and still come out searchable, with page and block provenance
 /// (issue #55).
 ///
-/// The text assertions fail on uni-xervo 0.19.2, which drops spaces
-/// (rustic-ai/uni-xervo#68) and cuts long lines short (#69); tracked in #75.
+/// The text assertions need uni-xervo 0.20: 0.19.2 dropped the spaces
+/// between words (rustic-ai/uni-xervo#68) and cut long lines short (#69).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scanned_pdf_is_ocr_extracted_with_provenance() {
     if !should_run_expensive() {

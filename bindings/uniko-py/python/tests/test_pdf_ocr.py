@@ -28,8 +28,8 @@ def test_the_wheel_compiles_ocr_in() -> None:
     reason="set EXPENSIVE_TESTS=1 to download the OCR models",
 )
 def test_a_scanned_pdf_becomes_searchable_text() -> None:
-    # Fails on uni-xervo 0.19.2, which drops spaces (uni-xervo#68) and cuts
-    # long lines short (uni-xervo#69); tracked in uniko#75.
+    # Needs uni-xervo 0.20: 0.19.2 dropped the spaces between words and cut
+    # long lines short, so these words were not found.
     uni = (
         uniko.Uniko.builder()
         .config({"ocr": {"enabled": True}, "reranker": {"enabled": False}})

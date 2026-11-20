@@ -12,7 +12,7 @@
 //!
 //! ```sh
 //! RUST_MIN_STACK=1048576 cargo nextest run -p uniko-store \
-//!   --test stack_depth_repro --run-ignored all --no-capture
+//!   --test integration stack_depth_repro:: --run-ignored all --no-capture
 //! ```
 //!
 //! FINDING: none of these arms is the deep one — all three pass at 1 MiB,

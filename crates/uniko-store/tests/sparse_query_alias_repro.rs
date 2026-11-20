@@ -35,7 +35,7 @@
 //! diagnostic, not a gate. Run with:
 //!
 //! ```sh
-//! cargo nextest run -p uniko-store --test sparse_query_alias_repro \
+//! cargo nextest run -p uniko-store --test integration sparse_query_alias_repro:: \
 //!   --run-ignored all --no-capture
 //! ```
 

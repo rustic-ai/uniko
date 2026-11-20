@@ -65,7 +65,7 @@ all while running fully in-process on consumer hardware. See the
 
 ## Install
 
-uniko is a Rust library. Requires **Rust >= 1.91** (edition 2024). Add the crates you need
+uniko is a Rust library. Requires **Rust >= 1.95** (edition 2024). Add the crates you need
 from crates.io:
 
 ```toml

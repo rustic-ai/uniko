@@ -25,9 +25,9 @@ pub struct Capabilities {
     /// video). Built-in text, code, markup, structured and PDF ingest are
     /// always available and are not listed, so this is empty by default.
     pub extractors: Vec<Modality>,
-    /// Each catalog model and whether it has loaded; `None` when the
-    /// store's catalog is unknown. A hybrid embedder used only by uni-db's
-    /// auto-embedding on write reads as not loaded until the first recall.
+    /// Each catalog model and whether it has loaded, as the model runtime
+    /// reports it, whichever path loaded it; `None` when the store has no
+    /// model runtime.
     pub models: Option<Vec<ModelStatus>>,
     /// The alias [`Agent::answer`](crate::Agent::answer) uses, if any.
     pub answer_alias: Option<String>,

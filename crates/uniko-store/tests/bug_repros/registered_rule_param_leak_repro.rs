@@ -27,7 +27,7 @@
 //! These tests assert the *correct, post-fix* behavior, so `unrelated_program_
 //! does_not_need_a_registered_rules_params` FAILS against current uni-db
 //! (verified on 3.0.1 and 3.2.0). `#[ignore]`d to keep CI green; run with
-//! `cargo nextest run -p uniko-store --test bug_repros --run-ignored all \
+//! `cargo nextest run -p uniko-store --test integration bug_repros:: --run-ignored all \
 //! registered_rule_param_leak`.
 
 use uni_db::{DataType, Uni};

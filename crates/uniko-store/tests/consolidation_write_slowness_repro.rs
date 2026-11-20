@@ -35,7 +35,7 @@
 //! reflects the real storage backend, not tmpfs.
 //!
 //! Run:
-//!   cargo nextest run -p uniko-store --test consolidation_write_slowness_repro \
+//!   cargo nextest run -p uniko-store --test integration consolidation_write_slowness_repro:: \
 //!       --run-ignored all --no-capture
 
 use std::collections::HashMap;

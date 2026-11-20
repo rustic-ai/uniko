@@ -595,7 +595,7 @@ A quick end-to-end check of the storage layer, independent of recall, lives in
 because it loads bge-m3 (~2 GB):
 
 ```sh
-cargo nextest run -p uniko-store --test sparse_query_alias_repro \
+cargo nextest run -p uniko-store --test integration sparse_query_alias_repro:: \
   --run-ignored all --no-capture
 ```
 
@@ -627,7 +627,8 @@ flat text dump.
 | `char_dict_path` | `languages/english/dict.txt` | Character dictionary, one token per line. |
 | `det_artifact` | `detection/v5/det.onnx` | DBNet detector; enables detect → crop → recognize with real bounding boxes. |
 | `image_height` | `48` | Recognizer input height, pixels. |
-| `image_width` | `320` | Recognizer input width, pixels. |
+| `image_width` | `320` | The narrowest a recognizer batch is, pixels. Each line keeps its aspect ratio and is right-padded, so long lines are read in full. |
+| `max_image_width` | `None` | The widest a line is resized to, pixels; longer lines are squeezed. `None` keeps uni-xervo's default, 3200. |
 | `normalization` | `siglip` | `"imagenet"` or `"siglip"`; the PP-OCRv5 export expects `siglip`. |
 | `execution_providers` | `None` | ONNX execution providers; `None` is the feature-aware default. |
 

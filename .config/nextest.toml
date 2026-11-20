@@ -41,6 +41,6 @@ retries = 2
 # the trigger) and retry, so the wrong answer cannot silently become the norm:
 # if these retries start being consumed on every run, the bug got worse, not
 # quieter. The rule source is crates/uniko-memory/src/rules/stdlib.rs:88.
-filter = 'test(=rule_execution_e2e::contradiction_detector_invalidates_fact_and_marks_edges)'
+filter = 'test(=lifecycle_e2e::rule_execution_e2e::contradiction_detector_invalidates_fact_and_marks_edges)'
 retries = 2
 threads-required = "num-test-threads"
