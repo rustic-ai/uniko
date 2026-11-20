@@ -6407,6 +6407,38 @@ mod registration_and_performer {
         memory.shutdown().await.expect("shutdown");
     }
 
+    /// Adding an org member while the same id registers never leaves it
+    /// `unknown`: the membership path creates the participant through the
+    /// same never-downgrading upsert as registration.
+    #[tokio::test]
+    async fn an_org_membership_racing_registration_keeps_the_agent_kind() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let memory = std::sync::Arc::new(memory);
+        for i in 0..12 {
+            let id = format!("racer-{i}");
+            let agent = memory.agent(&id);
+            let m = memory.clone();
+            let member = id.clone();
+            let (reg, joined) = tokio::join!(
+                tokio::spawn(async move { agent.register(AgentRegistration::new()).await }),
+                tokio::spawn(async move { m.add_org_member(&member, "acme").await }),
+            );
+            reg.unwrap().unwrap();
+            joined.unwrap().unwrap();
+            let kb = memory.agent(&id).kb().clone();
+            assert_eq!(
+                participants(&kb, &id, "agent").await,
+                1,
+                "{id} stays an agent"
+            );
+            assert_eq!(participants(&kb, &id, "unknown").await, 0, "{id}");
+        }
+        let memory = std::sync::Arc::try_unwrap(memory).ok().expect("one owner");
+        memory.shutdown().await.expect("shutdown");
+    }
+
     #[tokio::test]
     async fn registration_survives_a_reopen() {
         let dir = tempfile::tempdir().unwrap();
@@ -6510,6 +6542,47 @@ mod registration_and_performer {
             1,
             "replay adds no PERFORMED_BY edge"
         );
+        drop((session, kb));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// Replaying a whole unit checks its tool calls too: the same turn with
+    /// its call now performed by someone else, carrying another result, or
+    /// a call the stored unit never had is a conflict, not a silent replay.
+    #[tokio::test]
+    async fn a_unit_replay_with_a_changed_call_is_a_conflict() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let unit = |call: ToolCall| vec![Turn::new("user", "Question").id("q").tool_call(call)];
+        let mut session = memory.agent("reporter").session("research");
+        match session.commit_unit(unit(reporter_call())).await {
+            Ok(r) => assert!(!r.was_replay),
+            Err(e) if is_model_unavailable(&e) => return eprintln!("skipping: models unavailable"),
+            Err(e) => panic!("commit_unit failed: {e}"),
+        }
+        let replay = session.commit_unit(unit(reporter_call())).await.unwrap();
+        assert!(replay.was_replay, "the identical unit replays");
+
+        for changed in [
+            reporter_call().performer("auditor"),
+            ToolCall::new("search")
+                .call_id("call")
+                .text_output("Evidence"),
+            ToolCall::new("search")
+                .call_id("call")
+                .text_output("Other")
+                .performer("reporter"),
+            ToolCall::new("search")
+                .call_id("other-call")
+                .text_output("Evidence"),
+        ] {
+            let r = session.commit_unit(unit(changed)).await;
+            assert!(matches!(r, Err(UnikoError::IdConflict(_))), "{r:?}");
+        }
+        let kb = memory.agent("reporter").kb().clone();
+        assert_eq!(performed_by(&kb, "call", "reporter").await, 1);
+        assert_eq!(performed_by(&kb, "call", "auditor").await, 0);
         drop((session, kb));
         memory.shutdown().await.expect("shutdown");
     }
