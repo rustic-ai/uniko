@@ -9,8 +9,10 @@ pub mod artifact;
 pub mod atomic;
 pub mod chunking;
 pub mod context;
+pub mod derivation;
 pub mod message;
 pub mod modality;
+pub mod model_extractor;
 pub mod pdf;
 pub mod session;
 pub mod session_chunk;
@@ -24,9 +26,16 @@ pub use artifact::ArtifactIngestResult;
 pub use artifact::{ArtifactContextNids, ArtifactIdentity, ArtifactPrep, UnitArtifactSeen};
 pub use atomic::{AtomicIngestResult, AtomicTimings, ingest_message_atomic};
 pub use chunking::{ChunkConfig, ChunkData, Chunker, count_tokens, select_chunker};
+pub use derivation::{
+    Derivation, ExtractOutput, Extraction, MediaRetention, ModelProvenance, Segment, SegmentKind,
+};
 pub use modality::{ModalityExtractor, ModalityPrepared, ModalityRegistry};
+pub use model_extractor::{
+    DEFAULT_CAPTION_PROMPT, IMAGE_CAPABLE_PROVIDERS, ModelExtractor, VideoComposer, VideoFrame,
+    VideoParts, check_wav,
+};
 pub use source::{PreparedSource, prepare_source};
-pub use text_extractor::{ExtractFn, ExtractRequest, TextExtractor};
+pub use text_extractor::{ExtractFn, ExtractOutputFn, ExtractRequest, TextExtractor};
 pub use unit::{UnitIngestResult, UnitTurn, ingest_turns_atomic};
 // IngestSource/IngestData live in uniko-pipes (wire types) so IngestTask can
 // carry them; re-exported here so existing `uniko_extract::ingest` imports

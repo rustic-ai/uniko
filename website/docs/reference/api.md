@@ -64,7 +64,8 @@ and `shutdown` when done.
 **`UnikoBuilder`** (chainable): `.path(p)` / `.in_memory()` (location) · `.embedding(EmbeddingConfig)`
 · `.llm(LlmSpec)` (enables `answer()`) · `.raw_config(UnikoConfig)` (full override) ·
 `.streaming(bool)` (enables `submit`/`flush`) · `.scope_to_agent()` / `.scope(RecallScope)`
-(read visibility) · `.extractor(Arc<dyn ModalityExtractor>)` (pluggable modality) · `.build()`.
+(read visibility) · `.extractor(Arc<dyn ModalityExtractor>)` (pluggable modality) ·
+`.model_extractor(ModelExtractor)` (OCR, captions, documents, transcription by alias) · `.build()`.
 
 **`LlmSpec`** constructors: `openai(alias, model_id, base_url: Option<&str>)` (reads
 `OPENAI_API_KEY`) · `openai_with_key_env(alias, model_id, base_url, key_env)` ·

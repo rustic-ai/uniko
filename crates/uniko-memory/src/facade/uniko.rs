@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use uniko_extract::ingest::{ModalityExtractor, ModalityRegistry};
+use uniko_extract::ingest::{ModalityExtractor, ModalityRegistry, ModelExtractor};
 use uniko_pipes::config::PipelineConfig;
 use uniko_pipes::health::PipelineHealth;
 use uniko_store::config::{EmbeddingConfig, NlpConfig, RerankerConfig, UnikoConfig};
@@ -561,6 +561,19 @@ impl UnikoBuilder {
         self
     }
 
+    /// Register a model-backed extractor: OCR, captions, document
+    /// extraction or transcription through catalog aliases, for one
+    /// modality. Replaces any earlier extractor for that modality.
+    ///
+    /// [`build`](Self::build) checks it against the catalog before the
+    /// store opens: a mode the modality cannot use, a missing alias or one
+    /// serving the wrong task, a caption alias whose provider drops images,
+    /// and a video extractor without a composer all fail there.
+    #[must_use]
+    pub fn model_extractor(self, extractor: ModelExtractor) -> Self {
+        self.extractor(Arc::new(extractor.into_extractor()))
+    }
+
     /// Open the store over a [`SharedRuntime`] instead of loading its own
     /// models, so several instances load each model once.
     ///
@@ -739,6 +752,11 @@ impl UnikoBuilder {
             check_answer_alias(&entries, alias)?;
         }
 
+        // A model-backed extractor must run on this catalog: refuse a mode
+        // it cannot serve before anything is created.
+        for extractor in self.extractors.extractors() {
+            extractor.validate(&entries)?;
+        }
         // Readiness, static step: catalog, features and extractors only,
         // so an unmet requirement fails before the store is created.
         super::readiness::check_static(

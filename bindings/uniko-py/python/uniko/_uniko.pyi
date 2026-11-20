@@ -321,6 +321,79 @@ class ExtractRequest:
     def __repr__(self) -> str: ...
 
 @final
+class Segment:
+    text: str
+    kind: str
+    page: int | None
+    start_ms: int | None
+    end_ms: int | None
+    bbox: tuple[float, float, float, float] | None
+    confidence: float | None
+    speaker: str | None
+    def __new__(
+        cls,
+        text: str,
+        kind: str = "text",
+        *,
+        page: int | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        bbox: tuple[float, float, float, float] | None = None,
+        confidence: float | None = None,
+        speaker: str | None = None,
+    ) -> Segment: ...
+    def __repr__(self) -> str: ...
+
+@final
+class ModelProvenance:
+    alias: str
+    model_id: str
+    task: str
+    def __new__(cls, alias: str, model_id: str, task: str) -> ModelProvenance: ...
+    def __repr__(self) -> str: ...
+
+@final
+class Extraction:
+    segments: list[Segment]
+    model: ModelProvenance | None
+    def __new__(
+        cls, segments: list[Segment], model: ModelProvenance | None = None
+    ) -> Extraction: ...
+    def __repr__(self) -> str: ...
+
+@final
+class VideoFrame:
+    timestamp_ms: int
+    data: bytes
+    mime: str
+    def __new__(cls, timestamp_ms: int, data: bytes, mime: str) -> VideoFrame: ...
+    def __repr__(self) -> str: ...
+
+@final
+class VideoParts:
+    frames: list[VideoFrame]
+    audio: bytes | None
+    def __new__(
+        cls, frames: list[VideoFrame], audio: bytes | None = None
+    ) -> VideoParts: ...
+    def __repr__(self) -> str: ...
+
+@final
+class MediaSourceView:
+    artifact_id: str
+    modality: str | None
+    mime: str | None
+    hash: str
+    size: int | None
+    path: str | None
+    duration_ms: int | None
+    sample_rate: int | None
+    channels: int | None
+    derivation_kind: str | None
+    bytes_retained: bool
+    def __repr__(self) -> str: ...
+
+@final
 class RuleView:
     name: str
     source_type: str
@@ -762,6 +835,8 @@ class Data:
     def message_sync(self, message_id: str) -> MessageView | None: ...
     def artifact(self, artifact_id: str) -> Awaitable[ArtifactView | None]: ...
     def artifact_sync(self, artifact_id: str) -> ArtifactView | None: ...
+    def media_sources(self, artifact_id: str) -> Awaitable[list[MediaSourceView]]: ...
+    def media_sources_sync(self, artifact_id: str) -> list[MediaSourceView]: ...
     def artifact_bytes(self, artifact_id: str) -> Awaitable[bytes | None]: ...
     def artifact_bytes_sync(self, artifact_id: str) -> bytes | None: ...
     def __repr__(self) -> str: ...
@@ -1219,7 +1294,25 @@ class UnikoBuilder:
     def scope_to_agent(self) -> UnikoBuilder: ...
     def scope(self, viewer: Viewer | None) -> UnikoBuilder: ...
     def extractor(
-        self, modality: str, extract: Callable[[ExtractRequest], str]
+        self,
+        modality: str,
+        extract: Callable[[ExtractRequest], str | Extraction | list[Extraction]],
+        *,
+        retention: str = "none",
+    ) -> UnikoBuilder: ...
+    def model_extractor(
+        self,
+        modality: str,
+        *,
+        ocr: str | None = None,
+        caption: str | None = None,
+        caption_prompt: str | None = None,
+        max_caption_tokens: int | None = None,
+        document: str | None = None,
+        transcribe: str | None = None,
+        language: str | None = None,
+        composer: Callable[[ExtractRequest], VideoParts] | None = None,
+        retention: str = "none",
     ) -> UnikoBuilder: ...
     def build(self) -> Awaitable[Uniko]: ...
     def build_sync(self) -> Uniko: ...
@@ -1405,6 +1498,12 @@ __all__ = [
     "RuleView",
     "MatchedProcedure",
     "ExtractRequest",
+    "Segment",
+    "ModelProvenance",
+    "Extraction",
+    "VideoFrame",
+    "VideoParts",
+    "MediaSourceView",
     "Viewer",
     "MessageView",
     "ArtifactView",

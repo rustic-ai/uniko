@@ -573,8 +573,9 @@ impl Session {
     /// Hard-delete a document Artifact and its structure subtree.
     ///
     /// Removes the Artifact, its Pages, Blocks, and Chunks. The deduped,
-    /// content-addressed `:ArtifactContent` blob is left in place.
-    /// Idempotent on an unknown id.
+    /// content-addressed `:ArtifactContent` blob is left in place. When it
+    /// was the last artifact derived from a recorded media source, that
+    /// source and its stored bytes go too. Idempotent on an unknown id.
     ///
     /// # Errors
     ///

@@ -184,9 +184,10 @@ impl KnowledgeBase {
     /// Hard-delete a document Artifact and its structure subtree.
     ///
     /// Removes the Artifact, its Pages, Blocks, and Chunks (direct and
-    /// per-block). The deduped, possibly-shared `:ArtifactContent` blob is
-    /// left in place (content-addressed storage, garbage-collected
-    /// separately).
+    /// per-block), and its `:ArtifactContent` row when no other artifact
+    /// shares it (the physical blob is garbage-collected separately). When
+    /// it was the last artifact derived from a media source
+    /// (`kind = "media"`), the source and its unshared content go too.
     ///
     /// # Errors
     ///
@@ -212,6 +213,9 @@ impl KnowledgeBase {
                     // no *other* Artifact shares it (content is deduped). The
                     // physical blob in blob storage is GC'd separately.
                     owned.extend(unshared_content_ids(&tx, anid).await?);
+                    // The media source it was derived from goes too, once
+                    // nothing else is derived from it.
+                    owned.extend(orphaned_media_ids(&tx, &[anid]).await?);
                     let (n, e) = detach_delete_ids(&tx, &owned).await?;
                     report.nodes_deleted = n;
                     report.edges_deleted = e;
@@ -346,6 +350,30 @@ async fn delete_message_nid(
     )
     .await?;
 
+    // Text derived from recorded media and attached to nothing else (no
+    // other message, and no session but this turn's own) goes with the turn, and so does the media once nothing else is derived
+    // from it. Left behind, it would be attached to no message, which makes
+    // it, and the original bytes, readable by every viewer.
+    let media_derived = ids_by_anchor(
+        tx,
+        "MATCH (a:Artifact)-[:ATTACHED_TO]->(m:Message) WHERE id(m) = $a \
+         MATCH (a)-[:DERIVED_FROM]->(src:Artifact) WHERE src.kind = 'media' \
+         WITH DISTINCT a \
+         OPTIONAL MATCH (m0:Message)-[:IN_SESSION]->(own:Session) WHERE id(m0) = $a \
+         WITH a, collect(id(own)) AS owns \
+         OPTIONAL MATCH (a)-[:ATTACHED_TO]->(other) \
+         WHERE id(other) <> $a AND NOT id(other) IN owns \
+         WITH a, count(other) AS others WHERE others = 0 RETURN id(a) AS nid",
+        mnid,
+    )
+    .await?;
+    let mut artifact_owned = Vec::new();
+    for anid in &media_derived {
+        artifact_owned.extend(artifact_subtree_ids(tx, *anid).await?);
+        artifact_owned.extend(unshared_content_ids(tx, *anid).await?);
+    }
+    artifact_owned.extend(orphaned_media_ids(tx, &media_derived).await?);
+
     // Splice the NEXT chain closed while the victim still exists.
     report.chains_repaired = splice_next(tx, mnid).await?;
 
@@ -353,6 +381,7 @@ async fn delete_message_nid(
     doomed.push(mnid);
     doomed.extend(chunks);
     doomed.extend(observations);
+    doomed.extend(artifact_owned);
     let (n, e) = detach_delete_ids(tx, &doomed).await?;
     report.nodes_deleted = n;
     report.edges_deleted = e;
@@ -421,6 +450,7 @@ async fn delete_session_in_tx(
     for anid in &solo_artifacts {
         artifact_owned.extend(artifact_subtree_ids(tx, *anid).await?);
     }
+    artifact_owned.extend(orphaned_media_ids(tx, &solo_artifacts).await?);
 
     let mut doomed = Vec::new();
     doomed.push(snid);
@@ -522,6 +552,36 @@ async fn unshared_content_ids(tx: &Transaction, anid: NodeId) -> Result<Vec<Node
         anid,
     )
     .await
+}
+
+/// The media sources (`kind = "media"`) that only `doomed` artifacts were
+/// derived from, and the `:ArtifactContent` rows that only those sources
+/// hold. Deleting the last text derived from an image, a recording or a
+/// video deletes the recorded original too, bytes included.
+async fn orphaned_media_ids(tx: &Transaction, doomed: &[NodeId]) -> Result<Vec<NodeId>> {
+    if doomed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let list = Value::List(doomed.iter().map(|n| Value::Int(*n)).collect());
+    let media = tx
+        .query_with(
+            "MATCH (d:Artifact)-[:DERIVED_FROM]->(m:Artifact) \
+             WHERE id(d) IN $doomed AND m.kind = 'media' \
+             WITH DISTINCT m \
+             MATCH (other:Artifact)-[:DERIVED_FROM]->(m) \
+             WITH m, sum(CASE WHEN id(other) IN $doomed THEN 0 ELSE 1 END) AS kept \
+             WHERE kept = 0 RETURN id(m) AS nid",
+        )
+        .param("doomed", list)
+        .fetch_all()
+        .await?;
+    let mut out = Vec::new();
+    for row in media.rows() {
+        let mid = row.get::<i64>("nid")?;
+        out.push(mid);
+        out.extend(unshared_content_ids(tx, mid).await?);
+    }
+    Ok(out)
 }
 
 /// Soft-invalidate Facts that lose their last supporting Observation.

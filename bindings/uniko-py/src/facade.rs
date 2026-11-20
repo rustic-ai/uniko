@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 use uniko_api::tools::{
-    ExtractRequest, LlmSpec, Modality, PrefetchPolicy, RecallScope, Requirement, SharedRuntime,
-    TextExtractor, Uniko, UnikoBuilder, UnikoError,
+    ExtractOutput, ExtractRequest, Extraction, LlmSpec, Modality, ModelExtractor, PrefetchPolicy,
+    RecallScope, Requirement, SharedRuntime, TextExtractor, Uniko, UnikoBuilder, UnikoError,
+    VideoParts,
 };
 
 use crate::agent::PyAgent;
@@ -540,33 +541,111 @@ pymethods_with_sync! {
         ///
         /// `modality` is `"image"`, `"audio"` or `"video"`. `extract` is called
         /// with an `ExtractRequest` (the payload `data`, its `mime`, `path` and
-        /// `metadata`) and returns the text to index — a caption, a transcript,
-        /// OCR output. It runs on a worker thread, holding the GIL only while
-        /// it runs; an exception fails that ingest. Registering a modality
-        /// again replaces the earlier extractor.
+        /// `metadata`) and returns the text to index (a caption, a transcript,
+        /// OCR output) as a `str`, or an `Extraction` of `Segment`s (or a list of
+        /// them, one per model) whose page, time range, region, confidence and
+        /// model go into each chunk. It runs
+        /// on a worker thread, holding the GIL only while it runs; an exception
+        /// fails that ingest. Registering a modality again replaces the earlier
+        /// extractor.
+        ///
+        /// `retention` is `"none"` (the default: keep the text only),
+        /// `"identity"` (record the original's hash, type and size as a source
+        /// the text links to) or `"bytes"` (also store the original bytes).
+        #[pyo3(signature = (modality, extract, *, retention = "none"))]
         fn extractor<'py>(
             slf: PyRef<'py, Self>,
             modality: &str,
             extract: Py<PyAny>,
+            retention: &str,
         ) -> PyResult<PyRef<'py, Self>> {
-            let modality = match modality {
-                "image" => Modality::Image,
-                "audio" => Modality::Audio,
-                "video" => Modality::Video,
-                other => {
-                    return Err(to_pyerr(UnikoError::Config(format!(
-                        "extractor modality '{other}': expected image, audio or video"
-                    ))));
-                }
-            };
+            let modality = parse_modality(modality, "extractor")?;
+            let retention = crate::media::parse_retention(retention)?;
             if !extract.bind(slf.py()).is_callable() {
                 return Err(to_pyerr(UnikoError::Config(
                     "extractor: `extract` must be callable".to_string(),
                 )));
             }
             let extractor =
-                TextExtractor::new(modality, move |request| call_extract(&extract, request));
+                TextExtractor::with_output(modality, move |request| call_extract(&extract, request))
+                    .with_retention(retention);
             slf.map(|b| b.extractor(std::sync::Arc::new(extractor)))?;
+            Ok(slf)
+        }
+
+        /// Index image, audio or video sources with models from the catalog.
+        ///
+        /// Each mode names a catalog alias:
+        ///
+        /// - `ocr`: an OCR alias (`local/onnx`); recognized lines become
+        ///   `ocr_region` chunks, each line's box in `metadata.regions`;
+        /// - `caption`: a generation alias on `remote/openai`,
+        ///   `remote/azure-openai` or `remote/llamacpp`, sent the image with
+        ///   `caption_prompt` and up to `max_caption_tokens` (512); other
+        ///   providers drop images and are refused;
+        /// - `document`: a document-extraction alias; blocks become `page_block`
+        ///   chunks in reading order;
+        /// - `transcribe`: a transcription alias, in `language` if set. Audio must
+        ///   be 16 kHz 16-bit PCM WAV. No provider is usable yet: uni-db's model
+        ///   runtime does not register `local/whisper-cpp`, and `build()` says
+        ///   so.
+        ///
+        /// Images take `ocr`, `caption` and `document`; audio takes
+        /// `transcribe`. A video needs `composer`, a callable that takes an
+        /// `ExtractRequest` and returns `VideoParts` (frames and a WAV audio
+        /// track, usually from ffmpeg); the image modes then run on every frame
+        /// and `transcribe` on the track. `retention` is as for `extractor`.
+        /// `build()` refuses a mode the modality cannot use or an alias that is
+        /// missing or serves another task.
+        #[pyo3(signature = (modality, *, ocr = None, caption = None, caption_prompt = None, max_caption_tokens = None, document = None, transcribe = None, language = None, composer = None, retention = "none"))]
+        #[allow(clippy::too_many_arguments)]
+        fn model_extractor<'py>(
+            slf: PyRef<'py, Self>,
+            modality: &str,
+            ocr: Option<String>,
+            caption: Option<String>,
+            caption_prompt: Option<String>,
+            max_caption_tokens: Option<usize>,
+            document: Option<String>,
+            transcribe: Option<String>,
+            language: Option<String>,
+            composer: Option<Py<PyAny>>,
+            retention: &str,
+        ) -> PyResult<PyRef<'py, Self>> {
+            let modality = parse_modality(modality, "model_extractor")?;
+            let retention = crate::media::parse_retention(retention)?;
+            let mut spec = ModelExtractor::new(modality);
+            if let Some(composer) = composer {
+                if !composer.bind(slf.py()).is_callable() {
+                    return Err(to_pyerr(UnikoError::Config(
+                        "model_extractor: `composer` must be callable".to_string(),
+                    )));
+                }
+                spec = spec.composer(move |request| call_composer(&composer, request.clone()));
+            }
+            if let Some(alias) = ocr {
+                spec = spec.ocr(alias);
+            }
+            if let Some(alias) = caption {
+                spec = spec.caption(alias);
+                if let Some(prompt) = caption_prompt {
+                    spec = spec.caption_prompt(prompt);
+                }
+                if let Some(tokens) = max_caption_tokens {
+                    spec = spec.max_caption_tokens(tokens);
+                }
+            }
+            if let Some(alias) = document {
+                spec = spec.document(alias);
+            }
+            if let Some(alias) = transcribe {
+                spec = spec.transcribe(alias);
+                if let Some(language) = language {
+                    spec = spec.language(language);
+                }
+            }
+            let spec = spec.retention(retention);
+            slf.map(|b| b.model_extractor(spec))?;
             Ok(slf)
         }
 
@@ -980,17 +1059,66 @@ impl PyLlmSpec {
     }
 }
 
-/// Call a Python extractor with `request`, returning its text.
-fn call_extract(extract: &Py<PyAny>, request: ExtractRequest) -> Result<String, UnikoError> {
+/// Parse an extractor modality name.
+fn parse_modality(modality: &str, method: &str) -> PyResult<Modality> {
+    match modality {
+        "image" => Ok(Modality::Image),
+        "audio" => Ok(Modality::Audio),
+        "video" => Ok(Modality::Video),
+        other => Err(to_pyerr(UnikoError::Config(format!(
+            "{method} modality '{other}': expected image, audio or video"
+        )))),
+    }
+}
+
+/// Call a Python extractor with `request`, returning its text or segments.
+fn call_extract(extract: &Py<PyAny>, request: ExtractRequest) -> Result<ExtractOutput, UnikoError> {
     Python::attach(|py| {
         let request = Py::new(
             py,
             PyExtractRequest::from_rust(py, request).map_err(py_err)?,
         )
         .map_err(py_err)?;
-        let text = extract.call1(py, (request,)).map_err(py_err)?;
-        text.extract::<String>(py)
-            .map_err(|_| UnikoError::Config("extractor must return a str".to_string()))
+        let out = extract.call1(py, (request,)).map_err(py_err)?;
+        let out = out.bind(py);
+        if let Ok(ex) = out.cast::<crate::media::PyExtraction>() {
+            return Ok(ExtractOutput::Structured(ex.get().to_rust(py)));
+        }
+        // Several models' output: one Extraction each, kept apart.
+        if let Ok(list) = out.cast::<pyo3::types::PyList>() {
+            let mut merged = Extraction::default();
+            for item in list.iter() {
+                let ex = item.cast::<crate::media::PyExtraction>().map_err(|_| {
+                    UnikoError::Config("extractor: a list result must hold only Extractions".into())
+                })?;
+                merged.derivations.extend(ex.get().to_rust(py).derivations);
+            }
+            return Ok(ExtractOutput::Structured(merged));
+        }
+        out.extract::<String>()
+            .map(ExtractOutput::Text)
+            .map_err(|_| {
+                UnikoError::Config(
+                    "extractor must return a str, an Extraction or a list of Extractions"
+                        .to_string(),
+                )
+            })
+    })
+}
+
+/// Call a Python video composer with `request`.
+fn call_composer(composer: &Py<PyAny>, request: ExtractRequest) -> Result<VideoParts, UnikoError> {
+    Python::attach(|py| {
+        let request = Py::new(
+            py,
+            PyExtractRequest::from_rust(py, request).map_err(py_err)?,
+        )
+        .map_err(py_err)?;
+        let out = composer.call1(py, (request,)).map_err(py_err)?;
+        let out = out.bind(py);
+        out.cast::<crate::media::PyVideoParts>()
+            .map(|p| p.get().to_rust(py))
+            .map_err(|_| UnikoError::Config("composer must return VideoParts".to_string()))
     })
 }
 

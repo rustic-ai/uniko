@@ -123,6 +123,10 @@ pub enum PreparedSource {
         extractor: Arc<dyn ModalityExtractor>,
         /// Opaque host-defined prepared work.
         prep: Box<dyn ModalityPrepared>,
+        /// The session and message the source was ingested into. Resolved
+        /// to node ids in the transaction when the caller passes none, so
+        /// the extractor's artifact is attached to them like any other.
+        context: IngestContext,
     },
 }
 
@@ -175,11 +179,37 @@ impl PreparedSource {
             Self::Pdf(prep) => Ok(IngestOutcome::Pdf(
                 super::pdf::ingest_pdf_in_tx(kb, tx, prep, ctx, seen).await?,
             )),
-            Self::Modality { extractor, prep } => Ok(IngestOutcome::Artifact(
-                extractor
-                    .apply_in_tx(kb, tx, prep.as_ref(), ctx, seen)
-                    .await?,
-            )),
+            Self::Modality {
+                extractor,
+                prep,
+                context,
+            } => {
+                // An extractor's prep carries no provenance of its own, so
+                // the session and message are resolved here (in the
+                // transaction, so a session this unit just created counts).
+                let mut ctx = ctx;
+                if ctx.session_nid.is_none()
+                    && let Some(id) = context.session_id.as_deref()
+                {
+                    ctx.session_nid = kb
+                        .get_node_by_ext_id_in_tx(tx, "Session", "session_id", id)
+                        .await?
+                        .map(|(nid, _)| nid);
+                }
+                if ctx.message_nid.is_none()
+                    && let Some(id) = context.triggered_by_message_id.as_deref()
+                {
+                    ctx.message_nid = kb
+                        .get_node_by_ext_id_in_tx(tx, "Message", "message_id", id)
+                        .await?
+                        .map(|(nid, _)| nid);
+                }
+                Ok(IngestOutcome::Artifact(
+                    extractor
+                        .apply_in_tx(kb, tx, prep.as_ref(), ctx, seen)
+                        .await?,
+                ))
+            }
         }
     }
 
@@ -318,6 +348,7 @@ pub async fn prepare_source(
                 Ok(PreparedSource::Modality {
                     extractor: extractor.clone(),
                     prep,
+                    context: context.clone(),
                 })
             }
             None => Err(UnikoError::Unsupported(format!("{modality:?}"))),

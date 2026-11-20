@@ -33,6 +33,7 @@ from .outputs import (
     AbductionResult,
     Answer,
     ArtifactView,
+    MediaSourceView,
     Capabilities,
     ContextBundle,
     DeletionReport,
@@ -97,6 +98,14 @@ class TypedData:
     def artifact_sync(self, artifact_id: str) -> Optional[ArtifactView]:
         a = self._inner.artifact_sync(artifact_id)
         return ArtifactView.from_native(a) if a is not None else None
+
+    async def media_sources(self, artifact_id: str) -> builtins.list[MediaSourceView]:
+        rows = await self._inner.media_sources(artifact_id)
+        return [MediaSourceView.from_native(r) for r in rows]
+
+    def media_sources_sync(self, artifact_id: str) -> builtins.list[MediaSourceView]:
+        rows = self._inner.media_sources_sync(artifact_id)
+        return [MediaSourceView.from_native(r) for r in rows]
 
     async def artifact_bytes(self, artifact_id: str) -> Optional[bytes]:
         return await self._inner.artifact_bytes(artifact_id)
@@ -900,9 +909,45 @@ class TypedUnikoBuilder:
         self._inner = self._inner.scope_to_agent()
         return self
 
-    def extractor(self, modality: str, extract: Any) -> "TypedUnikoBuilder":
-        """Index ``modality`` sources as the text ``extract(request)`` returns."""
-        self._inner = self._inner.extractor(modality, extract)
+    def extractor(
+        self, modality: str, extract: Any, *, retention: str = "none"
+    ) -> "TypedUnikoBuilder":
+        """Index ``modality`` sources as the text (a ``str``), the
+        ``Extraction``, or the list of ``Extraction``s that ``extract(request)``
+        returns. ``retention`` is
+        ``"none"``, ``"identity"`` or ``"bytes"``."""
+        self._inner = self._inner.extractor(modality, extract, retention=retention)
+        return self
+
+    def model_extractor(
+        self,
+        modality: str,
+        *,
+        ocr: Optional[str] = None,
+        caption: Optional[str] = None,
+        caption_prompt: Optional[str] = None,
+        max_caption_tokens: Optional[int] = None,
+        document: Optional[str] = None,
+        transcribe: Optional[str] = None,
+        language: Optional[str] = None,
+        composer: Any = None,
+        retention: str = "none",
+    ) -> "TypedUnikoBuilder":
+        """Index ``modality`` sources with OCR, caption, document or
+        transcription models from the catalog, by alias. A video needs a
+        ``composer`` returning ``VideoParts``."""
+        self._inner = self._inner.model_extractor(
+            modality,
+            ocr=ocr,
+            caption=caption,
+            caption_prompt=caption_prompt,
+            max_caption_tokens=max_caption_tokens,
+            document=document,
+            transcribe=transcribe,
+            language=language,
+            composer=composer,
+            retention=retention,
+        )
         return self
 
     def scope(self, viewer: Any) -> "TypedUnikoBuilder":

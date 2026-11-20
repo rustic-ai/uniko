@@ -57,10 +57,10 @@ pub use episode::{RecordEpisodeParams, record_episode};
 #[doc(inline)]
 pub use facade::{
     ArtifactView, Capabilities, Data, DeadLetters, FinalizeReport, GoalContext, GoalPhase,
-    GoalView, Goals, LlmSpec, MessageView, ObserveResult, Outline, OutlineEntry, ReadRange,
-    ReadResult, RecallScope, Requirement, SearchHit, SearchOptions, Session, SourceRef, Sources,
-    StoreReport, SummarizeReport, TaskPhase, TaskView, ToolCall, ToolCallResult, ToolCallView,
-    ToolOutput, Turn, TurnUnit, Uniko, UnikoBuilder, UnitResult,
+    GoalView, Goals, LlmSpec, MediaSourceView, MessageView, ObserveResult, Outline, OutlineEntry,
+    ReadRange, ReadResult, RecallScope, Requirement, SearchHit, SearchOptions, Session, SourceRef,
+    Sources, StoreReport, SummarizeReport, TaskPhase, TaskView, ToolCall, ToolCallResult,
+    ToolCallView, ToolOutput, Turn, TurnUnit, Uniko, UnikoBuilder, UnitResult,
 };
 #[doc(inline)]
 pub use fact::{AssertFactParams, InvalidateFactParams, assert_fact, invalidate_fact};
@@ -85,9 +85,11 @@ pub use uniko_cortex::{
 };
 #[doc(no_inline)]
 pub use uniko_extract::ingest::{
-    ArtifactIngestResult, AtomicIngestResult, ExtractFn, ExtractRequest, IngestContext, IngestData,
-    IngestOutcome, IngestSource, ModalityExtractor, ModalityPrepared, ModalityRegistry,
-    PdfIngestResult, TextExtractor, ingest_source, resolve_mime,
+    ArtifactIngestResult, AtomicIngestResult, Derivation, ExtractFn, ExtractOutput, ExtractRequest,
+    Extraction, IngestContext, IngestData, IngestOutcome, IngestSource, MediaRetention,
+    ModalityExtractor, ModalityPrepared, ModalityRegistry, ModelExtractor, ModelProvenance,
+    PdfIngestResult, Segment, SegmentKind, TextExtractor, VideoFrame, VideoParts, ingest_source,
+    resolve_mime,
 };
 /// LLM circuit-breaker state, part of [`PipelineHealth`].
 pub use uniko_pipes::CircuitState;

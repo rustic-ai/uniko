@@ -336,6 +336,10 @@ pub async fn ingest_artifact_in_tx(
     } else if let Some((existing_id, existing_props)) = kb
         .get_node_by_ext_id_in_tx(tx, "Artifact", "hash", &prep.hash)
         .await?
+        // Text derived from recorded media is that media's, not anyone's
+        // whose document happens to read the same: attaching to it would
+        // make the original readable through this caller's context.
+        && kb.media_hashes_in_tx(tx, existing_id).await?.is_empty()
     {
         // Report the id the artifact actually lives under, not the
         // throwaway UUID this call minted — echoing back an id that
@@ -587,7 +591,7 @@ pub async fn ingest_artifact(
 /// lookup runs **in the transaction**, so it can see rows the same unit
 /// created — resolving these before the transaction would silently drop the
 /// edge, because a miss is not an error.
-async fn link_artifact_context_in_tx(
+pub(crate) async fn link_artifact_context_in_tx(
     kb: &KnowledgeBase,
     tx: &uniko_store::Transaction,
     artifact_nid: NodeId,
