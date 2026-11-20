@@ -179,7 +179,8 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
 | `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |
-| `extractor` | `extractor(modality: str, extract: Callable[[ExtractRequest], str]) -> UnikoBuilder` | — (sync) | Index `"image"`, `"audio"` or `"video"` sources as the text `extract` returns. |
+| `extractor` | `extractor(modality: str, extract: Callable[[ExtractRequest], str \| Extraction \| list[Extraction]], *, retention: str = "none") -> UnikoBuilder` | — (sync) | Index `"image"`, `"audio"` or `"video"` sources as the text or `Extraction` that `extract` returns. |
+| `model_extractor` | `model_extractor(modality: str, *, ocr=None, caption=None, caption_prompt=None, max_caption_tokens=None, document=None, transcribe=None, language=None, composer=None, retention="none") -> UnikoBuilder` | — (sync) | Index them with catalog models by alias. See [Extractors](#extractors). |
 | `build` | `build() -> Awaitable[Uniko]` | `build_sync` | Terminal: produce the `Uniko` instance. |
 | `build_runtime` | `build_runtime() -> Awaitable[SharedRuntime]` | `build_runtime_sync` | Terminal: a `SharedRuntime` for this builder's models, loaded as `prefetch()` says. |
 
@@ -254,10 +255,9 @@ uni = (uniko.Uniko.builder()
 ### Extractors
 
 `extractor` lets a model you run index images, audio or video. Uniko calls `extract` with an
-`ExtractRequest` (`modality`, `data` as bytes, `mime`, `path`, `metadata`) and stores the
-returned text as the artifact's content, chunked and embedded like a document; the original
-bytes are not kept. The function runs on a worker thread and holds the GIL only while it
-runs. An exception in it fails that ingest.
+`ExtractRequest` (`modality`, `data` as bytes, `mime`, `path`, `metadata`). It stores the result
+as an artifact, chunked and embedded like a document. The function runs on a worker thread and
+holds the GIL only while it runs. An exception in it fails that ingest.
 
 ```python
 def caption(request: uniko.ExtractRequest) -> str:
@@ -266,6 +266,47 @@ def caption(request: uniko.ExtractRequest) -> str:
 memory = uniko.Uniko.builder().extractor("image", caption).build_sync()
 memory.agent("a").session("s").ingest_sync(uniko.IngestSource.from_path("photo.png"))
 ```
+
+`extract` may instead return an `Extraction` of `Segment`s, or a list of them (one per model).
+Each chunk then carries its segments' page, time range, region, confidence and model:
+
+```python
+uniko.Extraction(
+    [uniko.Segment("bring the q3 forecast", "transcript", start_ms=2400, end_ms=4100)],
+    uniko.ModelProvenance("asr/host", "whisper-large", "transcribe"),
+)
+```
+
+| Class | Constructor | Notes |
+| --- | --- | --- |
+| `Segment` | `Segment(text, kind="text", *, page=None, start_ms=None, end_ms=None, bbox=None, confidence=None, speaker=None)` | `kind` is `caption`, `transcript`, `ocr_region`, `page_block` or `text`. `bbox` is `(x0, y0, x1, y1)`. Raises `ConfigError` for another kind, or an end before the start. |
+| `ModelProvenance` | `ModelProvenance(alias, model_id, task)` | Stored on each chunk as `alias@model_id`. |
+| `Extraction` | `Extraction(segments, model=None)` | |
+| `VideoFrame` | `VideoFrame(timestamp_ms, data, mime)` | A frame a composer returns. |
+| `VideoParts` | `VideoParts(frames, audio=None)` | What a composer returns. `audio` is 16 kHz 16-bit PCM WAV. |
+
+`model_extractor` uses catalog models instead, by alias:
+
+- `ocr`: an OCR alias, such as `ocr/default` with `{"ocr": {"enabled": True}}`. Lines are grouped
+  into chunks, with each line's box in `metadata.regions`;
+- `caption`: a generation alias on `remote/openai`, `remote/azure-openai` or `remote/llamacpp`,
+  sent the image with `caption_prompt` and up to `max_caption_tokens` (512);
+- `document`: a document-extraction alias;
+- `transcribe`: a transcription alias, in `language` if given. No provider is usable yet: uni-db's
+  model runtime doesn't register `local/whisper-cpp`, so `build()` refuses it. Until it does,
+  return `transcript` segments from your own `extractor`.
+
+A video needs `composer`, a callable taking an `ExtractRequest` and returning `VideoParts`. The
+image modes run on each frame and `transcribe` on the audio. `build()` raises `UnsupportedError`
+or `ConfigError` for a mode the modality can't use, a caption provider that drops images, or an
+alias missing from the catalog.
+
+`retention` keeps the original: `"none"` (the default), `"identity"` (hash, type and size, as a
+source the text links to) or `"bytes"` (the bytes too). `Data.media_sources(artifact_id)`
+returns the sources as `MediaSourceView`s (`artifact_id`, `modality`, `mime`, `hash`, `size`,
+`path`, `duration_ms`, `sample_rate`, `channels`, `derivation_kind`, `bytes_retained`). With
+`bytes_retained`, `Data.artifact_bytes(source.artifact_id)` returns the original. The
+[guide](../guides/multimodal.md) covers chunking, visibility and deletion.
 
 ---
 
@@ -508,6 +549,7 @@ the artifact's chunks is forgotten or hidden.
 | --- | --- | --- | --- |
 | `message` | `message(message_id: str) -> Awaitable[MessageView \| None]` | `message_sync` | Fetch a stored message. |
 | `artifact` | `artifact(artifact_id: str) -> Awaitable[ArtifactView \| None]` | `artifact_sync` | Fetch an artifact's metadata + text. |
+| `media_sources` | `media_sources(artifact_id: str) -> Awaitable[list[MediaSourceView]]` | `media_sources_sync` | The original media an artifact's text was derived from; see [Extractors](#extractors). |
 | `artifact_bytes` | `artifact_bytes(artifact_id: str) -> Awaitable[bytes \| None]` | `artifact_bytes_sync` | Fetch the raw binary payload. |
 
 !!! warning "Binary payloads: use `artifact_bytes`"

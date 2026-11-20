@@ -3,15 +3,17 @@
 //! Text, code, markup, structured, and PDF ingest are built in. Image,
 //! audio, and video are routed to a [`ModalityExtractor`] registered in a
 //! [`ModalityRegistry`]; with no extractor registered, ingest of those
-//! modalities returns [`UnikoError::Unsupported`]. No ASR/VLM/captioning
-//! model ships here — this is the seam a host plugs one into.
+//! modalities returns [`UnikoError::Unsupported`]. A host plugs in its own
+//! function through [`TextExtractor`](super::TextExtractor), or uses the
+//! runtime's OCR, caption, document and transcription models through
+//! [`ModelExtractor`](super::ModelExtractor).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use uniko_pipes::content::Modality;
-use uniko_store::{KnowledgeBase, UnikoError};
+use uniko_store::{KnowledgeBase, ModelEntry, UnikoError};
 
 use uniko_pipes::types::IngestSource;
 
@@ -74,6 +76,23 @@ pub trait ModalityPrepared: Send + Sync + std::fmt::Debug {
 pub trait ModalityExtractor: Send + Sync + std::fmt::Debug {
     /// The modality this extractor handles.
     fn modality(&self) -> Modality;
+
+    /// The catalog aliases this extractor calls. Readiness loads them for
+    /// `Requirement::Extractor` of this modality. Defaults to none.
+    fn model_aliases(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Check the extractor against the catalog `entries` it will run with,
+    /// before the store opens. Defaults to accepting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Unsupported`] or [`UnikoError::Config`] for a
+    /// configuration this extractor cannot run.
+    fn validate(&self, _entries: &[ModelEntry]) -> Result<(), UnikoError> {
+        Ok(())
+    }
 
     /// Do every non-graph step for `src`: decode, run models, chunk, and
     /// PUT blobs via [`KnowledgeBase::put_blob`]. No transaction is open.
@@ -163,6 +182,15 @@ impl ModalityRegistry {
     #[must_use]
     pub fn get(&self, modality: Modality) -> Option<&Arc<dyn ModalityExtractor>> {
         self.extractors.get(&modality)
+    }
+
+    /// Every registered extractor, in the same order as
+    /// [`modalities`](Self::modalities).
+    pub fn extractors(&self) -> impl Iterator<Item = &Arc<dyn ModalityExtractor>> {
+        let mut out: Vec<(&Modality, &Arc<dyn ModalityExtractor>)> =
+            self.extractors.iter().collect();
+        out.sort_by_key(|(m, _)| format!("{m:?}"));
+        out.into_iter().map(|(_, e)| e)
     }
 
     /// The modalities with a registered extractor, in a stable order.

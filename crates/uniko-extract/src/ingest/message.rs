@@ -447,6 +447,13 @@ pub async fn create_chunks_in_tx(
             }
             if let Some(ref meta) = c.metadata {
                 props.insert("metadata".into(), json_to_uni_value(meta));
+                // Text derived from media (`ingest::derivation`) names its
+                // modality and model; both have their own indexed columns.
+                for key in ["modality", "source_model_version"] {
+                    if let Some(v) = meta.get(key).and_then(serde_json::Value::as_str) {
+                        props.insert(key.into(), Value::String(v.to_string()));
+                    }
+                }
             }
             // A structure-aware chunk's header and address are stored as
             // their own columns: the header is embedded with the text and

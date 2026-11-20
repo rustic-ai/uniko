@@ -454,6 +454,30 @@ class ArtifactView(BaseModel):
         return cls.model_validate(native)
 
 
+class MediaSourceView(BaseModel):
+    """The original media a text artifact was derived from (native
+    ``MediaSourceView``). With ``bytes_retained``, ``Data.artifact_bytes`` on
+    ``artifact_id`` returns the original bytes."""
+
+    model_config = _OUT
+
+    artifact_id: str
+    modality: Optional[str] = None
+    mime: Optional[str] = None
+    hash: str
+    size: Optional[int] = None
+    path: Optional[str] = None
+    duration_ms: Optional[int] = None
+    sample_rate: Optional[int] = None
+    channels: Optional[int] = None
+    derivation_kind: Optional[str] = None
+    bytes_retained: bool
+
+    @classmethod
+    def from_native(cls, native: Any) -> "MediaSourceView":
+        return cls.model_validate(native)
+
+
 class GoalView(BaseModel):
     """A goal (native ``GoalView``). ``metrics`` is free-form JSON."""
 
@@ -944,6 +968,7 @@ __all__ = [
     "MatchedProcedure",
     "MessageView",
     "ArtifactView",
+    "MediaSourceView",
     "GoalView",
     "TaskView",
     "GoalContext",

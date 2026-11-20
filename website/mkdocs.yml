@@ -30,6 +30,7 @@ nav:
       - Working with the Facade: guides/facade.md
       - Agent Tools: guides/agent-tools.md
       - Tool Output: guides/tool-output.md
+      - Images, Audio and Video: guides/multimodal.md
       - Recall & Retrieval: guides/retrieval.md
       - Reasoning with Locy: guides/reasoning-with-locy.md
       - Configuration: guides/configuration.md

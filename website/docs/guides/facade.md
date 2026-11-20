@@ -71,7 +71,8 @@ let memory = Uniko::builder()
 | `.readiness_timeout(Duration)` | How long `build()` waits for the required models to load. |
 | `.streaming(bool)` | Enables the fire-and-forget `submit`/`flush` lane. |
 | `.scope_to_agent()` / `.scope(RecallScope)` | Default read visibility. |
-| `.extractor(Arc<dyn ModalityExtractor>)` | A pluggable image/audio/video extractor — implement `modality()` and `extract()` on `uniko_extract::ingest::modality::ModalityExtractor` (`Send + Sync + Debug`). Without one, image/audio/video sources return `UnikoError::Unsupported`. |
+| `.extractor(Arc<dyn ModalityExtractor>)` | An image/audio/video extractor: a `TextExtractor` over your function, or your own `ModalityExtractor` (`prepare` outside the transaction, `apply_in_tx` inside it). Without one, image/audio/video sources return `UnikoError::Unsupported`. See [Images, Audio and Video](multimodal.md). |
+| `.model_extractor(ModelExtractor)` | An extractor backed by catalog models: OCR, captions, document extraction or transcription by alias, and a composer for video. `build()` refuses a mode the modality or catalog can't serve. See [Images, Audio and Video](multimodal.md#models-from-the-catalog). |
 | `.raw_config(UnikoConfig)` | Drop in a fully-tuned config (see [Configuration](configuration.md)). |
 
 **`LlmSpec`** picks the generation model: `openai(alias, model, base_url)` (reads `OPENAI_API_KEY`),
@@ -527,6 +528,7 @@ the document fetch:
 ```rust
 let view  = agent.data().artifact("spec.pdf").await?;        // metadata + reassembled text
 let bytes = agent.data().artifact_bytes("spec.pdf").await?;  // the original blob
+let media = agent.data().media_sources("photo-1").await?;     // the image/recording a text came from
 let msg   = agent.data().message("m-12").await?;             // sender / session / attachments
 ```
 
@@ -656,7 +658,7 @@ if let Err(UnikoError::NotReady(failures)) = &built {
 | `Nlp` | `nlp/default` loads and the NLP pipeline starts (needs the `onnx` feature). |
 | `Ocr` | `pdf-ocr` is compiled in, `ocr.enabled` is set, and `ocr/default` loads. |
 | `Generator` | The answer alias is set and loads. |
-| `Extractor(modality)` | An extractor is registered for the modality. |
+| `Extractor(modality)` | An extractor is registered for the modality, and a model extractor's aliases load. |
 | `Accelerated(alias)` | The alias loads, and a non-CPU execution provider it asks for is among the providers its sessions attached. `["cuda", "cpu"]` fails as `not_accelerated` when the model runs on CPU: on a build without `gpu-cuda`, on a GPU build whose CUDA libraries or driver are missing, or when the accelerator's output disagreed with CPU at load (uni-xervo then moves the model to CPU). Every `local/onnx` model reports its providers except document extraction; any other alias (a remote model, whisper.cpp) fails as `not_supported`. |
 
 A requirement the catalog, the compiled features or the registered extractors cannot meet fails
@@ -782,7 +784,7 @@ async fn main() -> anyhow::Result<()> {
 | Finalize | `session.finalize()` / `agent.finalize_session(id)` | `FinalizeReport` |
 | Compile | `agent.consolidate()` | `CycleStats` |
 | Read | `agent.recall` / `answer` / `query` (+ `_in`) | `ContextBundle` / `Answer` / `Vec<Record>` |
-| Retrieve | `agent.data().message` / `artifact` / `artifact_bytes` | `Option<…View>` / `Option<Vec<u8>>` |
+| Retrieve | `agent.data().message` / `artifact` / `artifact_bytes` / `media_sources` | `Option<…View>` / `Option<Vec<u8>>` / `Vec<MediaSourceView>` |
 | Plan | `agent.goals()` (create / transition / read) | `GoalView` / `TaskView` / `GoalContext` |
 | Reason | `agent.define_rule` / `run_rule` / `assume` / `abduce` | rows / derivations |
 | Curate | `forget_*` / `delete_*` / `purge` | `DeletionReport` |

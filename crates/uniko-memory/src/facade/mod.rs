@@ -31,6 +31,8 @@ mod capabilities;
 mod data;
 mod dead_letters;
 mod goals;
+#[cfg(test)]
+mod media_tests;
 mod readiness;
 mod session;
 mod sources;
@@ -40,7 +42,7 @@ mod tool;
 mod uniko;
 
 pub use capabilities::Capabilities;
-pub use data::{ArtifactView, Data, MessageView};
+pub use data::{ArtifactView, Data, MediaSourceView, MessageView};
 pub use dead_letters::DeadLetters;
 pub use goals::{GoalContext, GoalPhase, GoalView, Goals, TaskPhase, TaskView};
 pub use readiness::Requirement;

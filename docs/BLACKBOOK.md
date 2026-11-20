@@ -940,6 +940,15 @@ resolve_mime:  explicit override
 
 Gotcha: unknown/arbitrary binary maps to `Modality::Text` (preserving legacy behavior), so an unrecognized binary blob silently routes to the text chunker unless you supply an explicit `Mime`/`Modality`.
 
+**Media extractors (issue #61).** Two extractors ship for `Image`/`Audio`/`Video`, both a `TextExtractor` (`ingest/text_extractor.rs`):
+
+- **A host function**: `TextExtractor::new` (returns `String`), `structured` (returns an `Extraction`), or `with_output` (either). The Python `UnikoBuilder.extractor` takes a callable returning a `str`, an `Extraction`, or a list of `Extraction`s (one per model).
+- **Catalog models**: `ModelExtractor` (`ingest/model_extractor.rs`) runs uni-xervo's `ocr`, `generate` with an attached image (captions), `document_extract` and `transcribe` tasks, chosen by alias. Captions need a provider that forwards images: `IMAGE_CAPABLE_PROVIDERS` (`model_extractor.rs:58`) is `remote/openai`, `remote/azure-openai` and `remote/llamacpp`, while Gemini, Vertex, Anthropic, Cohere and Mistral drop images. Transcription has no usable provider yet. uni-xervo's only transcriber is `local/whisper-cpp`, and uni-db's `build_model_runtime` doesn't register it, so `validate` refuses it (`WHISPER_CPP_PROVIDER`, `:55`). Audio is checked to be 16 kHz 16-bit PCM WAV (`check_wav`, `:764`). Model-call failures are `UnikoError::Llm`. There is no video task, so video takes a host composer that returns frames and a WAV track. `ModelExtractor::validate` (`:328`) runs in `UnikoBuilder::build` (`facade/uniko.rs:758`) before the store opens. `Requirement::Extractor` loads the extractor's aliases (`readiness.rs:234`).
+
+`Extraction::chunks` (`ingest/derivation.rs:321`) groups consecutive segments of one derivation, kind and page up to `max_chunk_tokens`. The newline joiners count toward the budget. It writes `chunk_type`, `metadata.{page_number, time_start_ms, time_end_ms, bbox, regions, confidence, speaker}` (`regions` keeps each located segment's box and byte range in a grouped chunk), and `modality` / `source_model_version`; `create_chunks_in_tx` copies the last two into their own columns (`message.rs:452`).
+
+`MediaRetention` (`None` by default, `Identity`, `Bytes`) records the original as a `kind = "media"` artifact keyed by SHA-256 (`repository/media.rs:161`), with `HAS_CONTENT` only under `Bytes`. The text artifact points to it with `DERIVED_FROM {derivation_kind, derived_at}` (`:240`). The media hash joins the unit's `content_ids` lock set. With retention, the derived artifact is identified by its media: an auto id is `<modality>-<media sha256>`, a replay of the same media under the same id keeps the first text, and the auto-id content-hash dedup in `ingest_artifact_in_tx` skips artifacts derived from media, so equal captions on different images, or a plain document reading the same, never share one artifact. `PreparedSource::Modality` carries the `IngestContext`, so modality artifacts attach to their session and message like any other. `Data::artifact_access` treats a media source as readable only when every artifact derived from it is wholly readable (`facade/data.rs:237`), and `media_sources` checks each source that way. Deleting the last derived artifact deletes the source and its unshared content (`orphaned_media_ids`, `storage/deletion.rs:561`), from `delete_artifact`, the session cascade and the turn cascade (which also removes media-derived artifacts attached to nothing but that turn and its own session).
+
 ### 4.4 The hot path: `ingest_message_atomic`
 
 `ingest_message_atomic` (`ingest/atomic.rs`) is the core of write-time processing. Its design is **prep-then-commit**: all CPU work and read-only lookups happen *before* a transaction opens; then a single retriable transaction writes everything and commits once. Its result carries the message/chunk/session/sender ids, extracted entities and observations, and an `AtomicTimings` breakdown.
@@ -1631,7 +1640,7 @@ let memory = Uniko::builder()
 let agent = memory.agent("assistant-1");
 ```
 
-`UnikoBuilder` is chainable: `.path`/`.in_memory`, `.embedding(EmbeddingConfig)`, `.llm(LlmSpec)`, `.raw_config`, `.streaming(bool)`, `.scope_to_agent`/`.scope(RecallScope)`, `.extractor(Arc<dyn ModalityExtractor>)`, then `.build().await`.
+`UnikoBuilder` is chainable: `.path`/`.in_memory`, `.embedding(EmbeddingConfig)`, `.llm(LlmSpec)`, `.raw_config`, `.streaming(bool)`, `.scope_to_agent`/`.scope(RecallScope)`, `.extractor(Arc<dyn ModalityExtractor>)`, `.model_extractor(ModelExtractor)`, then `.build().await`.
 
 `LlmSpec` registers the generation model for the answer path. It lowers to a uni-db `ModelAliasSpec` (task `Generate`, `Lazy` warmup):
 
@@ -2314,7 +2323,7 @@ The `tools` module re-exports (from `crates/uniko-api/src/tools.rs`):
 | Handles | `Uniko`, `UnikoBuilder`, `Agent`, `Session`, `Turn`, `LlmSpec` |
 | Recall | `ContextBundle`, `RecallItem`, `RecallKind`, `RecallTier`, `RecallSource`, `Scope`, `Dimensions`, `RecallScope`, `ViewerScope` |
 | Answer / query | `Answer`, `nl_to_cypher::is_safe_read_only` |
-| Ingest | `IngestSource`, `IngestData`, `IngestContext`, `IngestOutcome`, `ingest_source`, `resolve_mime`, `Mime`, `Modality`, `ContentType`, `ModalityRegistry`, `ModalityExtractor` |
+| Ingest | `IngestSource`, `IngestData`, `IngestContext`, `IngestOutcome`, `ingest_source`, `resolve_mime`, `Mime`, `Modality`, `ContentType`, `ModalityRegistry`, `ModalityExtractor`, `TextExtractor`, `ModelExtractor`, `Extraction`, `Derivation`, `Segment`, `SegmentKind`, `ModelProvenance`, `ExtractOutput`, `MediaRetention`, `VideoFrame`, `VideoParts`, `MediaSourceView` |
 | Goals | `GoalContext`, `GoalView`, `TaskView`, `GoalPhase`, `TaskPhase`, `CreateGoalParams`, `CreateTaskParams` |
 | Results | `AtomicIngestResult`, `ObserveResult`, `ArtifactIngestResult`, `PdfIngestResult`, `DeletionReport` |
 | Views | `MessageView`, `ArtifactView` |

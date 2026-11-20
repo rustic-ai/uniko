@@ -231,13 +231,22 @@ fn plan(requirements: &[Requirement], cx: &Context<'_>) -> (Vec<ReadinessFailure
                     None => Err(fail(ReadinessCode::NotInCatalog).with_alias(alias)),
                 },
             },
-            Requirement::Extractor(m) => {
-                if cx.extractors.modalities().contains(m) {
-                    Ok(())
-                } else {
-                    Err(fail(ReadinessCode::NoExtractor))
+            Requirement::Extractor(m) => match cx.extractors.get(*m) {
+                None => Err(fail(ReadinessCode::NoExtractor)),
+                // A model-backed extractor is ready when its models load.
+                Some(extractor) => {
+                    let aliases = extractor.model_aliases();
+                    match aliases.iter().find(|a| !in_catalog(a)) {
+                        Some(missing) => {
+                            Err(fail(ReadinessCode::NotInCatalog).with_alias(missing.clone()))
+                        }
+                        None => {
+                            need.aliases.extend(aliases);
+                            Ok(())
+                        }
+                    }
                 }
-            }
+            },
         };
         match outcome {
             Ok(()) => needs.push(need),

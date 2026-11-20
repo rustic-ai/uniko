@@ -16,6 +16,7 @@ pub mod consolidation;
 pub mod entities;
 pub mod episode;
 pub mod ingest;
+pub mod media;
 pub mod policy;
 pub mod procedures;
 pub mod recall;

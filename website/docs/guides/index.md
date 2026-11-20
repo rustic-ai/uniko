@@ -29,6 +29,11 @@ The supplement to the pipelines — goals and tasks via `agent.goals()`, plus `r
 `record_action`, `add_observation`, `assert_fact`, for knowledge an agent alone can give.
 </div>
 <div class="feature-card" markdown>
+### [Images, Audio and Video](multimodal.md)
+Index media through OCR, captions, document extraction or transcription, with each chunk's page,
+time range, region and model, and trace the text back to the original.
+</div>
+<div class="feature-card" markdown>
 ### [Recall & Retrieval](retrieval.md)
 Reading memory back — `agent.recall`/`answer`, item `kind` + `sources` provenance, cited answers,
 and dereferencing sources with `agent.data()`.
