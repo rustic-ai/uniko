@@ -4,7 +4,7 @@
 //! application, UNWIND edge handling) and act as regression guards against
 //! future upgrades. Consolidated into one binary so they link once.
 //!
-//! Run: `cargo nextest run -p uniko-store --test bug_repros`
+//! Run: `cargo nextest run -p uniko-store --test integration bug_repros::`
 
 mod label_disjunction_repro;
 mod label_disjunction_union_schema_panic;

@@ -37,7 +37,31 @@ Use **`cargo nextest`**, never `cargo test` — nextest is the runner of record 
 cargo nextest run --workspace            # full suite
 cargo nextest run -p uniko-memory        # one crate
 cargo nextest run -E 'test(recall_cascade)'   # filter by name
+cargo nextest run -p uniko-store --test integration store_tests::   # one suite
 ```
+
+### One integration-test binary per crate
+
+Every test binary links the whole stack (uni-db, Lance, DataFusion, ONNX
+Runtime), so each one costs minutes of linking and gigabytes of `target/`. A
+crate therefore has its unit-test binary and **one** integration binary,
+`integration`, as uni-db does:
+
+- `autotests = false` in the crate's `Cargo.toml`, and a single `[[test]]`
+  pointing at `tests/integration.rs`;
+- each suite (`tests/<suite>/main.rs`) or single-file repro (`tests/<repro>.rs`)
+  is a `#[path]` module of `tests/integration.rs`. Add new tests as a module
+  there, never as a new top-level target;
+- shared helpers live in `tests/common/` and are declared once, at the root of
+  `integration.rs`, as `crate::common`;
+- crate-level attributes (`#![recursion_limit]`) go in `integration.rs`;
+- a test that re-runs its own binary as a child must pass the full test name,
+  module path included: build it from `module_path!()`, not a bare name;
+- `uniko-bench`'s CLI binaries set `test = false`.
+
+`uniko-api` and `uniko-cortex` have a single integration file already. The
+workspace builds 14 test binaries: 8 unit-test binaries and 6 integration
+binaries.
 
 ### Recall needs more than a 2 MiB stack
 

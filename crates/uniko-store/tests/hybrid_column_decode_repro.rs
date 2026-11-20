@@ -17,7 +17,7 @@
 //!     elements are tagged-encoded CypherValues — the suspect)
 //!
 //! Run:
-//!   cargo nextest run -p uniko-store --test hybrid_column_decode_repro \
+//!   cargo nextest run -p uniko-store --test integration hybrid_column_decode_repro:: \
 //!       --no-capture
 
 use std::collections::HashMap;

@@ -60,7 +60,7 @@ async fn child_writer() {
 /// when the child actually aborted.
 fn crash_writer(store: &Path) -> bool {
     let status = Command::new(std::env::current_exe().expect("test binary path"))
-        .args(["--exact", "child_writer", "--nocapture"])
+        .args(["--exact", &child_test_name(), "--nocapture"])
         .env(CHILD_ENV, store)
         .status()
         .expect("spawn child writer");
@@ -112,4 +112,16 @@ async fn interrupted_unit_leaves_nothing_after_reopen() {
 
     drop(agent);
     memory.shutdown().await.expect("shutdown");
+}
+
+/// The child test's full name in this binary, e.g.
+/// `unit_crash_atomicity::child_writer`: the test is a module of the
+/// crate's one integration binary, so its name carries the module path.
+fn child_test_name() -> String {
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    if module.is_empty() {
+        "child_writer".to_string()
+    } else {
+        format!("{module}::child_writer")
+    }
 }

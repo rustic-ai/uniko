@@ -595,7 +595,7 @@ A quick end-to-end check of the storage layer, independent of recall, lives in
 because it loads bge-m3 (~2 GB):
 
 ```sh
-cargo nextest run -p uniko-store --test sparse_query_alias_repro \
+cargo nextest run -p uniko-store --test integration sparse_query_alias_repro:: \
   --run-ignored all --no-capture
 ```
 

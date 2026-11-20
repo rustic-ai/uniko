@@ -30,7 +30,7 @@
 //!
 //! ```sh
 //! UNIKO_DEADLOCK_KB=data/kb_sym/conv-30 \
-//!   cargo nextest run -p uniko-store --test phase2_deadlock_reduction \
+//!   cargo nextest run -p uniko-store --test integration phase2_deadlock_reduction:: \
 //!   --run-ignored all --no-capture
 //! ```
 //!

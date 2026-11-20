@@ -13,18 +13,23 @@ keywords.workspace = true
 categories.workspace = true
 # Internal benchmark harness — not published to crates.io.
 publish = false
+# Integration tests are modules of one binary (tests/integration.rs).
+autotests = false
 
 [[bin]]
 name = "uniko-bench"
 path = "src/main.rs"
+test = false
 
 [[bin]]
 name = "longmemeval-bench"
 path = "src/longmemeval_main.rs"
+test = false
 
 [[bin]]
 name = "uniko-cypher"
 path = "src/cypher_main.rs"
+test = false
 
 # Regenerates the tracked `config/schema.json`. A binary rather than a test:
 # its product is a side effect on a tracked file, so no test-selection flag
@@ -32,38 +37,47 @@ path = "src/cypher_main.rs"
 [[bin]]
 name = "export-schema"
 path = "src/export_schema_main.rs"
+test = false
 
 [[bin]]
 name = "nlp-compare"
 path = "src/nlp_compare_main.rs"
+test = false
 
 [[bin]]
 name = "tool-recall"
 path = "src/tool_recall_main.rs"
+test = false
 
 [[bin]]
 name = "profile-writes"
 path = "src/profile_writes_main.rs"
+test = false
 
 [[bin]]
 name = "insert-microbench"
 path = "src/insert_microbench_main.rs"
+test = false
 
 [[bin]]
 name = "update-microbench"
 path = "src/update_microbench_main.rs"
+test = false
 
 [[bin]]
 name = "mutation-set-microbench"
 path = "src/mutation_set_microbench_main.rs"
+test = false
 
 [[bin]]
 name = "bulk-vs-unwind"
 path = "src/bulk_vs_unwind_main.rs"
+test = false
 
 [[bin]]
 name = "nlp-parity"
 path = "src/nlp_parity_main.rs"
+test = false
 
 [features]
 # CPU by default so the standard workspace commands — `cargo check/clippy/
@@ -100,3 +114,7 @@ clap = { workspace = true }
 rust-stemmers = { workspace = true }
 regex = { workspace = true }
 tempfile = "3"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

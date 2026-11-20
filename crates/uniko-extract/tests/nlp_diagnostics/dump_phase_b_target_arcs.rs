@@ -5,7 +5,7 @@
 //! whether the rule patterns can possibly fire.
 //!
 //! Run: cargo nextest run -p uniko-extract --features onnx \
-//!     --test dump_phase_b_target_arcs --nocapture --run-ignored all
+//!     --test integration dump_phase_b_target_arcs:: --nocapture --run-ignored all
 
 #[cfg(feature = "onnx")]
 mod onnx_dump {
