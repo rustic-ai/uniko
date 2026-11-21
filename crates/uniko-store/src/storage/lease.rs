@@ -329,3 +329,153 @@ mod tests {
         a.release().await;
     }
 }
+
+/// The same lease rules against a real S3 implementation: the AWS Emulator
+/// (`scripts/aws-emulator/start.sh`), which honors `If-None-Match` and
+/// `If-Match` as S3 does. Skipped unless `UNIKO_S3_EMULATOR_ENDPOINT`,
+/// `UNIKO_S3_EMULATOR_CA` and `UNIKO_S3_EMULATOR_BUCKET` are set.
+#[cfg(test)]
+mod emulator_tests {
+    use super::*;
+    use object_store::ClientOptions;
+    use object_store::aws::AmazonS3Builder;
+
+    /// The emulator's bucket, or `None` (skip) when it isn't configured.
+    fn emulator() -> Option<Arc<dyn ObjectStore>> {
+        let endpoint = std::env::var("UNIKO_S3_EMULATOR_ENDPOINT").ok()?;
+        let ca = std::env::var("UNIKO_S3_EMULATOR_CA").ok()?;
+        let bucket = std::env::var("UNIKO_S3_EMULATOR_BUCKET").ok()?;
+        let pem = std::fs::read(&ca).expect("read the emulator CA");
+        let store = AmazonS3Builder::new()
+            .with_endpoint(endpoint)
+            .with_bucket_name(bucket)
+            .with_region("us-east-1")
+            .with_access_key_id("test")
+            .with_secret_access_key("test")
+            .with_virtual_hosted_style_request(false)
+            .with_client_options(ClientOptions::new().with_root_certificate(
+                object_store::Certificate::from_pem(&pem).expect("a PEM CA"),
+            ))
+            .build()
+            .expect("an S3 client for the emulator");
+        Some(Arc::new(store))
+    }
+
+    /// A prefix of its own per test, so tests run in parallel.
+    fn prefix(test: &str) -> ObjPath {
+        ObjPath::from(format!("{test}-{}", uuid::Uuid::now_v7()))
+    }
+
+    macro_rules! emulator_or_skip {
+        () => {
+            match emulator() {
+                Some(s) => s,
+                None => {
+                    eprintln!("skipping: set UNIKO_S3_EMULATOR_* (scripts/aws-emulator/start.sh)");
+                    return;
+                }
+            }
+        };
+    }
+
+    #[tokio::test]
+    async fn emulator_a_live_lease_refuses_a_second_holder_and_frees_on_release() {
+        let store = emulator_or_skip!();
+        let p = prefix("live");
+        let a = RemoteLease::acquire(Arc::clone(&store), &p, LEASE_TTL, RENEW_EVERY)
+            .await
+            .expect("a create-only put on an empty prefix");
+        let err = RemoteLease::acquire(Arc::clone(&store), &p, LEASE_TTL, RENEW_EVERY)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("open in another process"), "{err}");
+        a.release().await;
+        assert!(
+            store.head(&p.clone().join(LEASE_FILE)).await.is_err(),
+            "deleted on release"
+        );
+        RemoteLease::acquire(Arc::clone(&store), &p, LEASE_TTL, RENEW_EVERY)
+            .await
+            .expect("free once released")
+            .release()
+            .await;
+    }
+
+    #[tokio::test]
+    async fn emulator_a_held_lease_is_renewed_with_if_match() {
+        let store = emulator_or_skip!();
+        let p = prefix("renew");
+        let a = RemoteLease::acquire(
+            Arc::clone(&store),
+            &p,
+            Duration::from_secs(2),
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap();
+        // Several renewals past the TTL: each If-Match succeeded, or the
+        // lease would be lost or another holder could take it.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!a.is_lost());
+        assert!(
+            RemoteLease::acquire(Arc::clone(&store), &p, LEASE_TTL, RENEW_EVERY)
+                .await
+                .is_err(),
+            "still held after its first TTL"
+        );
+        a.release().await;
+    }
+
+    #[tokio::test]
+    async fn emulator_an_expired_lease_is_taken_over_and_the_old_holder_loses_it() {
+        let store = emulator_or_skip!();
+        let p = prefix("takeover");
+        let a = RemoteLease::acquire(
+            Arc::clone(&store),
+            &p,
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let b = RemoteLease::acquire(Arc::clone(&store), &p, LEASE_TTL, RENEW_EVERY)
+            .await
+            .expect("an expired lease is taken over with If-Match");
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        assert!(a.is_lost(), "a's If-Match renewal fails against b's lease");
+        assert!(!b.is_lost());
+        a.release().await;
+        assert!(
+            store.head(&p.clone().join(LEASE_FILE)).await.is_ok(),
+            "b's lease stays"
+        );
+        b.release().await;
+    }
+
+    #[tokio::test]
+    async fn emulator_two_openers_racing_for_an_expired_lease_get_one_winner() {
+        let store = emulator_or_skip!();
+        let p = prefix("race");
+        let stale = RemoteLease::acquire(
+            Arc::clone(&store),
+            &p,
+            Duration::from_millis(200),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let attempts = futures::future::join_all(
+            (0..6).map(|_| RemoteLease::acquire(Arc::clone(&store), &p, LEASE_TTL, RENEW_EVERY)),
+        )
+        .await;
+        let (won, lost): (Vec<_>, Vec<_>) = attempts.into_iter().partition(Result::is_ok);
+        assert_eq!(won.len(), 1, "exactly one opener takes the lease over");
+        assert_eq!(lost.len(), 5);
+        drop(stale);
+        for l in won.into_iter().flatten() {
+            l.release().await;
+        }
+    }
+}

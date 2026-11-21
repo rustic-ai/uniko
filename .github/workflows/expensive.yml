@@ -57,6 +57,13 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
+      # The object-store lease tests run against the AWS Emulator, a real S3
+      # implementation (conditional writes included). The script builds its
+      # image, starts it, creates the test bucket and exports the
+      # UNIKO_S3_EMULATOR_* variables those tests read.
+      - name: Start the AWS Emulator
+        run: scripts/aws-emulator/start.sh >> "$GITHUB_ENV"
+
       - name: cargo nextest run (EXPENSIVE_TESTS=1)
         run: |
           # Warm the model cache serially first, as ci.yml does: parallel cold

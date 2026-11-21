@@ -190,6 +190,10 @@ and then completes a write it had already started: only uni-db can refuse that, 
 lease on its own commits. Clocks are compared across hosts, so the lease length is also the
 margin for clock skew. A `file://` URI is a local directory and takes the file lock.
 
+The lease is tested against the [AWS Emulator](https://github.com/aws/aws-emulator), a local S3
+that honors conditional writes, including six openers racing for one expired lease. It hasn't been
+tested against AWS S3 or GCS themselves.
+
 On a network file system that doesn't support file locks, the cross-process check may not hold.
 
 `progress` is called after each phase and backfill batch. Each event carries:

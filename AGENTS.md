@@ -45,6 +45,20 @@ unless `EXPENSIVE_TESTS=1`. CI runs them, Rust and Python, nightly on `main`
 and on demand (`.github/workflows/expensive.yml`); locally, set it with
 `UNI_CACHE_DIR=$PWD/.uni_cache` so every test shares one model cache.
 
+### Object-store lease tests (AWS Emulator)
+
+The lease tests in `crates/uniko-store/src/storage/lease.rs` (`emulator_*`)
+run against the [AWS Emulator](https://github.com/aws/aws-emulator), a local
+S3 with conditional writes, and return early unless `UNIKO_S3_EMULATOR_*` is
+set. The nightly workflow starts it; locally (docker or podman):
+
+```sh
+set -a; eval "$(scripts/aws-emulator/start.sh)"; set +a
+cargo nextest run -p uniko-store --lib -E 'test(emulator)'
+```
+
+Stop it with `docker rm -f uniko-aws-emulator` (or `podman`).
+
 ### One integration-test binary per crate
 
 Every test binary links the whole stack (uni-db, Lance, DataFusion, ONNX
