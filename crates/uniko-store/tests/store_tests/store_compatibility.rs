@@ -691,6 +691,57 @@ async fn a_marker_with_no_phase_refuses_to_open() {
     ));
 }
 
+const LOCK_CHILD_ENV: &str = "UNIKO_LOCK_CHILD_STORE";
+
+/// The child half of `a_second_process_cannot_open_an_open_store`: opens the
+/// store the parent holds, and must be refused. A no-op when run directly.
+#[tokio::test]
+async fn lock_child_opens_the_parents_store() {
+    let Ok(store) = std::env::var(LOCK_CHILD_ENV) else {
+        return;
+    };
+    let err = open(Path::new(&store), UnikoConfig::default())
+        .await
+        .expect_err("a second process is refused");
+    assert!(err.to_string().contains("another process"), "{err}");
+}
+
+fn lock_child_test_name() -> String {
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    if module.is_empty() {
+        "lock_child_opens_the_parents_store".to_string()
+    } else {
+        format!("{module}::lock_child_opens_the_parents_store")
+    }
+}
+
+/// A store open in one process can't be opened by another: the OS lock on
+/// its `.uniko.lock` refuses the second, and the first's close frees it.
+#[tokio::test]
+async fn a_second_process_cannot_open_an_open_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb");
+    let kb = open(&path, UnikoConfig::default()).await.unwrap();
+    let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", &lock_child_test_name(), "--nocapture"])
+        .env(LOCK_CHILD_ENV, &path)
+        .output()
+        .expect("spawn the child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "the child was not refused: {stdout}");
+    assert!(
+        stdout.contains("1 passed"),
+        "the child test didn't run: {stdout}"
+    );
+    kb.shutdown().await.unwrap();
+    open(&path, UnikoConfig::default())
+        .await
+        .expect("free once closed")
+        .shutdown()
+        .await
+        .unwrap();
+}
+
 /// The shared-runtime open path explains a hybrid store opened dense-only
 /// the same way as the catalog path.
 #[tokio::test]

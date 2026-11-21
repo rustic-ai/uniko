@@ -58,6 +58,9 @@ mod unidb_schema_reapply_repro;
 #[path = "unidb_tx_snapshot_lag_repro.rs"]
 mod unidb_tx_snapshot_lag_repro;
 
+#[path = "unidb_two_handles_repro.rs"]
+mod unidb_two_handles_repro;
+
 #[path = "unidb_wal_no_manifest_repro.rs"]
 mod unidb_wal_no_manifest_repro;
 

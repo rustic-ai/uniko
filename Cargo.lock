@@ -10706,6 +10706,7 @@ version = "0.5.1"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures",
  "hex",
  "object_store 0.13.2",
  "proptest",
@@ -10718,6 +10719,7 @@ dependencies = [
  "tracing",
  "uni-db",
  "uni-xervo",
+ "url",
  "uuid",
 ]
 

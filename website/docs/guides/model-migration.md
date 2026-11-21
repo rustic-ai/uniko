@@ -40,8 +40,8 @@ What inspecting does and doesn't touch:
   differences. It isn't touched at all: nothing is created there.
 - A remote URI (any path containing `://`) is refused with an `Unsupported` error. Inspecting and
   migrating need a local store directory.
-- A store that is open, or being inspected or migrated, in this process is refused with a
-  `Config` error. Ask the open instance instead: `memory.store_info()` reports its own store.
+- A store that is open, or being inspected or migrated, in this process or another, is refused
+  with a `Config` error. Ask the open instance instead: `memory.store_info()` reports its own store.
   `store_info().hybrid_backfill_pending` counts the rows a hybrid backfill still has to fill.
 - Stores whose model is served by a `remote/*` provider or `llamacpp` can be inspected and
   migrated too. To open a hybrid store for inspection, uni-db needs an `embed/hybrid` alias in the
@@ -161,16 +161,40 @@ log after a migration.
 The report's `completed` is true when the store needs nothing further for this config.
 `rows_backfilled` counts the rows filled and `rows_unfilled` the rows passed over.
 
-A store in use is guarded in both directions within this process. Opening a store takes a shared
-claim on its path, and inspecting or migrating takes the path exclusively, checked and claimed
-under one lock:
+A store directory takes one claim at a time: one open handle, or one inspection or migration.
+uni-db takes no lock on a store, and two handles on one directory are two writers that don't see
+each other's writes, so uniko enforces this itself:
 
-- inspecting or migrating is refused, with a `Config` error, while the store is open, inspected
-  or migrated in this process;
-- opening is refused, with a `Config` error, while the store is being inspected or migrated.
+- within the process, a registry of claimed paths refuses a second open, and refuses inspecting
+  or migrating an open store, with a `Config` error. Share one instance instead: its clones (and
+  every `Agent` and `Session` from it) use the same store;
+- across processes, the claim holds an OS lock on a `.uniko.lock` file in the store directory, so
+  another process opening, inspecting or migrating the store is refused with a `Config` error.
+  The lock is released when the handle closes, or when its process exits. Inspecting a directory
+  that isn't a store yet takes no lock and creates no file there.
 
-A handle in another process can't be detected, since uni-db takes no lock on the store, so make
-sure no other process has it open.
+A store in an object store (`s3://`, `gs://`, any URI with `://` other than `file://`) has no
+directory to lock, so it holds a lease instead: a `.uniko.lease` object under the store's prefix.
+
+- Opening writes it with a create-only put. A live lease refuses the open with a `Config` error
+  naming its holder. An expired one, whose holder crashed, is taken over with a put conditional on
+  its ETag, so of two openers racing for it only one wins.
+- The holder renews it every 10 seconds for a 30-second lease, each renewal conditional on the
+  version it last wrote. If another process has taken it over, the renewal finds out, and the
+  store refuses every write from then on with a `Config` error: shut that instance down.
+- Shutting down deletes the lease, so the next open needn't wait for it to expire.
+- The bucket is reached as uni-db reaches it, with the same credentials.
+
+What a lease can't do is stop a holder that stalls past its 30 seconds (a paused VM, a long pause)
+and then completes a write it had already started: only uni-db can refuse that, by checking the
+lease on its own commits. Clocks are compared across hosts, so the lease length is also the
+margin for clock skew. A `file://` URI is a local directory and takes the file lock.
+
+The lease is tested against the [AWS Emulator](https://github.com/aws/aws-emulator), a local S3
+that honors conditional writes, including six openers racing for one expired lease. It hasn't been
+tested against AWS S3 or GCS themselves.
+
+On a network file system that doesn't support file locks, the cross-process check may not hold.
 
 `progress` is called after each phase and backfill batch. Each event carries:
 

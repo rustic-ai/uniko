@@ -88,6 +88,8 @@ impl KnowledgeBase {
                 })
                 .await?;
 
+            self.ensure_writable()?;
+
             let tx = session.tx().await?;
             // Detect a prior migration (for the report counter only).
             let existing_edge = tx
@@ -288,6 +290,8 @@ impl KnowledgeBase {
             let total_invc: i64 = members.iter().map(|m| m.invc).sum();
             let already_canonical = members.len() == 1 && members[0].current_eid == canonical_eid;
 
+            self.ensure_writable()?;
+
             let tx = session.tx().await?;
             // Repoint the known Entity edge types from each duplicate onto the
             // survivor, then delete the duplicate.
@@ -346,6 +350,7 @@ impl KnowledgeBase {
 
         // Topic ids are derived from member entity_ids — drop Topics so they
         // re-derive on the next detection pass.
+        self.ensure_writable()?;
         let tx = session.tx().await?;
         tx.query_with("MATCH (t:Topic) DETACH DELETE t")
             .fetch_all()
@@ -363,6 +368,7 @@ impl KnowledgeBase {
     /// Returns [`UnikoError::Storage`] on database failure.
     pub async fn backfill_chunk_modality_text(&self) -> Result<usize> {
         let session = self.db.session();
+        self.ensure_writable()?;
         let tx = session.tx().await?;
         let result = tx
             .query_with(
@@ -424,6 +430,7 @@ impl KnowledgeBase {
             return Ok(0);
         }
         let session = self.db.session();
+        self.ensure_writable()?;
         let tx = session.tx().await?;
         for (nid, text) in updates {
             tx.query_with("MATCH (c:Chunk) WHERE id(c) = $nid SET c.search_text = $t")
