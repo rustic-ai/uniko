@@ -316,8 +316,9 @@ retries pending, retriable letters once their backoff has elapsed:
 
 The schedule is stored on the letters, so it carries across restarts. `flush` waits for a retry
 the task has already started, but not for one that isn't due yet. The task stops when the
-instance shuts down or is dropped. Retry claims are tracked within one process, so don't run two
-processes that both retry against one store.
+instance shuts down or is dropped. A store directory opens in one handle at a time, in one
+process (see [Changing the Embedding Model](model-migration.md)), so only one instance ever retries
+a store's dead letters.
 
 Binary payloads are stored as JSON, about three to four times their size, until they're resolved.
 

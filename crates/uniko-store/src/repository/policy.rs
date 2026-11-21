@@ -226,6 +226,7 @@ impl KnowledgeBase {
             return Ok(false);
         }
         let session = self.db.session();
+        self.ensure_writable()?;
         let tx = session.tx().await?;
         tx.query_with(&cypher)
             .param("a", member_id)
