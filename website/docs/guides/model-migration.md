@@ -108,7 +108,9 @@ uniko.Uniko.migrate_store_sync(
   - it adds whichever of the `sparse_embedding` and `colbert_embedding` columns are missing, and
     their indexes;
   - then it re-embeds existing chunks and observations so the new columns are filled. The
-    embedding model loads for this.
+    embedding model loads for this. Every auto-embedded column is rewritten in that pass, the
+    existing dense `embedding` included, which the hybrid model then produces: the backfill costs
+    a full re-embed, not one sized to the new columns.
 
   The backfill walks the Chunk and Observation rows once each, in node-id order, a batch per
   transaction. A row whose new columns still come back empty, such as a text the model returns no
@@ -120,6 +122,10 @@ uniko.Uniko.migrate_store_sync(
   The backfill is resumable: a rerun picks up only the rows whose hybrid columns are still empty.
   While it's unfinished the store already opens with the hybrid config, and
   `store_info().hybrid_backfill_pending` says how many rows are left.
+
+  There's no way back. Once the schema step has added the columns, the original dense-only
+  config is refused, because a hybrid store opened dense-only is incompatible. A cut-off
+  `enable_hybrid` is finished by rerunning it, never undone.
 - **`rebuild_vector_indexes`** rebuilds the vector indexes for a new algorithm, metric,
   `query_prefix` or `batch_size`. No stored vector is rewritten and no model loads.
 
@@ -133,6 +139,24 @@ the migration kind that set a marker clears it. For example, a `rebuild_vector_i
 leaves an unfinished `enable_hybrid` marker in place. `MigrationReport.migration_in_progress`
 names a migration still marked unfinished after the run, which is why `completed` can be false
 after a run that did its own part: rerun that migration to finish it.
+
+A normal open checks the marker too, and the marker records which step a run was in. A run cut off
+in its schema step, which includes building indexes, refuses the next open with `IncompatibleStore`,
+its difference `migration_in_progress`, and `migrations` naming the migration to rerun: uni-db may
+hold the new index definitions with indexes only partly built, which would quietly miss results.
+This applies to `rebuild_vector_indexes` and to `enable_hybrid`, whose schema step adds and builds
+indexes too. An `enable_hybrid` cut off in its backfill opens, with a warning in the log: the data is
+correct, the rows it didn't reach just take no part in sparse or ColBERT recall, and
+`store_info().hybrid_backfill_pending` counts them.
+
+Recover by rerunning the same migration with the same config, with the store closed. It sees its own
+marker and picks up where it stopped. Resuming a cut-off schema step rebuilds every vector-indexed
+label outright, because uni-db saves a new index definition before building it and skips the build
+when the definition already matches. That rebuild covers every index on those labels, so it costs a
+full re-index. `enable_hybrid` covers a cut-off `rebuild_vector_indexes` too, so when both are
+needed `migrations` lists `enable_hybrid` alone. uni-db logs a failed index build as a warning
+rather than an error, so a run can report `completed` over an index whose build failed: check the
+log after a migration.
 
 The report's `completed` is true when the store needs nothing further for this config.
 `rows_backfilled` counts the rows filled and `rows_unfilled` the rows passed over.

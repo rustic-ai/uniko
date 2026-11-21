@@ -34,6 +34,9 @@ pub struct ChunkRow {
     pub address: Option<String>,
     /// Lexical score, for a search hit; 0 otherwise.
     pub score: f64,
+    /// Where in the media a chunk derived from an image, audio or video
+    /// came from; `None` for any other chunk.
+    pub position: Option<super::media::MediaPosition>,
     /// Owning node's label: `Artifact`, `Message`, `Session` or `Block`.
     pub owner_label: String,
     /// Owner's external id (for a Block: its Artifact's id).
@@ -83,6 +86,17 @@ fn i(row: &uni_db::Row, k: &str) -> Option<i64> {
     row.get::<i64>(k).ok()
 }
 
+/// The media position of a chunk row with `modality`, `model` and `meta`
+/// columns.
+fn position_of(row: &uni_db::Row) -> Option<super::media::MediaPosition> {
+    let meta = row.value("meta").cloned().map(serde_json::Value::from);
+    super::media::MediaPosition::from_chunk(
+        s(row, "modality").as_deref(),
+        s(row, "model"),
+        meta.as_ref(),
+    )
+}
+
 fn ids_value(ids: &[NodeId]) -> Value {
     Value::List(ids.iter().map(|n| Value::Int(*n)).collect())
 }
@@ -104,6 +118,8 @@ impl KnowledgeBase {
                 "MATCH (c:Chunk) WHERE c.search_text IS NOT NULL \
                  RETURN id(c) AS nid, c.chunk_id AS cid, c.index AS idx, c.text AS text, \
                         c.start AS s, c.end AS e, c.context AS ctx, c.address AS addr, \
+                        c.modality AS modality, c.source_model_version AS model, \
+                        c.metadata AS meta, \
                         similar_to(c.search_text, $lex) AS score \
                  ORDER BY score DESC LIMIT $lim",
             )
@@ -124,6 +140,7 @@ impl KnowledgeBase {
                     end: i(r, "e").unwrap_or(0),
                     context: s(r, "ctx"),
                     address: s(r, "addr"),
+                    position: position_of(r),
                     score: r.get::<f64>("score").unwrap_or(0.0),
                     ..ChunkRow::default()
                 })

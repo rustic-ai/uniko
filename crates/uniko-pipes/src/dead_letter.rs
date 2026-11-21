@@ -432,9 +432,20 @@ impl DeadLetterQueue {
         // scheduler's `due` never need it, and `begin_retry` reads it back.
         let (filter_clause, params) = match filter.status {
             None => (String::new(), HashMap::new()),
-            Some(DeadLetterStatus::Legacy) => {
-                ("WHERE d.status IS NULL".to_string(), HashMap::new())
-            }
+            // Every status `parse` reads as legacy, so `list` and `counts`
+            // agree: missing, or any value this version doesn't know.
+            Some(DeadLetterStatus::Legacy) => (
+                "WHERE d.status IS NULL OR NOT d.status IN $known".to_string(),
+                HashMap::from([(
+                    "known".to_string(),
+                    Value::List(
+                        ["pending", "retrying", "exhausted", "resolved"]
+                            .iter()
+                            .map(|s| Value::String((*s).to_string()))
+                            .collect(),
+                    ),
+                )]),
+            ),
             Some(status) => (
                 "WHERE d.status = $status".to_string(),
                 HashMap::from([(

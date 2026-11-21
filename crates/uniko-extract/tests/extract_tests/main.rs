@@ -12,6 +12,7 @@ mod ingest_pdf_e2e;
 #[cfg(feature = "pdf-ocr")]
 mod ingest_pdf_tiered_test;
 mod ingest_tests;
+mod media_document_tests;
 mod ner_tests;
 mod observation_extraction_test;
 mod observation_rules_parity_test;

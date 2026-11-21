@@ -898,9 +898,7 @@ mod tests {
     #[tokio::test]
     async fn a_cpu_fallback_fails_an_accelerated_requirement() {
         if gpu_compiled() {
-            // On a host with a usable GPU the accelerator really attaches.
-            eprintln!("skipping: a GPU build may really have the accelerator");
-            return;
+            return an_accelerated_requirement_matches_the_attached_providers().await;
         }
         let with_eps = |eps: &[&str]| {
             let mut config = UnikoConfig::default();
@@ -938,6 +936,100 @@ mod tests {
                 ReadinessCode::NotAccelerated
             )]
         );
+    }
+
+    /// NLP and OCR models report the execution providers their sessions
+    /// attached, like the embedder (uni-xervo#65). Loads both models, so it
+    /// runs only with `EXPENSIVE_TESTS=1`.
+    #[tokio::test]
+    async fn nlp_and_ocr_models_report_their_execution_providers() {
+        if !matches!(
+            std::env::var("EXPENSIVE_TESTS").as_deref(),
+            Ok("1" | "true" | "yes")
+        ) {
+            eprintln!("skipping: set EXPENSIVE_TESTS=1 to load the NLP and OCR models");
+            return;
+        }
+        let mut config = UnikoConfig::default();
+        config.ocr.enabled = true;
+        let memory = Uniko::builder()
+            .raw_config(config)
+            .prefetch(PrefetchPolicy::Lazy)
+            .require([
+                Requirement::Alias(uniko_store::schema::NLP_ALIAS.to_string()),
+                Requirement::Alias(uniko_store::schema::OCR_ALIAS.to_string()),
+            ])
+            .build()
+            .await
+            .expect("both models load");
+        let models = memory.capabilities().await.models.unwrap_or_default();
+        for alias in [
+            uniko_store::schema::NLP_ALIAS,
+            uniko_store::schema::OCR_ALIAS,
+        ] {
+            let m = models
+                .iter()
+                .find(|m| m.alias == alias)
+                .unwrap_or_else(|| panic!("{alias} is in the catalog"));
+            let eps = m
+                .active_execution_providers
+                .as_ref()
+                .unwrap_or_else(|| panic!("{alias} reports its providers: {m:?}"));
+            assert!(!eps.is_empty(), "{alias}: {m:?}");
+        }
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// On a GPU build an accelerated requirement passes exactly when the
+    /// accelerator attached: on a host whose GPU works, the build succeeds
+    /// and the model reports that provider; on one where the session falls
+    /// back to CPU it fails as `not_accelerated`. Either way the requirement
+    /// agrees with what the session really runs on. A model that fails to
+    /// load at all (no model cache, or a broken provider) skips the test.
+    async fn an_accelerated_requirement_matches_the_attached_providers() {
+        let metal = uniko_store::COMPILED_FEATURES
+            .iter()
+            .any(|(name, on)| *name == "gpu-metal" && *on);
+        let ep = if metal { "coreml" } else { "cuda" };
+        let mut config = UnikoConfig::default();
+        config.embedding.execution_providers = Some(vec![ep.to_string(), "cpu".to_string()]);
+        let built = Uniko::builder()
+            .raw_config(config)
+            .prefetch(PrefetchPolicy::Lazy)
+            .require([Requirement::accelerated(uniko_store::schema::EMBED_ALIAS)])
+            .build()
+            .await;
+        match built {
+            Ok(memory) => {
+                let models = memory.capabilities().await.models.unwrap_or_default();
+                let embed = models
+                    .iter()
+                    .find(|m| m.alias == uniko_store::schema::EMBED_ALIAS)
+                    .expect("the embedder is in the catalog");
+                assert!(
+                    embed
+                        .active_execution_providers
+                        .as_ref()
+                        .is_some_and(|eps| eps.iter().any(|e| e == ep)),
+                    "the requirement passed, so {ep} must be attached: {embed:?}"
+                );
+                memory.shutdown().await.expect("shutdown");
+            }
+            Err(e) => {
+                let failures = not_ready(Err(e));
+                if embedder_unavailable(&failures) {
+                    return;
+                }
+                assert_eq!(
+                    codes(&failures),
+                    vec![(
+                        "accelerated:embed/default".into(),
+                        ReadinessCode::NotAccelerated
+                    )],
+                    "with no usable {ep}, the requirement fails as not_accelerated"
+                );
+            }
+        }
     }
 
     /// A model still loading when the timeout runs out is `timed_out`, the

@@ -30,6 +30,12 @@ use crate::schema::constants::labels;
 /// labels carrying the hybrid columns.
 const PROBE_LABEL: &str = labels::CHUNK;
 
+/// The marker `phase` written once a migration's schema step (and any index
+/// rebuild) is done, so only its backfill is left.
+pub(crate) const MARKER_BACKFILL: &str = "backfill";
+/// The marker `phase` written before a migration's schema step.
+pub(crate) const MARKER_SCHEMA: &str = "schema";
+
 /// An in-place change [`KnowledgeBase::migrate`](crate::KnowledgeBase::migrate)
 /// can make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -164,6 +170,10 @@ impl Compatibility {
                 out.push(m);
             }
         }
+        // A migration another one listed covers is redundant: `enable_hybrid`
+        // applies index changes too, so it alone is what to run.
+        let all = out.clone();
+        out.retain(|m| !all.iter().any(|n| n != m && n.covers(*m)));
         out
     }
 
@@ -233,6 +243,12 @@ pub struct StoreInfo {
     pub hybrid_backfill_pending: Option<u64>,
     /// A migration that started and has not finished.
     pub migration_in_progress: Option<Migration>,
+    /// Whether that migration was cut off in its schema step (index builds
+    /// included), as opposed to its backfill. A marker with no phase, from
+    /// a run that set it before the phase was recorded, counts as the schema
+    /// step: the index state is unknown.
+    #[serde(skip)]
+    pub(crate) migration_in_schema: bool,
 }
 
 /// Read what the store behind `db` was built with, without applying a
@@ -300,6 +316,8 @@ pub(crate) async fn inspect_db(db: &Uni, with_counts: bool) -> crate::Result<Sto
                 && let Some(Value::String(kind)) = m.get("kind")
             {
                 info.migration_in_progress = kind.parse().ok();
+                info.migration_in_schema = info.migration_in_progress.is_some()
+                    && !matches!(m.get("phase"), Some(Value::String(p)) if p == MARKER_BACKFILL);
             }
         }
     }
@@ -385,6 +403,22 @@ pub fn check(stored: &StoreInfo, config: &UnikoConfig) -> Compatibility {
         });
     };
     let show = |v: Option<usize>| v.map_or_else(|| "none".to_string(), |n| n.to_string());
+
+    // A migration cut off in its schema step may have left uni-db with the
+    // new index definitions but indexes not fully built, which would quietly
+    // miss results; rerunning it rebuilds them outright. One cut off in its
+    // backfill is left out: the store is correct, some rows just lack the
+    // new vectors, and `hybrid_backfill_pending` says how many.
+    if let Some(m) = stored.migration_in_progress
+        && stored.migration_in_schema
+    {
+        push(
+            "migration_in_progress",
+            m.to_string(),
+            "finished".to_string(),
+            Verdict::NeedsMigration(m),
+        );
+    }
 
     let mut same_vectors = true;
     if let Some(d) = s.dimensions

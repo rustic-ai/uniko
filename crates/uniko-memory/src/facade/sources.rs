@@ -108,6 +108,9 @@ pub struct SearchHit {
     pub chunk_index: usize,
     /// Its address in the source, for a structure-aware chunk.
     pub address: Option<String>,
+    /// For a chunk derived from an image, audio or video: where in the
+    /// media it came from. `None` for any other chunk.
+    pub position: Option<uniko_store::repository::media::MediaPosition>,
     /// Byte span in the source.
     pub start: usize,
     /// Byte span end.
@@ -299,6 +302,7 @@ impl<'a> Sources<'a> {
                 chunk_id: r.chunk_id,
                 chunk_index: usize::try_from(r.index).unwrap_or(0),
                 address: r.address,
+                position: r.position,
                 start: usize::try_from(r.start).unwrap_or(0),
                 end: usize::try_from(r.end).unwrap_or(0),
                 text: r.text,

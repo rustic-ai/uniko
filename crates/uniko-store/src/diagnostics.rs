@@ -52,6 +52,8 @@ pub enum Stage {
     ArtifactEmbedding,
     /// A modality extractor's post-commit step.
     ExtractorPostCommit,
+    /// Deriving text from an image, audio or video with catalog models.
+    MediaExtraction,
 }
 
 /// What happened to a stage.
@@ -120,6 +122,8 @@ pub enum DiagnosticCode {
     PoolFailed,
     /// The extractor's post-commit step failed.
     PostCommitFailed,
+    /// A video had no audio track to transcribe.
+    NoAudioTrack,
 }
 
 impl DiagnosticCode {
@@ -145,6 +149,7 @@ impl DiagnosticCode {
             Self::ExtractionFailed => "extraction_failed",
             Self::PoolFailed => "pool_failed",
             Self::PostCommitFailed => "post_commit_failed",
+            Self::NoAudioTrack => "no_audio_track",
         }
     }
 }

@@ -215,6 +215,9 @@ pub struct PyRecallItem {
     /// Where the chunk sits in its source (`/data/items[3-9]`, `rows 10-19`).
     #[pyo3(get)]
     address: Option<String>,
+    /// For a chunk derived from media: where in it the chunk came from.
+    #[pyo3(get)]
+    position: Option<Py<crate::media::PyMediaPosition>>,
 }
 
 impl PyRecallItem {
@@ -239,6 +242,7 @@ impl PyRecallItem {
                 token_count: item.token_count,
                 context: item.context.clone(),
                 address: item.address.clone(),
+                position: crate::media::PyMediaPosition::from_opt(py, item.position.as_ref())?,
             },
         )
     }

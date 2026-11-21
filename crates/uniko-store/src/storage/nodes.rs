@@ -318,7 +318,8 @@ impl KnowledgeBase {
     /// - **Present with any other kind:** that kind is kept.
     ///
     /// An existing row also gets each `if_absent` property it has no value
-    /// for, and every `always` property (such as `last_seen`). Memberships
+    /// for (a `name` equal to the id counts as none: it is ingest's
+    /// placeholder), and every `always` property (such as `last_seen`). Memberships
     /// and other edges are never touched. The check and the write run under
     /// the same lock as [`merge_node`](Self::merge_node), so concurrent
     /// callers create one row and exactly one of them sees
@@ -326,7 +327,8 @@ impl KnowledgeBase {
     ///
     /// # Errors
     ///
-    /// Returns [`UnikoError::Storage`] on database failure.
+    /// Returns [`UnikoError::Config`] for an empty or blank id, or
+    /// [`UnikoError::Storage`] on database failure.
     pub async fn ensure_participant(
         &self,
         participant_id: &str,
@@ -339,6 +341,11 @@ impl KnowledgeBase {
         const ID: &str = "participant_id";
         const UNKNOWN: &str = "unknown";
 
+        if participant_id.trim().is_empty() {
+            return Err(crate::error::UnikoError::Config(
+                "participant_id must not be empty".into(),
+            ));
+        }
         let lock_key = node_lock_key(PARTICIPANT, ID, participant_id);
         let _rmw_guard = self.rmw_locks.lock(&lock_key).await;
 
@@ -348,7 +355,12 @@ impl KnowledgeBase {
         {
             let mut update = always.clone();
             for (k, v) in if_absent {
-                if matches!(props.get(k), None | Some(Value::Null)) {
+                // Ingest names a participant it meets after its id, as a
+                // placeholder; a real name given later (`register`) replaces
+                // that placeholder rather than being dropped.
+                let placeholder = k == "name"
+                    && matches!(props.get(k), Some(Value::String(n)) if n == participant_id);
+                if placeholder || matches!(props.get(k), None | Some(Value::Null)) {
                     update.entry(k.clone()).or_insert_with(|| v.clone());
                 }
             }

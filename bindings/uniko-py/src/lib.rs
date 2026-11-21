@@ -170,6 +170,8 @@ fn _uniko(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<media::PyVideoFrame>()?;
     m.add_class::<media::PyVideoParts>()?;
     m.add_class::<media::PyMediaSourceView>()?;
+    m.add_class::<media::PyMediaPosition>()?;
+    m.add_class::<media::PySegmentPosition>()?;
     m.add_class::<agent::PyAgent>()?;
     m.add_class::<session::PySession>()?;
     m.add_class::<session::PyTurn>()?;

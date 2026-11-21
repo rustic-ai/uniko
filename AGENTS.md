@@ -40,6 +40,11 @@ cargo nextest run -E 'test(recall_cascade)'   # filter by name
 cargo nextest run -p uniko-store --test integration store_tests::   # one suite
 ```
 
+Tests that load large models (BGE-M3, the NLP and OCR models) return early
+unless `EXPENSIVE_TESTS=1`. CI runs them, Rust and Python, nightly on `main`
+and on demand (`.github/workflows/expensive.yml`); locally, set it with
+`UNI_CACHE_DIR=$PWD/.uni_cache` so every test shares one model cache.
+
 ### One integration-test binary per crate
 
 Every test binary links the whole stack (uni-db, Lance, DataFusion, ONNX
@@ -179,7 +184,7 @@ Plus `uniko-bench` (`publish = false`) and `bindings/uniko-py`.
 
 ### 3. uni-db is a SEPARATE project — never edit it
 
-uni-db is consumed from crates.io (`uni-db = "5.2"`). A local checkout may exist
+uni-db is consumed from crates.io (`uni-db = "5.3"`). A local checkout may exist
 at `../uni/` or `../uni-db/` for reference only — **never edit it directly**, and
 never leave a `[patch.crates-io]` pointing at it in a commit. When you hit a
 uni-db bug: build a *minimal isolated repro* (see

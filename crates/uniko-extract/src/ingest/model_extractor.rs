@@ -213,7 +213,7 @@ impl ModelExtractor {
 
     /// Read text in the image with the OCR alias `alias`. Recognized lines
     /// are grouped into `ocr_region` chunks; each line's box and confidence
-    /// are kept in the chunk's `metadata.regions` (a box only when the alias
+    /// are kept in the chunk's `metadata.segments` (a box only when the alias
     /// has a text detector).
     #[must_use]
     pub fn ocr(mut self, alias: impl Into<String>) -> Self {
@@ -252,7 +252,7 @@ impl ModelExtractor {
 
     /// Extract the image as a document page with the document-extraction
     /// alias `alias`. Blocks are grouped into `page_block` chunks in reading
-    /// order, each block's box kept in `metadata.regions`.
+    /// order, each block's box kept in `metadata.segments`.
     #[must_use]
     pub fn document(mut self, alias: impl Into<String>) -> Self {
         self.document = Some(alias.into());
@@ -466,6 +466,9 @@ impl ModelExtractor {
                     .map_err(|e| {
                         UnikoError::Internal(format!("composer did not complete: {e}"))
                     })??;
+                if let Some(d) = self.check_video_parts(&parts)? {
+                    uniko_store::diagnostics::record(d);
+                }
                 if self.has_image_mode() && !parts.frames.is_empty() {
                     let mut frames: Vec<VideoFrame> = parts.frames;
                     frames.sort_by_key(|f| f.timestamp_ms);
@@ -493,6 +496,36 @@ impl ModelExtractor {
             _ => {}
         }
         Ok(out)
+    }
+
+    /// Check what a composer returned against the configured modes.
+    ///
+    /// Frames with no image mode to read them are a mismatch between the
+    /// composer and the extractor, so they are refused rather than
+    /// dropped. A video with no audio track while `transcribe` is set is an
+    /// input, not a mistake: the transcript is reported as skipped.
+    fn check_video_parts(
+        &self,
+        parts: &VideoParts,
+    ) -> Result<Option<uniko_store::Diagnostic>, UnikoError> {
+        if !parts.frames.is_empty() && !self.has_image_mode() {
+            return Err(UnikoError::Unsupported(format!(
+                "video extractor: the composer returned {} frame(s), but no image mode \
+                 (ocr, caption, document) is set to read them",
+                parts.frames.len()
+            )));
+        }
+        Ok(match &self.transcribe {
+            Some(t) if parts.audio.is_none() => Some(
+                uniko_store::Diagnostic::new(
+                    uniko_store::Stage::MediaExtraction,
+                    uniko_store::StageStatus::Skipped,
+                    uniko_store::DiagnosticCode::NoAudioTrack,
+                )
+                .target(t.alias.clone()),
+            ),
+            _ => None,
+        })
     }
 
     /// Run every image mode over `images`, each tagged with the time range
@@ -941,6 +974,36 @@ mod tests {
         assert_eq!(segs[0].bbox, None, "the placeholder box locates nothing");
         assert_eq!(segs[1].bbox, Some([4.0, 5.0, 60.0, 20.0]));
         assert_eq!(segs[1].confidence, Some(0.9));
+    }
+
+    #[test]
+    fn a_video_with_no_audio_is_reported_and_unread_frames_are_refused() {
+        let frames = || vec![VideoFrame::new(0, vec![1], "image/png")];
+        let audio_only = ModelExtractor::video(|_| Ok(VideoParts::default())).transcribe("asr/x");
+        let d = audio_only
+            .check_video_parts(&VideoParts::new(Vec::new(), None))
+            .unwrap()
+            .expect("a skipped transcript is reported");
+        assert_eq!(d.code, Some(uniko_store::DiagnosticCode::NoAudioTrack));
+        assert_eq!(d.target.as_deref(), Some("asr/x"));
+        assert!(
+            audio_only
+                .check_video_parts(&VideoParts::new(Vec::new(), Some(vec![0])))
+                .unwrap()
+                .is_none()
+        );
+        match audio_only.check_video_parts(&VideoParts::new(frames(), Some(vec![0]))) {
+            Err(UnikoError::Unsupported(m)) => assert!(m.contains("no image mode"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        let captions = ModelExtractor::video(|_| Ok(VideoParts::default())).caption("v");
+        assert!(
+            captions
+                .check_video_parts(&VideoParts::new(frames(), None))
+                .unwrap()
+                .is_none(),
+            "no transcribe mode, no audio expected"
+        );
     }
 
     #[test]

@@ -77,10 +77,10 @@ impl PyToolCall {
 
     /// The participant that performed the call, when it isn't the default:
     /// the turn's sender inside a ``Turn``, or the session's agent for
-    /// ``Session.observe_tool``. The turn keeps its own sender. The performer
-    /// is created as kind ``agent`` if it doesn't exist yet, and is part of
-    /// the call's replay key: the same call id with a different performer
-    /// raises ``IdConflictError``.
+    /// ``Session.observe_tool``. The turn keeps its own sender. A performer
+    /// that doesn't exist yet is created as kind ``unknown``; naming one never
+    /// changes its kind (``register`` makes an agent). The same call id with a
+    /// different performer, named or by default, raises ``IdConflictError``.
     fn performer<'py>(slf: PyRef<'py, Self>, participant_id: String) -> PyRef<'py, Self> {
         slf.map(|c| c.performer(participant_id));
         slf

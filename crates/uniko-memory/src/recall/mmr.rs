@@ -129,6 +129,7 @@ mod tests {
             token_count: 0,
             context: None,
             address: None,
+            position: None,
         }
     }
 

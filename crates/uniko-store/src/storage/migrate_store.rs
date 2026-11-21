@@ -314,7 +314,15 @@ async fn migrate_db(
     let sparse = config.embedding.sparse_dimensions.is_some();
     let colbert = config.embedding.multivector_dimensions.is_some();
     let backfill = migration == Migration::EnableHybrid && (sparse || colbert);
-    let mine = info.migration_in_progress == Some(migration);
+    // This run takes over a marker it covers: its own kind cut off earlier,
+    // or a cut-off index rebuild that `enable_hybrid` also performs.
+    let mine = info
+        .migration_in_progress
+        .is_some_and(|m| migration.covers(m));
+    // Resuming a run cut off in its schema step: uni-db saved the new index
+    // definitions before building them, so applying the schema again builds
+    // nothing, and the indexes have to be rebuilt outright.
+    let resumes_schema = mine && info.migration_in_schema;
     if verdict.is_compatible()
         && !mine
         && (!backfill || info.hybrid_backfill_pending.unwrap_or(0) == 0)
@@ -341,13 +349,18 @@ async fn migrate_db(
         .get(crate::schema::constants::labels::KNOWLEDGE_BASE_STATS)
         .is_some_and(|p| p.contains_key("migration"));
     if marks && has_marker_column {
-        set_marker(db, Some(migration)).await?;
+        set_marker(db, Some((migration, compatibility::MARKER_SCHEMA))).await?;
     }
     // uni-db adds the new columns and indexes, and rebuilds every vector
     // index whose config changed, before `apply` returns.
     apply_schema_unchecked(db, config).await?;
-    if marks && !has_marker_column {
-        set_marker(db, Some(migration)).await?;
+    if resumes_schema {
+        rebuild_vector_indexes(db, progress, migration).await?;
+    }
+    // The schema step and its index builds are done: what's left, if
+    // anything, is the backfill, which leaves the store correct if cut off.
+    if marks {
+        set_marker(db, Some((migration, compatibility::MARKER_BACKFILL))).await?;
     }
 
     let mut out = Backfill::default();
@@ -373,6 +386,41 @@ async fn migrate_db(
         set_marker(db, None).await?;
     }
     Ok(out)
+}
+
+/// Rebuild, synchronously, every label that has a vector index.
+async fn rebuild_vector_indexes(
+    db: &Uni,
+    progress: &mut (dyn FnMut(&MigrationProgress) + Send),
+    migration: Migration,
+) -> Result<()> {
+    let mut labels: Vec<String> = db
+        .schema()
+        .current()
+        .indexes
+        .iter()
+        .filter_map(|i| match i {
+            uni_db::common::core::schema::IndexDefinition::Vector(v) => Some(v.label.clone()),
+            _ => None,
+        })
+        .collect();
+    labels.sort();
+    labels.dedup();
+    let total = labels.len() as u64;
+    for (done, label) in labels.into_iter().enumerate() {
+        progress(&MigrationProgress {
+            migration,
+            phase: "rebuild".into(),
+            label: Some(label.clone()),
+            done: done as u64,
+            total,
+        });
+        db.indexes()
+            .rebuild(&label, false)
+            .await
+            .map_err(|e| crate::UnikoError::Storage(format!("rebuild indexes on {label}: {e}")))?;
+    }
+    Ok(())
 }
 
 /// Re-embed the `label` rows whose hybrid columns aren't filled, a batch
@@ -461,11 +509,12 @@ async fn count(db: &Uni, cypher: &str) -> Result<u64> {
         .map_or(0, |n| u64::try_from(n).unwrap_or(0)))
 }
 
-async fn set_marker(db: &Uni, migration: Option<Migration>) -> Result<()> {
+async fn set_marker(db: &Uni, migration: Option<(Migration, &str)>) -> Result<()> {
     let value = match migration {
-        Some(m) => Value::Map(
+        Some((m, phase)) => Value::Map(
             [
                 ("kind".to_string(), Value::String(m.as_str().to_string())),
+                ("phase".to_string(), Value::String(phase.to_string())),
                 ("started_at".to_string(), datetime_value(Utc::now())),
             ]
             .into_iter()

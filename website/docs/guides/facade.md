@@ -269,8 +269,8 @@ dl.resolve(&second, Some("source was corrupt")).await?;  // give up on another, 
 | `legacy` | Written by an earlier uniko that didn't keep payloads: can be resolved, not retried. |
 
 **Which failures can be retried.**
-- **Permanent:** an id conflict, an unsupported or invalid payload, and configuration, schema or
-  Locy errors fail the same way every time. They're stored `exhausted` with `retriable = false`,
+- **Permanent:** an id conflict, an unsupported or invalid payload, an incompatible store, and
+  configuration, schema or Locy errors fail the same way every time. They're stored `exhausted` with `retriable = false`,
   and `retry` refuses them unless `force` is set.
 - **Retriable:** every other kind, for example model, timeout, storage, search or internal
   failures.
@@ -339,6 +339,7 @@ reports nothing. The free function `ingest_source` collects nothing; use `Sessio
 | `pdf_extraction` | `failed` / `tiered_failed` or `extraction_failed`, with the artifact id as `target`: it is stored without (or with fewer) chunks. The id is the one the source was given (`IngestSource` `with_id`) or a generated one, so it is not a secret only if yours is not. |
 | `artifact_embedding` | `failed` / `pool_failed`: the artifact's own vector is left for the backfill migration. |
 | `extractor_post_commit` | `failed` / `post_commit_failed`, with the artifact id as `target`: a registered extractor's post-commit step failed. |
+| `media_extraction` | `skipped` / `no_audio_track`, with the transcription alias as `target`: a video extractor's composer returned no audio track while `transcribe` is set. |
 
 Whether models loaded at startup is reported by [`capabilities()`](#9-check-what-is-available),
 not per call. To refuse to run without a stage at all, [require it at

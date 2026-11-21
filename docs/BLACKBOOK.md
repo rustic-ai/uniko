@@ -442,18 +442,18 @@ let out = ctx.llm_breaker.call(|| async { provider.complete(prompt).await }).awa
   - **failed or aborted:** `retry_failed`;
   - **cancelled by shutdown:** the claim is released, uncounted, since the payload never fully ran.
 
-**Retriable or permanent.** `is_retriable` (`dead_letter.rs:239`) marks `IdConflict`, `Unsupported`, `Pipeline`, `Config`, `Schema` and `Locy` as permanent; every other kind is retriable. `store` (`:365`) writes:
+**Retriable or permanent.** `is_retriable` (`dead_letter.rs:239`) marks `IdConflict`, `Unsupported`, `Pipeline`, `Config`, `Schema`, `Locy` and `IncompatibleStore` as permanent; every other kind is retriable. `store` (`:367`) writes:
 - `pending`, with `next_retry_at = now + backoff`, only when the failure is retriable, the payload serialized, and `max_retries > 0`;
 - `exhausted` otherwise.
 
 **The lifecycle.**
-- `begin_retry` (`:524`) refuses a letter that is resolved, retrying, legacy, past `max_retries` or permanent; `force` overrides the last two. Otherwise it increments `retry_count`, sets `retrying`, records the id as in flight, and returns the task.
-- `release_claim` (`:581`) undoes a claim without counting it: a full queue, or a cancelled retry.
-- `retry_failed` (`:620`) returns the letter to `pending` with the doubled backoff, or `exhausted` once out of retries or permanent.
-- `resolve` (`:686`) refuses only a retry in flight in this process. It also clears the payload, as `mark_resolved` (`:756`) does for a successful retry.
-- `reset_interrupted` (`:737`) returns letters other processes left `retrying` to `pending`, uncounted. A pipeline spawns it at start (`Retrier::reset_interrupted_once`, `crates/uniko-memory/src/pipeline/retry.rs:115`), and a failed attempt runs again later.
+- `begin_retry` (`:537`) refuses a letter that is resolved, retrying, legacy, past `max_retries` or permanent; `force` overrides the last two. Otherwise it increments `retry_count`, sets `retrying`, records the id as in flight, and returns the task.
+- `release_claim` (`:594`) undoes a claim without counting it: a full queue, or a cancelled retry.
+- `retry_failed` (`:633`) returns the letter to `pending` with the doubled backoff, or `exhausted` once out of retries or permanent.
+- `resolve` (`:699`) refuses only a retry in flight in this process. It also clears the payload, as `mark_resolved` (`:769`) does for a successful retry.
+- `reset_interrupted` (`:750`) returns letters other processes left `retrying` to `pending`, uncounted. A pipeline spawns it at start (`Retrier::reset_interrupted_once`, `crates/uniko-memory/src/pipeline/retry.rs:115`), and a failed attempt runs again later.
 
-The in-flight set and every transition sit behind one mutex per queue, which holds within one process only. `list` (`:428`) and `due` (`:712`) read every field except `payload`.
+The in-flight set and every transition sit behind one mutex per queue, which holds within one process only. `list` (`:430`) and `due` (`:725`) read every field except `payload`.
 
 **The background scheduler** is opt-in: `dead_letter_auto_retry`, `Retrier::spawn_scheduler` (`retry.rs:140`). It:
 - polls every base backoff, clamped to 1–60 s;
@@ -661,13 +661,9 @@ Because who-said-what is structural, uniko can answer cross-session provenance q
 - it upgrades `unknown` to a known kind, and never downgrades one;
 - on an existing row it fills only properties that are absent.
 
-It is called with kind `unknown` by ingest's sender setup (`crates/uniko-extract/src/ingest/session.rs:59`, which also updates `last_seen`). It is called with kind `agent` by:
-- `ensure_agent_participant` (`crates/uniko-memory/src/agent/ops.rs:95`), behind `Agent::register` (`:177`) and goal/task creation (`facade/goals.rs:438`);
-- explicit tool-call performers (`crates/uniko-extract/src/ingest/tool.rs:331`).
+It refuses an empty or blank id, and treats a stored `name` equal to the id (ingest's placeholder) as absent. It is called with kind `unknown` by ingest's sender setup (`crates/uniko-extract/src/ingest/session.rs:59`, which also updates `last_seen`), by explicit tool-call performers (`ensure_performers` in `crates/uniko-extract/src/ingest/tool.rs`), and by `add_membership`'s `ensure_group_node` for a Participant. It is called with kind `agent` only by `ensure_agent_participant` (`crates/uniko-memory/src/agent/ops.rs:95`), behind `Agent::register` (`:177`), goal/task creation (`facade/goals.rs:438`), and the session agent of `observe_tool` and `Session::record_action`.
 
-`add_membership`'s `ensure_group_node` is create-only and also uses kind `unknown`.
-
-**Tool-call performer.** An embedded call is `PERFORMED_BY` its turn's sender, and an `observe_tool` call by the session's agent, unless the call names a `performer`. Named performers are ensured outside the unit transaction, alongside the senders (`ingest/unit.rs:222`). A performer other than the default is folded into the call's `payload_hash` (`crates/uniko-memory/src/facade/tool.rs:341`), so the same `action_id` under another performer is an `IdConflict`. The derived `action_id` doesn't include the performer.
+**Tool-call performer.** An embedded call is `PERFORMED_BY` its turn's sender, and an `observe_tool` call by the session's agent, unless the call names a `performer`. Named performers are ensured outside the unit transaction, alongside the senders (`ingest/unit.rs:222`). The call's `payload_hash` covers its result only. On a repeated `action_id`, the stored `PERFORMED_BY` participant is compared with the performer the call resolves to, the named one or the context's default (`write_tool_calls_in_tx`, and the whole-unit replay check in `ingest/unit.rs`), so the same `action_id` under another performer is an `IdConflict` in any context. The derived `action_id` doesn't include the performer.
 
 Ensuring the Session and sender exist is a cold-path, first-sight-only operation guarded by `lock_session_setup` (a striped RMW lock) to avoid duplicate `Session`/`Participant`/`PARTICIPATED_IN` and SSI antidependency aborts under concurrent ingest. On the warm path (both ids cached in the in-memory `SessionContext`), it does no DB work.
 
@@ -943,9 +939,9 @@ Gotcha: unknown/arbitrary binary maps to `Modality::Text` (preserving legacy beh
 **Media extractors (issue #61).** Two extractors ship for `Image`/`Audio`/`Video`, both a `TextExtractor` (`ingest/text_extractor.rs`):
 
 - **A host function**: `TextExtractor::new` (returns `String`), `structured` (returns an `Extraction`), or `with_output` (either). The Python `UnikoBuilder.extractor` takes a callable returning a `str`, an `Extraction`, or a list of `Extraction`s (one per model).
-- **Catalog models**: `ModelExtractor` (`ingest/model_extractor.rs`) runs uni-xervo's `ocr`, `generate` with an attached image (captions), `document_extract` and `transcribe` tasks, chosen by alias. Captions need a provider that forwards images: `IMAGE_CAPABLE_PROVIDERS` (`model_extractor.rs:58`) is `remote/openai`, `remote/azure-openai` and `remote/llamacpp`, while Gemini, Vertex, Anthropic, Cohere and Mistral drop images. Transcription has no usable provider yet. uni-xervo's only transcriber is `local/whisper-cpp`, and uni-db's `build_model_runtime` doesn't register it, so `validate` refuses it (`WHISPER_CPP_PROVIDER`, `:55`). Audio is checked to be 16 kHz 16-bit PCM WAV (`check_wav`, `:764`). Model-call failures are `UnikoError::Llm`. There is no video task, so video takes a host composer that returns frames and a WAV track. `ModelExtractor::validate` (`:328`) runs in `UnikoBuilder::build` (`facade/uniko.rs:758`) before the store opens. `Requirement::Extractor` loads the extractor's aliases (`readiness.rs:234`).
+- **Catalog models**: `ModelExtractor` (`ingest/model_extractor.rs`) runs uni-xervo's `ocr`, `generate` with an attached image (captions), `document_extract` and `transcribe` tasks, chosen by alias. Captions need a provider that forwards images: `IMAGE_CAPABLE_PROVIDERS` (`model_extractor.rs:58`) is `remote/openai`, `remote/azure-openai` and `remote/llamacpp`, while Gemini, Vertex, Anthropic, Cohere and Mistral drop images. Transcription has no usable provider yet. uni-xervo's only transcriber is `local/whisper-cpp`, and uni-db's `build_model_runtime` doesn't register it, so `validate` refuses it (`WHISPER_CPP_PROVIDER`, `:55`). Audio is checked to be 16 kHz 16-bit PCM WAV (`check_wav`, `:797`). Model-call failures are `UnikoError::Llm`. There is no video task, so video takes a host composer that returns frames and a WAV track. `ModelExtractor::validate` (`:328`) runs in `UnikoBuilder::build` (`facade/uniko.rs:758`) before the store opens. `Requirement::Extractor` loads the extractor's aliases (`readiness.rs:234`).
 
-`Extraction::chunks` (`ingest/derivation.rs:321`) groups consecutive segments of one derivation, kind and page up to `max_chunk_tokens`. The newline joiners count toward the budget. It writes `chunk_type`, `metadata.{page_number, time_start_ms, time_end_ms, bbox, regions, confidence, speaker}` (`regions` keeps each located segment's box and byte range in a grouped chunk), and `modality` / `source_model_version`; `create_chunks_in_tx` copies the last two into their own columns (`message.rs:452`).
+`Extraction::chunks` (`ingest/derivation.rs:322`) groups consecutive segments of one derivation, kind, page and speaker up to `max_chunk_tokens`. The newline joiners count toward the budget. It writes `chunk_type`, `metadata.{page_number, time_start_ms, time_end_ms, bbox, confidence, speaker, segments}` (`segments` keeps each grouped segment's byte range, time, page, box, confidence and speaker), and `modality` / `source_model_version`; `create_chunks_in_tx` copies the last two into their own columns (`message.rs:452`). Recall and search decode them into `MediaPosition` (`repository/media.rs`) on `RecallItem.position` and `SearchHit.position`.
 
 `MediaRetention` (`None` by default, `Identity`, `Bytes`) records the original as a `kind = "media"` artifact keyed by SHA-256 (`repository/media.rs:161`), with `HAS_CONTENT` only under `Bytes`. The text artifact points to it with `DERIVED_FROM {derivation_kind, derived_at}` (`:240`). The media hash joins the unit's `content_ids` lock set. With retention, the derived artifact is identified by its media: an auto id is `<modality>-<media sha256>`, a replay of the same media under the same id keeps the first text, and the auto-id content-hash dedup in `ingest_artifact_in_tx` skips artifacts derived from media, so equal captions on different images, or a plain document reading the same, never share one artifact. `PreparedSource::Modality` carries the `IngestContext`, so modality artifacts attach to their session and message like any other. `Data::artifact_access` treats a media source as readable only when every artifact derived from it is wholly readable (`facade/data.rs:237`), and `media_sources` checks each source that way. Deleting the last derived artifact deletes the source and its unshared content (`orphaned_media_ids`, `storage/deletion.rs:561`), from `delete_artifact`, the session cascade and the turn cascade (which also removes media-derived artifacts attached to nothing but that turn and its own session).
 
@@ -1259,9 +1255,9 @@ pub struct KnowledgeBase {
 | `open_with_xervo[_no_prefetch]` / `open_with_prefetch(.., PrefetchPolicy)` | Persistent + explicit catalog |
 | `SharedRuntime::build(cfg, specs, policy)` + `in_memory_shared` / `open_shared` | Share ONE model runtime (one ONNX session / VRAM arena) across many KBs |
 
-`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and `model_status()` reads each alias's load state from the runtime's own snapshot (`ModelRuntime::aliases`), so every store over it sees one load history, whichever path loaded a model. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`. (It was also once the only open path that let a BGE-M3 hybrid KB reopen, uni-db #130. That is fixed upstream: `crates/uniko-store/tests/unidb_hybrid_reopen_repro.rs` asserts both paths reopen one, and `store_compatibility::a_hybrid_store_reopens` checks it at the `KnowledgeBase` level.) (`open_shared` and `over_shared`, `crates/uniko-store/src/storage/mod.rs:425` and `:444`).
+`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and `model_status()` reads each alias's load state from the runtime's own snapshot (`ModelRuntime::aliases`), so every store over it sees one load history, whichever path loaded a model. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`. (It was also once the only open path that let a BGE-M3 hybrid KB reopen, uni-db #130. That is fixed upstream: `crates/uniko-store/tests/unidb_hybrid_reopen_repro.rs` asserts both paths reopen one, and `store_compatibility::a_hybrid_store_reopens` checks it at the `KnowledgeBase` level.) (`open_shared` and `over_shared`, `crates/uniko-store/src/storage/mod.rs:423` and `:442`).
 
-Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`apply_perf_knobs_from_env`, `mod.rs:29-52`, applied at `:364`, `:435` and `:507`, and by `migrate_store.rs:283` for inspect and migrate).
+Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`apply_perf_knobs_from_env`, `mod.rs:29-52`, applied at `:362`, `:433` and `:504`, and by `migrate_store.rs:283` for inspect and migrate).
 
 ### 5.3 Concurrency: SSI + striped locks + retry
 
@@ -1570,30 +1566,31 @@ access control filters the bundle afterwards. Recording sites:
 
 | Stage | Site |
 |---|---|
-| `query_embedding` | `recall/intent.rs:227`, `:232` |
-| `query_analysis` | `recall/intent.rs:533`, `:552` (`onnx` only) |
-| `provenance` | `recall/mod.rs:839` (`attach_provenance`), `:958` (`populate_sources`) |
-| `rerank` / `colbert` skipped | `recall/mod.rs:1555` (no candidates); `not_reached` at `:2207`, called on each early return (`:1362`, `:1410`, `:1511`, `:1521`) |
-| `rerank` | `recall/mod.rs:1572`, `:1595` |
-| `colbert` | `recall/mod.rs:1730`, `:1735`, `:1754`, `:1789`, `:1812` (`colbert_rerank`; `:1812` is `fallback` / `unscored`) |
-| `source` | `recall/mod.rs:2224` (`source_failed`, called from each candidate source's error arm); `crates/uniko-store/src/repository/recall.rs:863` (seeds), `:900` (drift), `:1169`, `:1205`, `:1294` (Phase 3 chunk and entity sub-queries) |
-| `sparse` | `recall/mod.rs:2258`, `:2267` (`run_sparse_source`) |
+| `query_embedding` | `recall/intent.rs:227`, `:234` |
+| `query_analysis` | `recall/intent.rs:534`, `:552` (`onnx` only) |
+| `provenance` | `recall/mod.rs:845` (`attach_provenance`), `:965` (`populate_sources`) |
+| `rerank` / `colbert` skipped | `recall/mod.rs:1587` (no candidates); `not_reached` at `:2303`, called on each early return (`:1390`, `:1438`, `:1539`, `:1549`) |
+| `rerank` | `recall/mod.rs:1602`, `:1625` |
+| `colbert` | `recall/mod.rs:1753`, `:1781`, `:1818`, `:1835`, `:1841` (`colbert_rerank`; `:1841` is `fallback` / `unscored`) |
+| `source` | `recall/mod.rs:2320` (`source_failed`, called from each candidate source's error arm); `crates/uniko-store/src/repository/recall.rs:896` (seeds), `:933` (drift), `:1202`, `:1238`, `:1327` (Phase 3 chunk and entity sub-queries) |
+| `sparse` | `recall/mod.rs:2355`, `:2363` (`run_sparse_source`) |
 
 Ingest stages are recorded in `uniko-extract` (and `record_action` in `uniko-memory`) and collected
 by the facade's `Session::commit_unit` (and so `observe`), `Session::ingest`, `Session::observe_tool`
 and `record_action`; a replayed unit or deduplicated source drops them. The streaming worker
-collects each item (`crates/uniko-memory/src/pipeline/ingest_worker.rs:196`) and, for items that
+collects each item (`crates/uniko-memory/src/pipeline/ingest_worker.rs:164`) and, for items that
 succeed, counts degraded ones in `HealthTracker::record_degradations`
 (`crates/uniko-pipes/src/health.rs:127`).
 
 | Stage | Site |
 |---|---|
-| `nlp` | `uniko-extract/src/ingest/atomic.rs:75` (`nlp_diagnostic`, one count per message), called at `:451`, `:462`, `:468`, `:476`; `uniko-memory/src/action.rs:246`, `:263` (`record_action`, target `action_entities`) |
-| `observation_model` | `uniko-extract/src/observations/mod.rs:407` (`onnx` only) |
-| `observation_rules` | `uniko-extract/src/observations/mod.rs:68` (failed loads are cached and retried after 60 s) |
-| `pdf_extraction` | `uniko-extract/src/ingest/pdf/mod.rs:214`, `:241` (failed); `:187` (`fallback` / `not_compiled`: `ocr.enabled` in a build without `pdf-ocr`) |
-| `artifact_embedding` | `uniko-extract/src/ingest/artifact.rs:518` |
-| `extractor_post_commit` | `uniko-extract/src/ingest/source.rs:198` |
+| `nlp` | `uniko-extract/src/ingest/atomic.rs:75` (`nlp_diagnostic`, one count per message), called at `:451`, `:462`, `:468`, `:476`; `uniko-memory/src/action.rs:248`, `:264` (`record_action`, target `action_entities`) |
+| `observation_model` | `uniko-extract/src/observations/mod.rs:408` (`onnx` only) |
+| `observation_rules` | `uniko-extract/src/observations/mod.rs:69` (failed loads are cached and retried after 60 s) |
+| `pdf_extraction` | `uniko-extract/src/ingest/pdf/mod.rs:216`, `:243` (failed); `:189` (`fallback` / `not_compiled`: `ocr.enabled` in a build without `pdf-ocr`) |
+| `artifact_embedding` | `uniko-extract/src/ingest/artifact.rs:524` |
+| `extractor_post_commit` | `uniko-extract/src/ingest/source.rs:230` |
+| `media_extraction` | `uniko-extract/src/ingest/model_extractor.rs:470` (`check_video_parts`) |
 
 ### 5.15 Invariants cheat-sheet
 

@@ -358,6 +358,7 @@ mod tests {
                     token_count: 0,
                     context: None,
                     address: None,
+                    position: None,
                 },
                 RecallItem {
                     node_id: 2,
@@ -371,6 +372,7 @@ mod tests {
                     token_count: 0,
                     context: None,
                     address: None,
+                    position: None,
                 },
             ],
             total_tokens: 0,

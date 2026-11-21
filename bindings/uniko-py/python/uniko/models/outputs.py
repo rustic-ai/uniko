@@ -60,6 +60,39 @@ class RecallSource(BaseModel):
         return cls.model_validate(native)
 
 
+class SegmentPosition(BaseModel):
+    """One segment of a chunk derived from media (native ``SegmentPosition``):
+    its byte range in the chunk text and its own position."""
+
+    model_config = _OUT
+
+    start: int
+    end: int
+    page: Optional[int] = None
+    time_start_ms: Optional[int] = None
+    time_end_ms: Optional[int] = None
+    bbox: Optional[tuple[float, float, float, float]] = None
+    confidence: Optional[float] = None
+    speaker: Optional[str] = None
+
+
+class MediaPosition(BaseModel):
+    """Where in an image, recording or video a chunk came from (native
+    ``MediaPosition``)."""
+
+    model_config = _OUT
+
+    modality: str
+    source_model_version: Optional[str] = None
+    page: Optional[int] = None
+    time_start_ms: Optional[int] = None
+    time_end_ms: Optional[int] = None
+    bbox: Optional[tuple[float, float, float, float]] = None
+    confidence: Optional[float] = None
+    speaker: Optional[str] = None
+    segments: list[SegmentPosition] = Field(default_factory=list)
+
+
 class RecallItem(BaseModel):
     """A recalled node with score and lineage (native ``RecallItem``)."""
 
@@ -76,6 +109,7 @@ class RecallItem(BaseModel):
     token_count: int = 0
     context: Optional[str] = None
     address: Optional[str] = None
+    position: Optional[MediaPosition] = None
 
     @classmethod
     def from_native(cls, native: Any) -> "RecallItem":
@@ -187,6 +221,7 @@ class SearchHit(BaseModel):
     chunk_id: str
     chunk_index: int
     address: Optional[str] = None
+    position: Optional[MediaPosition] = None
     start: int
     end: int
     text: str
@@ -969,6 +1004,8 @@ __all__ = [
     "MessageView",
     "ArtifactView",
     "MediaSourceView",
+    "MediaPosition",
+    "SegmentPosition",
     "GoalView",
     "TaskView",
     "GoalContext",

@@ -76,7 +76,7 @@ pub struct PreparedToolCall {
     pub visibility: Option<String>,
     /// The participant that performed the call, when it is not the batch's
     /// default (the turn's sender, or the recording session's agent). It is
-    /// created as kind `agent` if it doesn't exist yet.
+    /// created as kind `unknown` if it doesn't exist yet.
     pub performer_id: Option<String>,
 }
 
@@ -148,13 +148,14 @@ pub fn payload_hash(bytes: &[u8]) -> String {
 /// Each call becomes an Action linked `PERFORMED_BY` the performer,
 /// `IN_SESSION`, `TRIGGERED_BY` its message and `NEXT_ACTION` from the one
 /// before it; its payload is applied as an artifact linked `PRODUCED`. A
-/// call whose `action_id` already exists is a replay when its payload hash
-/// matches and nothing is written; otherwise the call is refused.
+/// call whose `action_id` already exists is a replay, with nothing written,
+/// when its payload hash matches and its stored `PERFORMED_BY` participant
+/// is the performer this call resolves to; otherwise the call is refused.
 ///
 /// # Errors
 ///
 /// - [`UnikoError::IdConflict`] when an `action_id` exists with a
-///   different result.
+///   different result or performer (including a performer since deleted).
 /// - any underlying read or write error.
 pub async fn write_tool_calls_in_tx(
     kb: &KnowledgeBase,
@@ -167,7 +168,17 @@ pub async fn write_tool_calls_in_tx(
     let mut out = Vec::with_capacity(calls.len());
     let mut prev_in_batch: Option<NodeId> = None;
     for call in calls {
-        // Replay or conflict, decided before any write.
+        let performer_nid = match &call.performer_id {
+            Some(id) => *performers.get(id).ok_or_else(|| {
+                UnikoError::Internal(format!(
+                    "tool call '{}': performer '{id}' was not resolved before the write",
+                    call.action_id
+                ))
+            })?,
+            None => ctx.performer_nid,
+        };
+        // Replay or conflict, decided before any write: the same id is a
+        // replay only with the same result and the same performer.
         if let Some((nid, props)) = kb
             .get_node_by_ext_id_in_tx(tx, labels::ACTION, "action_id", &call.action_id)
             .await?
@@ -176,7 +187,8 @@ pub async fn write_tool_calls_in_tx(
                 Some(Value::String(h)) => Some(h.as_str()),
                 _ => None,
             };
-            if stored != call.payload_hash.as_deref() {
+            let performed_by = kb.action_performer_in_tx(tx, nid).await?;
+            if stored != call.payload_hash.as_deref() || performed_by != Some(performer_nid) {
                 return Err(UnikoError::id_conflict(
                     labels::ACTION,
                     "action_id",
@@ -193,15 +205,6 @@ pub async fn write_tool_calls_in_tx(
             continue;
         }
 
-        let performer_nid = match &call.performer_id {
-            Some(id) => *performers.get(id).ok_or_else(|| {
-                UnikoError::Internal(format!(
-                    "tool call '{}': performer '{id}' was not resolved before the write",
-                    call.action_id
-                ))
-            })?,
-            None => ctx.performer_nid,
-        };
         let action_node = kb
             .create_node_in_tx(tx, labels::ACTION, &action_props(call))
             .await?;
@@ -317,9 +320,10 @@ fn action_props(call: &PreparedToolCall) -> HashMap<String, Value> {
     props
 }
 
-/// Make sure every explicit performer among `calls` has a Participant
-/// (created as kind `agent`, otherwise left as it is) and return their node
-/// ids by participant id.
+/// Make sure every explicit performer among `calls` has a Participant and
+/// return their node ids by participant id. A missing one is created as
+/// kind `unknown`; an existing one keeps its kind. Naming a performer never
+/// reclassifies anyone: only `register` makes an agent.
 ///
 /// Runs outside any transaction, before the write takes its locks, the
 /// same way a turn's sender is set up: a participant with no actions yet is
@@ -338,7 +342,7 @@ pub async fn ensure_performers(
             continue;
         }
         let (nid, _) = kb
-            .ensure_participant(id, "agent", &HashMap::new(), &HashMap::new())
+            .ensure_participant(id, "unknown", &HashMap::new(), &HashMap::new())
             .await?;
         out.insert(id.to_string(), nid);
     }

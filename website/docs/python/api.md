@@ -288,7 +288,8 @@ uniko.Extraction(
 `model_extractor` uses catalog models instead, by alias:
 
 - `ocr`: an OCR alias, such as `ocr/default` with `{"ocr": {"enabled": True}}`. Lines are grouped
-  into chunks, with each line's box in `metadata.regions`;
+  into chunks, with each line's box in the hit's `position.segments` (or `position.bbox` for a chunk
+  of one line);
 - `caption`: a generation alias on `remote/openai`, `remote/azure-openai` or `remote/llamacpp`,
   sent the image with `caption_prompt` and up to `max_caption_tokens` (512);
 - `document`: a document-extraction alias;
@@ -732,7 +733,7 @@ One call of one tool. Reusable, like `Turn`.
 | Setter | Signature | Default / Notes |
 | --- | --- | --- |
 | `.call_id` | `.call_id(call_id: str)` | Derived from the session, turn, tool, arguments and result if unset. |
-| `.performer` | `.performer(participant_id: str)` | The turn's sender, or the session's agent for `observe_tool`. The turn keeps its sender; the performer is created as kind `agent` if needed. The same call id under a different performer raises `IdConflictError`. |
+| `.performer` | `.performer(participant_id: str)` | The turn's sender, or the session's agent for `observe_tool`. The turn keeps its sender; a missing performer is created as kind `unknown` and an existing one keeps its kind (`register` makes an agent). The same call id under a different performer, named or by default, raises `IdConflictError`. |
 | `.arguments` | `.arguments(arguments: Any)` | Any JSON-shaped value. |
 | `.json_output` / `.text_output` / `.bytes_output` | `.json_output(value)`, `.text_output(text)`, `.bytes_output(data, mime)` | The result, stored verbatim. |
 | `.status` / `.error` | `.status(status: str)`, `.error(error: str)` | — |
@@ -818,6 +819,7 @@ One ranked piece of context.
 | `token_count` | `int` — tokens in `content`, as the budget counts them |
 | `context` | `str \| None` — for a tool-output chunk, the header of what it inherits |
 | `address` | `str \| None` — where the chunk sits in its source |
+| `position` | `MediaPosition \| None` — for a chunk derived from an image, audio or video: modality, model, page, time range, box, confidence, speaker, and `segments` (each grouped segment's byte range and position). `SearchHit.position` is the same. |
 
 ### `ContextBundle`
 
@@ -838,7 +840,7 @@ One stage outcome of a recall or an ingest. No query or content text is included
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `stage` | `str` | Recall: `query_embedding`, `query_analysis`, `sparse`, `colbert`, `rerank`, `source`, `provenance`. Ingest: `nlp`, `observation_model`, `observation_rules`, `pdf_extraction`, `artifact_embedding`, `extractor_post_commit`. |
+| `stage` | `str` | Recall: `query_embedding`, `query_analysis`, `sparse`, `colbert`, `rerank`, `source`, `provenance`. Ingest: `nlp`, `observation_model`, `observation_rules`, `pdf_extraction`, `artifact_embedding`, `extractor_post_commit`, `media_extraction`. |
 | `status` | `str` | `applied`, `skipped`, `fallback` or `failed`. |
 | `code` | `str \| None` | Why, when not `applied`, e.g. `embed_failed`, `rerank_failed`, `query_failed`, `not_reached`, `nlp_unavailable`. |
 | `target` | `str \| None` | The node label, model alias or source the stage ran on. |

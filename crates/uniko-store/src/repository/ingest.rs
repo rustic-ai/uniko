@@ -392,3 +392,49 @@ impl KnowledgeBase {
             .collect())
     }
 }
+
+impl KnowledgeBase {
+    /// The node id of the participant an Action is `PERFORMED_BY`, read
+    /// **inside** `tx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on query
+    /// failure.
+    pub async fn action_performer_in_tx(
+        &self,
+        tx: &uni_db::Transaction,
+        action: NodeId,
+    ) -> Result<Option<NodeId>> {
+        let rows = tx
+            .query_with(
+                "MATCH (a:Action)-[:PERFORMED_BY]->(p:Participant) WHERE id(a) = $a \
+                 RETURN id(p) AS pid LIMIT 1",
+            )
+            .param("a", Value::Int(action))
+            .fetch_all()
+            .await?;
+        Ok(rows.rows().first().and_then(|r| r.get::<i64>("pid").ok()))
+    }
+
+    /// [`action_performer_in_tx`](Self::action_performer_in_tx), as a
+    /// committed read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Storage`](crate::UnikoError::Storage) on query
+    /// failure.
+    pub async fn action_performer(&self, action: NodeId) -> Result<Option<NodeId>> {
+        let rows = self
+            .db
+            .session()
+            .query_with(
+                "MATCH (a:Action)-[:PERFORMED_BY]->(p:Participant) WHERE id(a) = $a \
+                 RETURN id(p) AS pid LIMIT 1",
+            )
+            .param("a", Value::Int(action))
+            .fetch_all()
+            .await?;
+        Ok(rows.rows().first().and_then(|r| r.get::<i64>("pid").ok()))
+    }
+}

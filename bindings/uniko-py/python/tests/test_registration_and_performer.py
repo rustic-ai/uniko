@@ -137,5 +137,7 @@ def test_typed_spec_carries_the_performer() -> None:
     agent = typed.agent("reporter")
     reg = agent.register_sync()
     assert isinstance(reg, Registration)
-    assert (reg.participant_id, reg.outcome) == ("reporter", "existing")
+    # Naming a performer creates it as `unknown`; registering makes it an
+    # agent.
+    assert (reg.participant_id, reg.outcome) == ("reporter", "upgraded")
     assert agent.query_sync(PERFORMER) == [{"who": "reporter"}]

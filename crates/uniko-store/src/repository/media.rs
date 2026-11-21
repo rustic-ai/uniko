@@ -408,3 +408,149 @@ impl KnowledgeBase {
         Ok(out)
     }
 }
+
+/// One segment inside a chunk derived from media: its byte range in the
+/// chunk's text and whichever position fields it carries.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct SegmentPosition {
+    /// Byte offset of the segment's text in the chunk text.
+    pub start: usize,
+    /// End byte offset (exclusive).
+    pub end: usize,
+    /// 1-based page number.
+    pub page: Option<u32>,
+    /// Start, in milliseconds from the start of the media.
+    pub time_start_ms: Option<u64>,
+    /// End, in milliseconds.
+    pub time_end_ms: Option<u64>,
+    /// Region as `[x0, y0, x1, y1]` in image coordinates.
+    pub bbox: Option<[f32; 4]>,
+    /// The model's confidence, from 0 to 1.
+    pub confidence: Option<f32>,
+    /// Speaker label.
+    pub speaker: Option<String>,
+}
+
+/// Where a chunk derived from media sits in it: what a recall or search hit
+/// reports so the caller can find the spot in the original.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct MediaPosition {
+    /// `image`, `audio` or `video`.
+    pub modality: String,
+    /// The model that derived the text, as `alias@model_id`.
+    pub source_model_version: Option<String>,
+    /// 1-based page number.
+    pub page: Option<u32>,
+    /// The time range the chunk covers, in milliseconds.
+    pub time_start_ms: Option<u64>,
+    /// End of that range.
+    pub time_end_ms: Option<u64>,
+    /// Region of a chunk of one located segment.
+    pub bbox: Option<[f32; 4]>,
+    /// The lowest confidence among the chunk's segments.
+    pub confidence: Option<f32>,
+    /// The speaker, when the chunk has one.
+    pub speaker: Option<String>,
+    /// For a chunk of several segments: each one's own position.
+    pub segments: Vec<SegmentPosition>,
+}
+
+const MEDIA_MODALITIES: &[&str] = &["image", "audio", "video"];
+
+impl MediaPosition {
+    /// The position of a chunk with these `modality` and
+    /// `source_model_version` columns and this `metadata` JSON, or `None`
+    /// for a chunk not derived from media.
+    #[must_use]
+    pub fn from_chunk(
+        modality: Option<&str>,
+        source_model_version: Option<String>,
+        metadata: Option<&serde_json::Value>,
+    ) -> Option<Self> {
+        let modality = modality.filter(|m| MEDIA_MODALITIES.contains(m))?;
+        let meta = metadata.and_then(serde_json::Value::as_object);
+        let get = |k: &str| meta.and_then(|m| m.get(k));
+        let u64_of = |k: &str| get(k).and_then(serde_json::Value::as_u64);
+        Some(Self {
+            modality: modality.to_string(),
+            source_model_version,
+            page: u64_of("page_number").and_then(|p| u32::try_from(p).ok()),
+            time_start_ms: u64_of("time_start_ms"),
+            time_end_ms: u64_of("time_end_ms"),
+            bbox: get("bbox").and_then(bbox_of),
+            confidence: get("confidence")
+                .and_then(serde_json::Value::as_f64)
+                .map(|c| c as f32),
+            speaker: get("speaker")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            segments: get("segments")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| items.iter().filter_map(segment_of).collect())
+                .unwrap_or_default(),
+        })
+    }
+}
+
+fn bbox_of(v: &serde_json::Value) -> Option<[f32; 4]> {
+    let a = v.as_array()?;
+    if a.len() != 4 {
+        return None;
+    }
+    let mut out = [0.0_f32; 4];
+    for (slot, x) in out.iter_mut().zip(a) {
+        *slot = x.as_f64()? as f32;
+    }
+    Some(out)
+}
+
+fn segment_of(v: &serde_json::Value) -> Option<SegmentPosition> {
+    let o = v.as_object()?;
+    let u = |k: &str| o.get(k).and_then(serde_json::Value::as_u64);
+    Some(SegmentPosition {
+        start: usize::try_from(u("start")?).ok()?,
+        end: usize::try_from(u("end")?).ok()?,
+        page: u("page_number").and_then(|p| u32::try_from(p).ok()),
+        time_start_ms: u("time_start_ms"),
+        time_end_ms: u("time_end_ms"),
+        bbox: o.get("bbox").and_then(bbox_of),
+        confidence: o
+            .get("confidence")
+            .and_then(serde_json::Value::as_f64)
+            .map(|c| c as f32),
+        speaker: o
+            .get("speaker")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_media_chunk_decodes_its_position_and_segments() {
+        let meta = json!({
+            "modality": "audio", "time_start_ms": 0, "time_end_ms": 4100,
+            "confidence": 0.81, "speaker": "alice",
+            "segments": [
+                {"start": 0, "end": 11, "time_start_ms": 0, "time_end_ms": 2400},
+                {"start": 12, "end": 30, "time_start_ms": 2400, "time_end_ms": 4100,
+                 "bbox": [1.0, 2.0, 3.0, 4.0]}
+            ]
+        });
+        let p = MediaPosition::from_chunk(Some("audio"), Some("asr@w".into()), Some(&meta))
+            .expect("a media chunk");
+        assert_eq!(p.time_end_ms, Some(4100));
+        assert_eq!(p.speaker.as_deref(), Some("alice"));
+        assert_eq!(p.segments.len(), 2);
+        assert_eq!(p.segments[1].bbox, Some([1.0, 2.0, 3.0, 4.0]));
+        assert_eq!((p.segments[1].start, p.segments[1].end), (12, 30));
+        assert!(MediaPosition::from_chunk(Some("text"), None, Some(&meta)).is_none());
+        assert!(MediaPosition::from_chunk(None, None, None).is_none());
+    }
+}

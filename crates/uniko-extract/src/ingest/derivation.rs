@@ -301,8 +301,8 @@ impl Extraction {
 
     /// Chunk the extraction for `modality`.
     ///
-    /// Consecutive segments from the same derivation, of the same kind and
-    /// on the same page, are grouped up to `config.max_chunk_tokens`, so a
+    /// Consecutive segments from the same derivation, of the same kind, on
+    /// the same page and from the same speaker, are grouped up to `config.max_chunk_tokens`, so a
     /// transcript is not stored one sentence per chunk. A segment longer
     /// than that is split with the text chunker, each piece keeping the
     /// segment's position. Each chunk carries:
@@ -313,10 +313,11 @@ impl Extraction {
     ///   own `:Chunk` columns;
     /// - `metadata`: `page_number`, `time_start_ms` / `time_end_ms` (the
     ///   range the group covers), `bbox` (only for a single region),
-    ///   `confidence` (the lowest in the group), `speaker` (when every
-    ///   segment shares one), and for a group with located segments,
-    ///   `regions`: each one's `bbox`, `confidence` and `start`/`end` byte
-    ///   range in the chunk text.
+    ///   `confidence` (the lowest in the group), `speaker` (a group never
+    ///   spans two speakers), and for a group of several positioned
+    ///   segments, `segments`: each one's `start`/`end` byte range in the
+    ///   chunk text with its own time, page, `bbox`, `confidence` and
+    ///   `speaker`.
     #[must_use]
     pub fn chunks(&self, modality: Modality, config: &ChunkConfig) -> Vec<ChunkData> {
         let (text, spans) = self.layout();
@@ -338,25 +339,16 @@ impl Extraction {
             let segs: Vec<&Segment> = group.iter().map(|(s, _, _)| *s).collect();
             let piece = &text[start..end];
             let mut c = chunk(piece, start, end, &segs, modality, model, out.len());
-            // A group of located segments keeps each one's region, with its
-            // byte range in the chunk text, so grouping loses no position.
-            if group.len() > 1 && group.iter().any(|(s, _, _)| s.bbox.is_some()) {
-                let regions: Vec<JsonValue> = group
+            // A group keeps each segment's own position (time, speaker,
+            // region, confidence), with its byte range in the chunk text, so
+            // a hit can point at the exact utterance, frame or line.
+            if group.len() > 1 && group.iter().any(|(seg, _, _)| has_position(seg)) {
+                let segments: Vec<JsonValue> = group
                     .iter()
-                    .filter_map(|(seg, s, e)| {
-                        let bbox = seg.bbox?;
-                        let mut r = Map::new();
-                        r.insert("bbox".into(), json!(bbox));
-                        r.insert("start".into(), json!(s - start));
-                        r.insert("end".into(), json!(e - start));
-                        if let Some(c) = seg.confidence {
-                            r.insert("confidence".into(), json!(c));
-                        }
-                        Some(JsonValue::Object(r))
-                    })
+                    .map(|(seg, s, e)| segment_json(seg, s - start, e - start))
                     .collect();
                 if let Some(JsonValue::Object(m)) = c.metadata.as_mut() {
-                    m.insert("regions".into(), JsonValue::Array(regions));
+                    m.insert("segments".into(), JsonValue::Array(segments));
                 }
             }
             out.push(c);
@@ -386,6 +378,9 @@ impl Extraction {
                 group_derivation == d
                     && last.kind == segment.kind
                     && last.page == segment.page
+                    // A new speaker starts a new chunk, so a chunk's speaker
+                    // is exact.
+                    && last.speaker == segment.speaker
                     // +1 for the newline that joins it to the group.
                     && group_tokens + tokens < max
             });
@@ -402,7 +397,43 @@ impl Extraction {
     }
 }
 
-/// Build one chunk over `segments`, which all share a kind and a page.
+/// Whether a segment carries any position worth keeping per segment.
+fn has_position(seg: &Segment) -> bool {
+    seg.start_ms.is_some()
+        || seg.end_ms.is_some()
+        || seg.bbox.is_some()
+        || seg.confidence.is_some()
+        || seg.speaker.is_some()
+}
+
+/// One entry of a chunk's `metadata.segments`.
+fn segment_json(seg: &Segment, start: usize, end: usize) -> JsonValue {
+    let mut r = Map::new();
+    r.insert("start".into(), json!(start));
+    r.insert("end".into(), json!(end));
+    if let Some(p) = seg.page {
+        r.insert("page_number".into(), json!(p));
+    }
+    if let Some(t) = seg.start_ms {
+        r.insert("time_start_ms".into(), json!(t));
+    }
+    if let Some(t) = seg.end_ms {
+        r.insert("time_end_ms".into(), json!(t));
+    }
+    if let Some(b) = seg.bbox {
+        r.insert("bbox".into(), json!(b));
+    }
+    if let Some(c) = seg.confidence {
+        r.insert("confidence".into(), json!(c));
+    }
+    if let Some(sp) = &seg.speaker {
+        r.insert("speaker".into(), JsonValue::String(sp.clone()));
+    }
+    JsonValue::Object(r)
+}
+
+/// Build one chunk over `segments`, which all share a kind, a page and a
+/// speaker.
 fn chunk(
     text: &str,
     start: usize,
@@ -669,7 +700,7 @@ mod tests {
         let c = &chunks[0];
         let m = c.metadata.as_ref().unwrap();
         assert!(m.get("bbox").is_none());
-        let regions = m["regions"].as_array().unwrap();
+        let regions = m["segments"].as_array().unwrap();
         assert_eq!(regions.len(), 2);
         for (r, line) in regions.iter().zip(["PUMP STATION", "replaced on march 12"]) {
             let (s, e) = (
@@ -679,6 +710,65 @@ mod tests {
             assert_eq!(&c.text[s..e], line);
         }
         assert_eq!(regions[1]["bbox"], json!([10.0, 50.0, 300.0, 80.0]));
+    }
+
+    #[test]
+    fn a_transcript_keeps_each_utterance_and_breaks_on_a_new_speaker() {
+        let ex = Extraction::new(
+            vec![
+                Segment::new(SegmentKind::Transcript, "budget moves to thursday")
+                    .with_time(0, 2400)
+                    .with_speaker("alice"),
+                Segment::new(SegmentKind::Transcript, "bring the forecast")
+                    .with_time(2400, 4100)
+                    .with_speaker("alice"),
+                Segment::new(SegmentKind::Transcript, "will do")
+                    .with_time(4100, 5000)
+                    .with_speaker("bob"),
+            ],
+            None,
+        );
+        let chunks = ex.chunks(Modality::Audio, &cfg(512));
+        assert_eq!(chunks.len(), 2, "bob starts a new chunk");
+        let alice = chunks[0].metadata.as_ref().unwrap();
+        assert_eq!(alice["speaker"], "alice");
+        let segs = alice["segments"].as_array().unwrap();
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1]["time_start_ms"], 2400);
+        assert_eq!(segs[1]["time_end_ms"], 4100);
+        let (s, e) = (
+            segs[1]["start"].as_u64().unwrap() as usize,
+            segs[1]["end"].as_u64().unwrap() as usize,
+        );
+        assert_eq!(&chunks[0].text[s..e], "bring the forecast");
+        let bob = chunks[1].metadata.as_ref().unwrap();
+        assert_eq!(bob["speaker"], "bob");
+        assert!(bob.get("segments").is_none(), "one segment needs no list");
+    }
+
+    #[test]
+    fn segment_offsets_are_byte_ranges_on_char_boundaries() {
+        let ex = Extraction::new(
+            vec![
+                Segment::new(SegmentKind::Transcript, "café crème").with_time(0, 900),
+                Segment::new(SegmentKind::Transcript, "東京へ行く").with_time(900, 2000),
+            ],
+            None,
+        );
+        let chunks = ex.chunks(Modality::Audio, &cfg(512));
+        let c = &chunks[0];
+        let segs = c.metadata.as_ref().unwrap()["segments"].as_array().unwrap();
+        let texts: Vec<&str> = segs
+            .iter()
+            .map(|s| {
+                let (a, b) = (
+                    s["start"].as_u64().unwrap() as usize,
+                    s["end"].as_u64().unwrap() as usize,
+                );
+                &c.text[a..b]
+            })
+            .collect();
+        assert_eq!(texts, vec!["café crème", "東京へ行く"]);
     }
 
     #[test]

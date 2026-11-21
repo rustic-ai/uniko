@@ -361,6 +361,10 @@ pub(crate) async fn run_step_chain(
 ///   - released, uncounted, when shutdown cancelled it before it finished,
 ///     since the payload never fully ran.
 ///
+/// Only a failure under the `DeadLetter` error policy counts. A step whose
+/// policy is `Skip` is best effort: its failure creates no letter on a
+/// first run, so a retry whose only failure is such a step is resolved.
+///
 /// A queue write failure is logged, never raised: the item itself has
 /// already been processed.
 pub(crate) async fn record_dead_letter(
