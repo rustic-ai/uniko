@@ -106,6 +106,7 @@ class RecallItem:
     token_count: int
     context: str | None
     address: str | None
+    position: MediaPosition | None
     def __repr__(self) -> str: ...
 
 @final
@@ -376,6 +377,31 @@ class VideoParts:
     def __new__(
         cls, frames: list[VideoFrame], audio: bytes | None = None
     ) -> VideoParts: ...
+    def __repr__(self) -> str: ...
+
+@final
+class SegmentPosition:
+    start: int
+    end: int
+    page: int | None
+    time_start_ms: int | None
+    time_end_ms: int | None
+    bbox: tuple[float, float, float, float] | None
+    confidence: float | None
+    speaker: str | None
+    def __repr__(self) -> str: ...
+
+@final
+class MediaPosition:
+    modality: str
+    source_model_version: str | None
+    page: int | None
+    time_start_ms: int | None
+    time_end_ms: int | None
+    bbox: tuple[float, float, float, float] | None
+    confidence: float | None
+    speaker: str | None
+    segments: list[SegmentPosition]
     def __repr__(self) -> str: ...
 
 @final
@@ -770,6 +796,7 @@ class SearchHit:
     chunk_id: str
     chunk_index: int
     address: str | None
+    position: MediaPosition | None
     start: int
     end: int
     text: str
@@ -1504,6 +1531,8 @@ __all__ = [
     "VideoFrame",
     "VideoParts",
     "MediaSourceView",
+    "MediaPosition",
+    "SegmentPosition",
     "Viewer",
     "MessageView",
     "ArtifactView",

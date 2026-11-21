@@ -55,6 +55,9 @@ pub struct PySearchHit {
     /// Its address in the source, for a structure-aware chunk.
     #[pyo3(get)]
     address: Option<String>,
+    /// For a chunk derived from media: where in it the chunk came from.
+    #[pyo3(get)]
+    position: Option<Py<crate::media::PyMediaPosition>>,
     /// Byte span start in the source.
     #[pyo3(get)]
     start: usize,
@@ -92,6 +95,7 @@ impl PySearchHit {
                 chunk_id: h.chunk_id.clone(),
                 chunk_index: h.chunk_index,
                 address: h.address.clone(),
+                position: crate::media::PyMediaPosition::from_opt(py, h.position.as_ref())?,
                 start: h.start,
                 end: h.end,
                 text: h.text.clone(),

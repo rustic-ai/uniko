@@ -73,11 +73,14 @@ A segment's `kind` is `caption`, `transcript`, `ocr_region`, `page_block` or `te
 `speaker` are all optional.
 
 How segments become chunks (`Extraction::chunks`,
-`crates/uniko-extract/src/ingest/derivation.rs:321`):
+`crates/uniko-extract/src/ingest/derivation.rs:322`):
 
-- Consecutive segments from the same model, of the same kind and on the same page are grouped up
-  to `max_chunk_tokens`, so a transcript isn't stored one sentence per chunk. A segment longer
-  than that is split, each piece keeping the segment's position.
+- Consecutive segments from the same model, of the same kind, on the same page and from the same
+  speaker are grouped up to `max_chunk_tokens`, so a transcript isn't stored one sentence per
+  chunk. A new speaker starts a new chunk, and so does a change between a labelled and an unlabelled
+  segment: a diarizer that labels only a turn's first utterance, or a fast back-and-forth, gives
+  more and smaller chunks. A segment longer than the budget is split, each piece
+  keeping the segment's position.
 - `chunk_type` is the kind's chunk name: `caption`, `transcript_segment`, `ocr_region`,
   `page_block` or `text`.
 - The chunk's `modality` column is `image`, `audio` or `video`. Its `source_model_version` column
@@ -87,11 +90,40 @@ How segments become chunks (`Extraction::chunks`,
   - `page_number`;
   - `time_start_ms`/`time_end_ms`, the range the group covers;
   - `bbox`, for a chunk of one region;
-  - `regions`, for a group of located segments: each one's `bbox`, `confidence` and `start`/`end`
-    byte range in the chunk text, so grouping loses no position;
   - `confidence`, the lowest in the group;
-  - `speaker`, when every segment shares one.
+  - `speaker`, which a group always shares;
+  - `segments`, for a group of several positioned segments: each one's `start`/`end` byte range
+    in the chunk text, with its own time range, page, `bbox`, `confidence` and `speaker`. So a
+    chunk of five utterances or OCR lines still says where each one is.
 - The newline joining two grouped segments counts toward the token budget.
+
+### Where a hit came from
+
+A recall or search hit on a chunk derived from media through a `ModelExtractor` or a structured
+callback carries a `position`: a `MediaPosition` with the modality, model, page, time range, box,
+confidence, speaker and the per-segment list above. It's `None` for every other item, including text
+from a plain-string callback, which has no position to give (`RecallItem.position`,
+`SearchHit.position`). A segment's `start`/`end` are UTF-8 byte offsets into the chunk text.
+
+```rust
+let bundle = agent.recall("when does the budget review move").await?;
+for item in &bundle.items {
+    if let Some(p) = &item.position {
+        // e.g. audio 0..4100 ms, then each utterance in p.segments
+        println!("{} {:?}..{:?} {:?}", p.modality, p.time_start_ms, p.time_end_ms, p.speaker);
+    }
+}
+```
+
+```python
+item = agent.recall_sync("when does the budget review move").items[0]
+if item.position:
+    text = item.content.encode()           # offsets are UTF-8 bytes
+    for seg in item.position.segments:   # each utterance, frame or line
+        print(seg.time_start_ms, seg.speaker, text[seg.start:seg.end].decode())
+```
+
+Pair it with [`media_sources`](#keeping-the-original) to find the original file.
 
 An `Extraction` with no text in any segment fails the ingest with `Unsupported` ("no text was
 found"): there's nothing to index. That includes a video whose frames and audio yield nothing.
@@ -107,9 +139,9 @@ the same image, each with its own provenance. They are grouped separately, and t
 
 | Mode | Task | Providers that serve it | Chunks |
 |---|---|---|---|
-| `ocr(alias)` | `ocr` | `local/onnx` (`ocr/default` when `ocr.enabled`) | `ocr_region` chunks of grouped lines, each line's box and confidence in `metadata.regions` (or `bbox` for a chunk of one line) |
+| `ocr(alias)` | `ocr` | `local/onnx` (`ocr/default` when `ocr.enabled`) | `ocr_region` chunks of grouped lines, each line's box and confidence in `segments` (or `bbox` for a chunk of one line) |
 | `caption(alias)` | `generate`, with the image attached | `remote/openai`, `remote/azure-openai`, `remote/llamacpp` | One `caption` |
-| `document(alias)` | `document_extract` | `remote/llamacpp` with a document VLM (olmOCR, MinerU, Granite-Docling) | `page_block` chunks in reading order, each block's box in `metadata.regions` (or `bbox` for a chunk of one block) |
+| `document(alias)` | `document_extract` | `remote/llamacpp` with a document VLM (olmOCR, MinerU, Granite-Docling) | `page_block` chunks in reading order, each block's box in `segments` (or `bbox` for a chunk of one block) |
 | `transcribe(alias)` | `transcribe` | None yet; see below | `transcript_segment` chunks with time ranges and word confidence |
 
 ```rust
@@ -149,14 +181,14 @@ Some details:
 
 - **OCR boxes.** Without a text detector, uni-xervo's recognizer reports the whole image as
   `[0, 0, 1, 1]`, which locates nothing, so uniko drops that box
-  (`crates/uniko-extract/src/ingest/model_extractor.rs:681`). `ocr/default` has a detector.
+  (`crates/uniko-extract/src/ingest/model_extractor.rs:714`). `ocr/default` has a detector.
 - **Captions.** Only providers that pass an attached image to the model can caption (`IMAGE_CAPABLE_PROVIDERS`,
   `model_extractor.rs:58`). Gemini, Vertex AI, Anthropic, Cohere and Mistral drop images without
   saying so, so a caption alias on one of them is refused at build, rather than captioning
   nothing.
 - **Audio** must be PCM WAV: 16-bit, 16 kHz, mono or stereo. uni-xervo's whisper.cpp provider
   accepts nothing else, and uniko doesn't decode or resample. Anything else is refused with
-  `Unsupported` and the conversion to run (`check_wav`, `model_extractor.rs:764`):
+  `Unsupported` and the conversion to run (`check_wav`, `model_extractor.rs:797`):
 
   ```sh
   ffmpeg -i in.mp3 -ar 16000 -ac 1 -c:a pcm_s16le out.wav
@@ -184,22 +216,28 @@ let video = ModelExtractor::video(|req| {
         .into_iter()
         .map(|(ms, jpeg)| VideoFrame::new(ms, jpeg, "image/jpeg"))
         .collect();
-    let audio = extract_wav_with_ffmpeg(&req.bytes)?;            // 16 kHz mono PCM WAV
-    Ok(VideoParts::new(frames, Some(audio)))
+    Ok(VideoParts::new(frames, None))       // no audio: no transcription provider yet
 })
 .caption("vision/qwen")
-.transcribe("asr/default");
+.ocr("ocr/default");
 ```
+
+Once a transcription provider is available, return the audio track as 16 kHz mono PCM WAV
+(`VideoParts::new(frames, Some(wav))`) and add `.transcribe(alias)`.
 
 ```python
 def compose(request: uniko.ExtractRequest) -> uniko.VideoParts:
     frames = [uniko.VideoFrame(ms, jpeg, "image/jpeg") for ms, jpeg in sample(request.data)]
-    return uniko.VideoParts(frames, audio=to_wav(request.data))
+    return uniko.VideoParts(frames)
 
-builder.model_extractor("video", caption="vision/qwen", composer=compose)
+builder.model_extractor("video", caption="vision/qwen", ocr="ocr/default", composer=compose)
 ```
 
-The composer runs on a blocking thread. A typical recipe:
+The composer runs on a blocking thread. Its output is checked against the modes: frames with no
+image mode set to read them are refused with `Unsupported`, and no audio track while `transcribe` is
+set is reported as a `media_extraction` / `no_audio_track` diagnostic, with ingest going on (no
+transcription provider exists yet, so this can't happen through `build()` today). An audio track
+returned with no `transcribe` set is ignored. A typical recipe:
 
 ```sh
 ffmpeg -i in.mp4 -vf fps=1/5 -q:v 3 frame-%04d.jpg          # a frame every 5 seconds

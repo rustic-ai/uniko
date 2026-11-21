@@ -80,7 +80,7 @@ async fn chunks_of(
             let meta = r
                 .get("meta")
                 .cloned()
-                .map(|v| serde_json::Value::from(v))
+                .map(serde_json::Value::from)
                 .unwrap_or(serde_json::Value::Null);
             (s("t").unwrap_or_default(), s("m"), s("v"), meta)
         })
@@ -156,6 +156,45 @@ async fn a_structured_callback_writes_positioned_chunks() {
 
     let view = agent.data().artifact("memo-1").await.unwrap().unwrap();
     assert!(view.text.contains("q3 forecast"), "{}", view.text);
+
+    // A recall hit and a search hit both say where in the recording the
+    // text came from, down to each utterance.
+    let check = |p: &crate::MediaPosition| {
+        assert_eq!(p.modality, "audio");
+        assert_eq!(
+            p.source_model_version.as_deref(),
+            Some("asr/host@whisper-large")
+        );
+        assert_eq!((p.time_start_ms, p.time_end_ms), (Some(0), Some(4100)));
+        assert_eq!(p.speaker.as_deref(), Some("alice"));
+        assert_eq!(p.segments.len(), 2);
+        assert_eq!(p.segments[1].time_start_ms, Some(2400));
+    };
+    let bundle = agent
+        .recall("when does the budget review move")
+        .await
+        .unwrap();
+    let hit = bundle
+        .items
+        .iter()
+        .find(|i| i.content.contains("q3 forecast"))
+        .expect("the transcript is recalled");
+    check(
+        hit.position
+            .as_ref()
+            .expect("a recall hit carries its position"),
+    );
+    let hits = agent
+        .sources()
+        .search("q3 forecast", &crate::SearchOptions::default())
+        .await
+        .unwrap();
+    let hit = hits.first().expect("a search hit");
+    check(
+        hit.position
+            .as_ref()
+            .expect("a search hit carries its position"),
+    );
     assert!(
         agent
             .data()
@@ -197,6 +236,15 @@ async fn plain_text_callbacks_are_unchanged() {
     assert_eq!(chunks[0].2, None, "or model");
     let view = agent.data().artifact("zep").await.unwrap().unwrap();
     assert_eq!(view.kind, "image");
+    let bundle = agent.recall("zeppelin").await.unwrap();
+    assert!(
+        bundle.items.iter().any(|i| i.content.contains("zeppelin")),
+        "the caption is recalled"
+    );
+    assert!(
+        bundle.items.iter().all(|i| i.position.is_none()),
+        "plain text carries no position"
+    );
     assert!(
         agent
             .data()

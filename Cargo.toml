@@ -60,7 +60,8 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.5.1" }
 # refreshes the lockfile to the newest compatible version. The floor is
 # required, not cosmetic: 5.3 applies a search filter to unflushed rows in
 # multi-vector search (uni-db#343) and lets sparse search take a filter
-# (uni-db#344), which scoped hybrid recall relies on.
+# (uni-db#344), which scoped hybrid recall relies on. It also keeps 5.2.1's fix
+# for the first store write failing on Windows (uni-db#338).
 #
 # NOTE (2026-06-28): default-features disabled to drop `provider-candle`.
 # It pulls candle-cuda kernels that nvcc (CUDA 13) cannot compile against this
@@ -101,7 +102,7 @@ uni-db = { version = "5.3.0", default-features = false, features = [
 # 0.20 reports the execution providers a session actually attached (for every
 # local/onnx task), exposes the runtime's per-alias load state and an opt-in
 # remote reachability check, fixes OCR spacing and long-line truncation, and
-# locks hf-hub cache downloads. uni-db 5.2.1 allows any `>=0.19.2, <1.0`.
+# locks hf-hub cache downloads. uni-db 5.3.0 allows any `>=0.19.2, <1.0`.
 uni-xervo = { version = "0.20.0", default-features = false }
 # Tiered PDF extraction (native text -> OCR -> doc-VLM). Pulls only traits +
 # the pure-Rust native (lopdf) + rasterizer (hayro) tiers; the inference

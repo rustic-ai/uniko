@@ -84,7 +84,8 @@ impl DeadLetters {
     }
 
     /// Retry up to `limit` pending dead letters whose failure a retry can
-    /// fix, oldest first, without waiting for their backoff.
+    /// fix, without waiting for their backoff. Letters go in the order their
+    /// next retry falls due, soonest first.
     ///
     /// # Errors
     ///

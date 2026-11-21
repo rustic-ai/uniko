@@ -344,3 +344,138 @@ impl PyMediaSourceView {
         )
     }
 }
+
+/// One segment of a chunk derived from media: its byte range in the
+/// chunk's text and its own position.
+#[pyclass(name = "SegmentPosition", module = "uniko", frozen)]
+pub struct PySegmentPosition {
+    /// Byte offset of the segment's text in the chunk text.
+    #[pyo3(get)]
+    start: usize,
+    /// End byte offset (exclusive).
+    #[pyo3(get)]
+    end: usize,
+    /// 1-based page number.
+    #[pyo3(get)]
+    page: Option<u32>,
+    /// Start, in milliseconds from the start of the media.
+    #[pyo3(get)]
+    time_start_ms: Option<u64>,
+    /// End, in milliseconds.
+    #[pyo3(get)]
+    time_end_ms: Option<u64>,
+    /// Region as `(x0, y0, x1, y1)`.
+    #[pyo3(get)]
+    bbox: Option<(f32, f32, f32, f32)>,
+    /// The model's confidence, from 0 to 1.
+    #[pyo3(get)]
+    confidence: Option<f32>,
+    /// Speaker label.
+    #[pyo3(get)]
+    speaker: Option<String>,
+}
+
+#[pymethods]
+impl PySegmentPosition {
+    fn __repr__(&self) -> String {
+        format!("SegmentPosition(start={}, end={})", self.start, self.end)
+    }
+}
+
+/// Where in an image, recording or video a recalled or found chunk came
+/// from.
+#[pyclass(name = "MediaPosition", module = "uniko", frozen)]
+pub struct PyMediaPosition {
+    /// `image`, `audio` or `video`.
+    #[pyo3(get)]
+    modality: String,
+    /// The model that derived the text, as `alias@model_id`.
+    #[pyo3(get)]
+    source_model_version: Option<String>,
+    /// 1-based page number.
+    #[pyo3(get)]
+    page: Option<u32>,
+    /// The time range the chunk covers, in milliseconds.
+    #[pyo3(get)]
+    time_start_ms: Option<u64>,
+    /// End of that range.
+    #[pyo3(get)]
+    time_end_ms: Option<u64>,
+    /// Region of a chunk of one located segment.
+    #[pyo3(get)]
+    bbox: Option<(f32, f32, f32, f32)>,
+    /// The lowest confidence among the chunk's segments.
+    #[pyo3(get)]
+    confidence: Option<f32>,
+    /// The chunk's speaker.
+    #[pyo3(get)]
+    speaker: Option<String>,
+    /// For a chunk of several segments, each one's own position.
+    #[pyo3(get)]
+    segments: Vec<Py<PySegmentPosition>>,
+}
+
+#[pymethods]
+impl PyMediaPosition {
+    fn __repr__(&self) -> String {
+        format!(
+            "MediaPosition(modality='{}', segments={})",
+            self.modality,
+            self.segments.len()
+        )
+    }
+}
+
+fn bbox_tuple(b: Option<[f32; 4]>) -> Option<(f32, f32, f32, f32)> {
+    b.map(|[a, b, c, d]| (a, b, c, d))
+}
+
+impl PyMediaPosition {
+    /// Build the Python wrapper from a Rust [`MediaPosition`].
+    pub(crate) fn from_rust(
+        py: Python<'_>,
+        p: &uniko_api::tools::MediaPosition,
+    ) -> PyResult<Py<Self>> {
+        let segments = p
+            .segments
+            .iter()
+            .map(|s| {
+                Py::new(
+                    py,
+                    PySegmentPosition {
+                        start: s.start,
+                        end: s.end,
+                        page: s.page,
+                        time_start_ms: s.time_start_ms,
+                        time_end_ms: s.time_end_ms,
+                        bbox: bbox_tuple(s.bbox),
+                        confidence: s.confidence,
+                        speaker: s.speaker.clone(),
+                    },
+                )
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Py::new(
+            py,
+            Self {
+                modality: p.modality.clone(),
+                source_model_version: p.source_model_version.clone(),
+                page: p.page,
+                time_start_ms: p.time_start_ms,
+                time_end_ms: p.time_end_ms,
+                bbox: bbox_tuple(p.bbox),
+                confidence: p.confidence,
+                speaker: p.speaker.clone(),
+                segments,
+            },
+        )
+    }
+
+    /// The optional wrapper for an optional position.
+    pub(crate) fn from_opt(
+        py: Python<'_>,
+        p: Option<&uniko_api::tools::MediaPosition>,
+    ) -> PyResult<Option<Py<Self>>> {
+        p.map(|p| Self::from_rust(py, p)).transpose()
+    }
+}

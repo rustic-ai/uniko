@@ -93,6 +93,8 @@ pub use uniko_extract::ingest::{
 };
 /// LLM circuit-breaker state, part of [`PipelineHealth`].
 pub use uniko_pipes::CircuitState;
+/// Where in an image, recording or video a recalled or found chunk came from.
+pub use uniko_store::repository::media::{MediaPosition, SegmentPosition};
 // Content-type taxonomy shared by ingest routing and recall channels.
 #[doc(no_inline)]
 pub use uniko_pipes::content::{ContentType, Mime, Modality};

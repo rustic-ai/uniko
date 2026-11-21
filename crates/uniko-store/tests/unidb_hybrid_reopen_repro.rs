@@ -13,7 +13,7 @@
 //! **FIXED upstream** (uni-db #130). The test asserts the reopen SUCCEEDS. It
 //! failed against uni-db 2.4.1 and ran as an `#[ignore]`d expected-failure; on
 //! 2026-08-02 it was found green on both 3.0.1 and 3.2.0, so the fix landed in
-//! 3.0.0 or earlier, and it still passes on the pinned 5.2.x. The attribute is
+//! 3.0.0 or earlier, and it still passes on the pinned 5.3.x. The attribute is
 //! removed so it guards against regression on every run; the
 //! `KnowledgeBase`-level check with `EmbeddingConfig::bge_m3()` is
 //! `store_compatibility::a_hybrid_store_reopens` in `tests/store_tests`.

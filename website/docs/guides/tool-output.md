@@ -72,10 +72,23 @@ session.commit_unit(vec![Turn::new("user", "Question").id("question").tool_call(
 // Message -[:SENT_BY]-> user;  Action -[:PERFORMED_BY]-> reporter
 ```
 
-The turn keeps its sender. The performer is created as kind `agent` if it doesn't exist yet. It's
-also part of the call's replay key: recording the same call id again under a different performer is
-refused with `UnikoError::IdConflict`, rather than replaying with the old `PERFORMED_BY` edge. Naming
-the default performer explicitly is the same as naming none.
+The turn keeps its sender. A performer that doesn't exist yet is created as kind `unknown`; naming a
+performer never changes anyone's kind, so a person named as a performer stays a person. Mark an agent
+with `register`. Recording the same call id again is a replay only with the same result and the same
+performer, compared as resolved: the one named, or else the context's default (the turn's sender, or
+the session's agent for `observe_tool`). Anything else is refused with `UnikoError::IdConflict`,
+rather than replaying with the old `PERFORMED_BY` edge. So naming the default performer explicitly is
+the same as naming none, in any context. `observe_tool` still records the session's agent as an
+agent, as the one that logged the call.
+
+Two consequences of comparing the performer:
+
+- A call with no `call_id` gets an id derived from its session, triggering message, tool,
+  arguments and result, not from its performer. So two agents recording an identical id-less call in
+  one session conflict, where the second used to replay silently under the first's edge. Give each a
+  `call_id` to record both.
+- Replaying a call whose performer has since been deleted is a conflict too: the stored edge is
+  gone, so it can't match.
 
 What gets written:
 

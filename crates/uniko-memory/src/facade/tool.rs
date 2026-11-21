@@ -124,11 +124,12 @@ impl ToolCall {
     /// [`Session::observe_tool`](super::Session::observe_tool) by the
     /// session's agent. Set this to record, say, a user's turn whose tool
     /// call the reporting agent made: the turn keeps its sender and the
-    /// call is `PERFORMED_BY` this participant, which is created as kind
-    /// `agent` if it doesn't exist yet.
+    /// call is `PERFORMED_BY` this participant. A participant that doesn't
+    /// exist yet is created as kind `unknown`; naming a performer never
+    /// changes a participant's kind (only `register` makes an agent).
     ///
-    /// The performer is part of the call's replay key: recording the same
-    /// call id again with a different performer is refused as an
+    /// Recording the same call id again with a different performer, explicit
+    /// or by default, is refused as an
     /// [`IdConflict`](uniko_store::UnikoError::IdConflict).
     #[must_use]
     pub fn performer(mut self, participant_id: impl Into<String>) -> Self {
@@ -334,24 +335,15 @@ pub(crate) async fn prepare_tool_call(
 
     let rendered = call.output.as_ref().map(render_output);
     let output_hash = rendered.as_ref().map(|(bytes, _, _)| payload_hash(bytes));
-    // An explicit performer other than the default joins the replay key, so
-    // re-recording the call under a different performer is a conflict
-    // rather than a silent replay that keeps the old PERFORMED_BY edge.
-    // Calls with the default performer hash as before.
+    // The replay key is the result alone. The performer is compared on its
+    // own when a call id is seen again (`write_tool_calls_in_tx`), against
+    // the performer this call resolves to, so the check doesn't depend on
+    // which context's default the performer happens to be.
     let performer_id = call
         .performer
         .clone()
         .filter(|p| p != ctx.default_performer);
-    let hash = match &performer_id {
-        Some(p) => Some(payload_hash(
-            format!(
-                "{}\x00performer\x00{p}",
-                output_hash.as_deref().unwrap_or("")
-            )
-            .as_bytes(),
-        )),
-        None => output_hash.clone(),
-    };
+    let hash = output_hash.clone();
     let action_id = call.call_id.clone().unwrap_or_else(|| {
         uniko_store::id::stable_hex64("call", |h| {
             for part in [

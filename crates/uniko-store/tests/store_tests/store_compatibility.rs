@@ -467,16 +467,21 @@ async fn a_sparse_only_store_gains_colbert() {
     assert_eq!(info.embedding.multivector_dimensions, Some(1024));
 }
 
-async fn set_marker(path: &Path, config: &UnikoConfig, kind: &str) {
+/// Leave the marker a run of `kind` cut off in `phase` (`schema` or
+/// `backfill`) would.
+async fn set_marker(path: &Path, config: &UnikoConfig, kind: &str, phase: &str) {
     let kb = open(path, config.clone()).await.unwrap();
     let tx = kb.db().session().tx().await.unwrap();
     tx.query_with("MATCH (s:KnowledgeBaseStats) SET s.migration = $m")
         .param(
             "m",
             Value::Map(
-                [("kind".to_string(), Value::String(kind.into()))]
-                    .into_iter()
-                    .collect(),
+                [
+                    ("kind".to_string(), Value::String(kind.into())),
+                    ("phase".to_string(), Value::String(phase.into())),
+                ]
+                .into_iter()
+                .collect(),
             ),
         )
         .fetch_all()
@@ -493,7 +498,7 @@ async fn an_interrupted_migration_is_reported_and_resumed() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kb");
     create(&path, bge_m3()).await;
-    set_marker(&path, &bge_m3(), "enable_hybrid").await;
+    set_marker(&path, &bge_m3(), "enable_hybrid", "backfill").await;
     let (info, verdict) = KnowledgeBase::inspect(&path, &bge_m3()).await.unwrap();
     assert!(verdict.is_compatible());
     assert_eq!(info.migration_in_progress, Some(Migration::EnableHybrid));
@@ -523,6 +528,167 @@ async fn an_interrupted_migration_is_reported_and_resumed() {
     assert!(report.completed, "{report:?}");
     let (info, _) = KnowledgeBase::inspect(&path, &dot).await.unwrap();
     assert_eq!(info.migration_in_progress, None);
+}
+
+/// A cut-off index rebuild refuses the next open until it is rerun, since
+/// the index may be only partly built; a cut-off hybrid backfill opens.
+#[tokio::test]
+async fn an_interrupted_rebuild_refuses_to_open_until_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb");
+    create(&path, bge_m3()).await;
+    set_marker(&path, &bge_m3(), "rebuild_vector_indexes", "schema").await;
+
+    let err = open(&path, bge_m3()).await.expect_err("refused");
+    let UnikoError::IncompatibleStore(c) = err else {
+        panic!("{err}");
+    };
+    assert_eq!(c.migrations(), vec![Migration::RebuildVectorIndexes], "{c}");
+    assert!(
+        c.differences
+            .iter()
+            .any(|d| d.field == "migration_in_progress"),
+        "{c}"
+    );
+    let (info, verdict) = KnowledgeBase::inspect(&path, &bge_m3()).await.unwrap();
+    assert_eq!(
+        info.migration_in_progress,
+        Some(Migration::RebuildVectorIndexes)
+    );
+    assert!(!verdict.is_compatible());
+
+    // The index definition already matches, so only a forced rebuild
+    // builds anything: the run reports a `rebuild` phase.
+    let mut phases = Vec::new();
+    let report = KnowledgeBase::migrate(
+        &path,
+        bge_m3(),
+        Migration::RebuildVectorIndexes,
+        &mut |p: &MigrationProgress| phases.push(p.phase.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(report.completed, "{report:?}");
+    assert!(phases.iter().any(|p| p == "rebuild"), "{phases:?}");
+    open(&path, bge_m3())
+        .await
+        .expect("a finished rebuild opens")
+        .shutdown()
+        .await
+        .unwrap();
+
+    set_marker(&path, &bge_m3(), "enable_hybrid", "backfill").await;
+    open(&path, bge_m3())
+        .await
+        .expect("a cut-off backfill still opens")
+        .shutdown()
+        .await
+        .unwrap();
+}
+
+/// A cut-off rebuild on a store that now also needs hybrid columns: the one
+/// migration to run is `enable_hybrid`, which covers the rebuild, rebuilds
+/// the indexes and clears the marker.
+#[tokio::test]
+async fn enable_hybrid_finishes_a_cut_off_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb");
+    create(&path, bge_m3_dense_only()).await;
+    set_marker(
+        &path,
+        &bge_m3_dense_only(),
+        "rebuild_vector_indexes",
+        "schema",
+    )
+    .await;
+    let (_, verdict) = KnowledgeBase::inspect(&path, &bge_m3()).await.unwrap();
+    assert_eq!(
+        verdict.migrations(),
+        vec![Migration::EnableHybrid],
+        "{verdict}"
+    );
+    let mut phases = Vec::new();
+    let report = KnowledgeBase::migrate(
+        &path,
+        bge_m3(),
+        Migration::EnableHybrid,
+        &mut |p: &MigrationProgress| phases.push(p.phase.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(report.completed, "{report:?}");
+    assert!(phases.iter().any(|p| p == "rebuild"), "{phases:?}");
+    let (info, _) = KnowledgeBase::inspect(&path, &bge_m3()).await.unwrap();
+    assert_eq!(info.migration_in_progress, None);
+    open(&path, bge_m3())
+        .await
+        .expect("opens once enable_hybrid finished")
+        .shutdown()
+        .await
+        .unwrap();
+}
+
+/// An `enable_hybrid` cut off in its schema step (index builds included)
+/// refuses to open like a cut-off rebuild, and its rerun rebuilds the
+/// indexes outright; one cut off in its backfill opens.
+#[tokio::test]
+async fn an_enable_hybrid_cut_off_in_its_schema_step_refuses_to_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb");
+    create(&path, bge_m3()).await;
+    set_marker(&path, &bge_m3(), "enable_hybrid", "schema").await;
+    let err = open(&path, bge_m3()).await.expect_err("refused");
+    let UnikoError::IncompatibleStore(c) = err else {
+        panic!("{err}");
+    };
+    assert_eq!(c.migrations(), vec![Migration::EnableHybrid], "{c}");
+
+    let mut phases = Vec::new();
+    let report = KnowledgeBase::migrate(
+        &path,
+        bge_m3(),
+        Migration::EnableHybrid,
+        &mut |p: &MigrationProgress| phases.push(p.phase.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(report.completed, "{report:?}");
+    assert!(phases.iter().any(|p| p == "rebuild"), "{phases:?}");
+    open(&path, bge_m3())
+        .await
+        .expect("opens once rerun")
+        .shutdown()
+        .await
+        .unwrap();
+}
+
+/// A marker written before the phase was recorded counts as the schema
+/// step: the index state is unknown, so the store refuses to open.
+#[tokio::test]
+async fn a_marker_with_no_phase_refuses_to_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb");
+    create(&path, bge_m3()).await;
+    let kb = open(&path, bge_m3()).await.unwrap();
+    let tx = kb.db().session().tx().await.unwrap();
+    tx.query_with("MATCH (s:KnowledgeBaseStats) SET s.migration = $m")
+        .param(
+            "m",
+            Value::Map(
+                [("kind".to_string(), Value::String("enable_hybrid".into()))]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .fetch_all()
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    kb.shutdown().await.unwrap();
+    assert!(matches!(
+        open(&path, bge_m3()).await,
+        Err(UnikoError::IncompatibleStore(_))
+    ));
 }
 
 /// The shared-runtime open path explains a hybrid store opened dense-only
@@ -611,7 +777,7 @@ async fn the_report_names_a_migration_still_in_progress() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kb");
     create(&path, bge_m3()).await;
-    set_marker(&path, &bge_m3(), "enable_hybrid").await;
+    set_marker(&path, &bge_m3(), "enable_hybrid", "backfill").await;
     let mut dot = bge_m3();
     dot.vector_metric = VectorMetricChoice::Dot;
     let mut last = None;

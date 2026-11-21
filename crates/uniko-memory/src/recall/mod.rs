@@ -226,6 +226,11 @@ pub struct RecallItem {
     /// Where the chunk sits in its source (`/data/items[3-9]`, `rows
     /// 10-19`, `lines 120-180`), for reading around it.
     pub address: Option<String>,
+    /// For a chunk derived from an image, audio or video: where in the
+    /// media it came from (page, time range, region, speaker, model, and
+    /// each grouped segment's own position). `None` for any other item.
+    /// Trace the media itself with `Data::media_sources`.
+    pub position: Option<uniko_store::repository::media::MediaPosition>,
 }
 
 impl RecallItem {
@@ -1137,19 +1142,41 @@ async fn populate_sources(
         collect_message_sources(&rows, &mut sources);
     }
 
-    // Structure-aware chunks carry a context header and an address.
+    // Structure-aware chunks carry a context header and an address; chunks
+    // derived from media carry where in the media they came from. One read
+    // covers both.
     let mut located: HashMap<NodeId, (Option<String>, Option<String>)> = HashMap::new();
+    let mut positioned: HashMap<NodeId, uniko_store::repository::media::MediaPosition> =
+        HashMap::new();
     if !chunk_ids.is_empty() {
         let rows = kb
             .query_cypher(
-                "MATCH (c:Chunk) WHERE id(c) IN $ids AND c.context IS NOT NULL \
-                 RETURN id(c) AS cid, c.context AS ctx, c.address AS addr",
+                "MATCH (c:Chunk) WHERE id(c) IN $ids \
+                   AND (c.context IS NOT NULL OR c.modality IS NOT NULL) \
+                 RETURN id(c) AS cid, c.context AS ctx, c.address AS addr, \
+                        c.modality AS modality, c.source_model_version AS model, \
+                        CASE WHEN c.modality IS NOT NULL THEN c.metadata END AS meta",
                 &ids_param(&chunk_ids),
             )
             .await?;
         for r in &rows {
-            if let Some(cid) = row_int(r, "cid") {
-                located.insert(cid, (row_str(r, "ctx"), row_str(r, "addr")));
+            let Some(cid) = row_int(r, "cid") else {
+                continue;
+            };
+            let (ctx, addr) = (row_str(r, "ctx"), row_str(r, "addr"));
+            if ctx.is_some() {
+                located.insert(cid, (ctx, addr));
+            }
+            let modality = row_str(r, "modality");
+            if modality.is_some() {
+                let meta = r.get("meta").cloned().map(serde_json::Value::from);
+                if let Some(p) = uniko_store::repository::media::MediaPosition::from_chunk(
+                    modality.as_deref(),
+                    row_str(r, "model"),
+                    meta.as_ref(),
+                ) {
+                    positioned.insert(cid, p);
+                }
             }
         }
     }
@@ -1162,6 +1189,7 @@ async fn populate_sources(
             item.context = ctx;
             item.address = addr;
         }
+        item.position = positioned.remove(&item.node_id);
     }
     Ok(())
 }
@@ -1536,6 +1564,7 @@ async fn recall_unfiltered(
                 token_count: 0,
                 context: None,
                 address: None,
+                position: None,
                 kind,
                 score: score * kind.tier().weight(),
                 content,
@@ -1976,6 +2005,7 @@ async fn phase1_compact(
                     token_count: 0,
                     context: None,
                     address: None,
+                    position: None,
                     kind,
                     score: weighted,
                     content: row.content,
@@ -2245,6 +2275,7 @@ fn fuse_and_score_phase2(
                 token_count: 0,
                 context: None,
                 address: None,
+                position: None,
                 kind,
                 score: score * kind.tier().weight(),
                 content,
@@ -2974,6 +3005,7 @@ mod budget_tests {
             token_count: 0,
             context: None,
             address: None,
+            position: None,
         }
     }
 
@@ -3024,6 +3056,7 @@ mod colbert_tests {
             token_count: 0,
             context: None,
             address: None,
+            position: None,
         }
     }
 

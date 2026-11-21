@@ -426,10 +426,15 @@ impl Session {
     /// [`Turn::tool_call`] when the turn that made the call is recorded too,
     /// so the two commit together.
     ///
+    /// The session's agent is recorded as an agent even when the call names
+    /// another performer, as for any write through an agent's handle (goals
+    /// do the same): it is the one that logged the call.
+    ///
     /// # Errors
     ///
     /// Returns [`UnikoError::IdConflict`](uniko_store::UnikoError::IdConflict)
-    /// when the call id was already recorded with a different result, or
+    /// when the call id was already recorded with a different result or
+    /// performer, or
     /// [`UnikoError`] on any preparation or write failure.
     pub async fn observe_tool(
         &self,
@@ -481,8 +486,10 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Returns [`UnikoError`] when a referenced message or prior action is
-    /// missing, or a write fails.
+    /// Returns [`UnikoError::IdConflict`](uniko_store::UnikoError::IdConflict)
+    /// when the action id was already recorded with a different output or by
+    /// another agent, or [`UnikoError`] when a referenced message or prior
+    /// action is missing, or a write fails.
     pub async fn record_action(
         &self,
         mut params: crate::action::RecordActionParams,
@@ -689,7 +696,9 @@ pub struct Turn {
 }
 
 impl Turn {
-    /// A text turn from `sender_id` carrying `content`, stamped now.
+    /// A text turn from `sender_id` carrying `content`, stamped now. An empty
+    /// or blank `sender_id` is refused when the turn is recorded, with
+    /// [`UnikoError::Config`](uniko_store::UnikoError::Config).
     pub fn new(sender_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             message_id: None,

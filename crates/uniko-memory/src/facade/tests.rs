@@ -6240,6 +6240,63 @@ mod registration_and_performer {
     }
 
     #[tokio::test]
+    async fn an_empty_participant_id_is_refused() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        for id in ["", "  "] {
+            let r = memory.agent(id).register(AgentRegistration::new()).await;
+            assert!(matches!(r, Err(UnikoError::Config(_))), "{id:?}: {r:?}");
+        }
+        let mut session = memory.agent("reporter").session("s-empty");
+        let r = session
+            .commit_unit(vec![
+                Turn::new("user", "Q")
+                    .id("q-empty")
+                    .tool_call(ToolCall::new("search").call_id("c-empty").performer("")),
+            ])
+            .await;
+        assert!(matches!(r, Err(UnikoError::Config(_))), "{r:?}");
+        drop(session);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// Ingest names a participant after its id; registering it later with a
+    /// real name replaces that placeholder.
+    #[tokio::test]
+    async fn register_names_an_agent_ingest_saw_first() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        let mut session = agent.session("s-name");
+        match session
+            .observe(Turn::new("reporter", "First words.").id("m-name"))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => return eprintln!("skipping: models unavailable"),
+            Err(e) => panic!("observe failed: {e}"),
+        }
+        let reg = agent
+            .register(AgentRegistration::new().name("Reporter"))
+            .await
+            .unwrap();
+        assert_eq!(reg.outcome, EnsureOutcome::Upgraded);
+        assert_eq!(
+            count_query(
+                agent.kb(),
+                "MATCH (p:Participant {participant_id: 'reporter'}) \
+                 WHERE p.name = 'Reporter' RETURN count(p) AS c"
+            )
+            .await,
+            1
+        );
+        drop((session, agent));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
     async fn register_creates_an_agent_and_nothing_else() {
         let Some(memory) = memory_or_skip().await else {
             return;
@@ -6522,7 +6579,8 @@ mod registration_and_performer {
             1,
             "the turn keeps its sender"
         );
-        assert_eq!(participants(&kb, "reporter", "agent").await, 1);
+        // Naming a performer never makes it an agent; only `register` does.
+        assert_eq!(participants(&kb, "reporter", "unknown").await, 1);
         drop((session, kb));
         memory.shutdown().await.expect("shutdown");
 
@@ -6563,6 +6621,13 @@ mod registration_and_performer {
         }
         let replay = session.commit_unit(unit(reporter_call())).await.unwrap();
         assert!(replay.was_replay, "the identical unit replays");
+        // `auditor` exists, so its case reaches the comparison of the stored
+        // performer, not just the missing-participant check.
+        memory
+            .agent("auditor")
+            .register(AgentRegistration::new())
+            .await
+            .unwrap();
 
         for changed in [
             reporter_call().performer("auditor"),
@@ -6587,6 +6652,81 @@ mod registration_and_performer {
         memory.shutdown().await.expect("shutdown");
     }
 
+    /// The performer is compared as resolved, whatever context recorded the
+    /// call: the same performer named explicitly elsewhere replays, and a
+    /// default that resolves to someone else conflicts.
+    #[tokio::test]
+    async fn the_performer_check_does_not_depend_on_the_context() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let session = memory.agent("reporter").session("research");
+        match session
+            .observe_tool(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence"),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => return eprintln!("skipping: models unavailable"),
+            Err(e) => panic!("observe_tool failed: {e}"),
+        }
+        let mut turns = memory.agent("reporter").session("research");
+        let embedded =
+            |call: ToolCall, id: &str| vec![Turn::new("user", "Q").id(id).tool_call(call)];
+        // Performed by reporter by default, then named explicitly in a user's
+        // turn: the same performer, so a replay of the call.
+        let r = turns
+            .commit_unit(embedded(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence")
+                    .performer("reporter"),
+                "q-ctx-1",
+            ))
+            .await
+            .expect("the same performer is no conflict");
+        assert!(r.turns[0].tool_calls[0].was_replay);
+        // In a user's turn with no performer, the default is the user: not
+        // the stored performer, so a conflict.
+        let r = turns
+            .commit_unit(embedded(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence"),
+                "q-ctx-2",
+            ))
+            .await;
+        assert!(matches!(r, Err(UnikoError::IdConflict(_))), "{r:?}");
+        // The whole-unit replay path compares the same way: replaying the
+        // committed unit replays, and the same unit with the default (user)
+        // performer conflicts.
+        let replay = turns
+            .commit_unit(embedded(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence")
+                    .performer("reporter"),
+                "q-ctx-1",
+            ))
+            .await
+            .expect("the identical unit replays");
+        assert!(replay.was_replay);
+        let r = turns
+            .commit_unit(embedded(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence"),
+                "q-ctx-1",
+            ))
+            .await;
+        assert!(matches!(r, Err(UnikoError::IdConflict(_))), "{r:?}");
+        drop((session, turns));
+        memory.shutdown().await.expect("shutdown");
+    }
+
     /// Re-recording a call under another performer is refused, so the
     /// stored PERFORMED_BY edge never silently disagrees with the caller.
     #[tokio::test]
@@ -6608,7 +6748,7 @@ mod registration_and_performer {
         }
         let kb = memory.agent("reporter").kb().clone();
         assert_eq!(performed_by(&kb, "call", "auditor").await, 1);
-        assert_eq!(participants(&kb, "auditor", "agent").await, 1);
+        assert_eq!(participants(&kb, "auditor", "unknown").await, 1);
 
         let replay = session
             .observe_tool(reporter_call().performer("auditor"))
@@ -6971,6 +7111,33 @@ mod dead_letters {
         assert_eq!(letter.status, DeadLetterStatus::Legacy);
         assert!(letter.id.starts_with("legacy:") && !letter.replayable);
         assert_eq!(dl.counts().await.unwrap().legacy, 1);
+        // A status this version doesn't know is legacy too, in a filtered
+        // list as in the counts.
+        let mut pending = props.clone();
+        pending.insert("status".to_string(), Value::String("pending".into()));
+        memory
+            .agent("viewer")
+            .kb()
+            .create_node(labels::DEAD_LETTER, &pending)
+            .await
+            .unwrap();
+        let mut unknown = props.clone();
+        unknown.insert(
+            "status".to_string(),
+            Value::String("from-the-future".into()),
+        );
+        memory
+            .agent("viewer")
+            .kb()
+            .create_node(labels::DEAD_LETTER, &unknown)
+            .await
+            .unwrap();
+        let legacy = dl
+            .list(&DeadLetterFilter::new().status(DeadLetterStatus::Legacy))
+            .await
+            .unwrap();
+        assert_eq!(legacy.len(), 2, "{legacy:?}");
+        assert_eq!(dl.counts().await.unwrap().legacy, 2);
         assert!(matches!(
             dl.retry(&letter.id, true).await,
             Err(UnikoError::Config(_))

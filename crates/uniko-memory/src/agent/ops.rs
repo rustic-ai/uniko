@@ -120,7 +120,8 @@ pub(crate) async fn ensure_agent_participant_named(
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct AgentRegistration {
-    /// Display name, set only when the participant has none yet.
+    /// Display name, set only when the participant has none yet, or has
+    /// only the placeholder ingest gives it (its own id).
     pub name: Option<String>,
 }
 

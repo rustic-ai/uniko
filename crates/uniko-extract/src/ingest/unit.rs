@@ -169,9 +169,9 @@ pub async fn ingest_turns_atomic(
 
     if absent.is_empty() {
         // Whole-unit replay, but only of the same unit: every tool call must
-        // already be recorded with the same payload hash (which covers its
-        // result and a non-default performer). A call that changed, or one
-        // the stored unit never had, is a conflict, not a silent replay.
+        // already be recorded with the same result (its payload hash) and
+        // the same performer. A call that changed, or one the stored unit
+        // never had, is a conflict, not a silent replay.
         let mut replayed_calls: Vec<Vec<super::tool::ToolCallOutcome>> =
             Vec::with_capacity(unit.len());
         for turn in unit {
@@ -191,7 +191,23 @@ pub async fn ingest_turns_atomic(
                     Some(uniko_store::Value::String(h)) => Some(h.as_str()),
                     _ => None,
                 };
-                if stored_hash != call.payload_hash.as_deref() {
+                // The performer this call resolves to: the one it names, or
+                // the turn's sender.
+                let expected = kb
+                    .get_node_by_ext_id(
+                        "Participant",
+                        "participant_id",
+                        call.performer_id
+                            .as_deref()
+                            .unwrap_or(&turn.message.sender_id),
+                    )
+                    .await?
+                    .map(|(n, _)| n);
+                let performed_by = kb.action_performer(nid).await?;
+                if stored_hash != call.payload_hash.as_deref()
+                    || expected.is_none()
+                    || performed_by != expected
+                {
                     return Err(UnikoError::id_conflict(
                         "Action",
                         "action_id",

@@ -914,6 +914,17 @@ async fn apply_schema(db: &Uni, config: &UnikoConfig) -> Result<()> {
         if !verdict.is_compatible() {
             return Err(UnikoError::IncompatibleStore(Box::new(verdict)));
         }
+        // A cut-off hybrid backfill opens: the data is correct, some rows
+        // just lack the new vectors until `enable_hybrid` is rerun.
+        if stored.migration_in_progress == Some(compatibility::Migration::EnableHybrid)
+            && !stored.migration_in_schema
+        {
+            tracing::warn!(
+                "an enable_hybrid migration was cut off: rows it didn't reach take no part in \
+                 sparse or ColBERT recall until it is rerun (store_info().hybrid_backfill_pending \
+                 counts them)"
+            );
+        }
     }
     apply_schema_unchecked(db, config).await
 }

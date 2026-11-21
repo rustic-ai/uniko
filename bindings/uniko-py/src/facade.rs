@@ -578,7 +578,7 @@ pymethods_with_sync! {
         /// Each mode names a catalog alias:
         ///
         /// - `ocr`: an OCR alias (`local/onnx`); recognized lines become
-        ///   `ocr_region` chunks, each line's box in `metadata.regions`;
+        ///   `ocr_region` chunks, each line's box in its `position.segments` (or `position.bbox`);
         /// - `caption`: a generation alias on `remote/openai`,
         ///   `remote/azure-openai` or `remote/llamacpp`, sent the image with
         ///   `caption_prompt` and up to `max_caption_tokens` (512); other

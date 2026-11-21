@@ -59,7 +59,11 @@ def test_a_structured_extraction_is_indexed_and_traced_to_its_source() -> None:
                     speaker="alice",
                 ),
                 uniko.Segment(
-                    "bring the q3 forecast", "transcript", start_ms=2400, end_ms=4100
+                    "bring the q3 forecast",
+                    "transcript",
+                    start_ms=2400,
+                    end_ms=4100,
+                    speaker="alice",
                 ),
             ],
             uniko.ModelProvenance("asr/host", "whisper-large", "transcribe"),
@@ -79,6 +83,14 @@ def test_a_structured_extraction_is_indexed_and_traced_to_its_source() -> None:
     assert outcome.artifact_id == "memo-1"
     view = agent.data.artifact_sync("memo-1")
     assert view is not None and "q3 forecast" in view.text
+
+    bundle = agent.recall_sync("when does the budget review move")
+    item = next(i for i in bundle.items if "q3 forecast" in i.content)
+    assert item.position is not None and item.position.modality == "audio"
+    assert item.position.source_model_version == "asr/host@whisper-large"
+    assert [s.time_start_ms for s in item.position.segments] == [0, 2400]
+    hit = agent.sources.search_sync("q3 forecast")[0]
+    assert hit.position is not None and hit.position.time_end_ms == 4100
 
     sources = agent.data.media_sources_sync("memo-1")
     assert len(sources) == 1
@@ -281,3 +293,38 @@ def test_transcription_has_no_usable_provider_yet() -> None:
         uniko.Uniko.builder().in_memory().model_extractor(
             "audio", transcribe="asr/default"
         ).build_sync()
+
+
+def test_typed_recall_carries_a_media_position_model() -> None:
+    from uniko.models import MediaPosition as MediaPositionModel
+
+    def transcribe(request: uniko.ExtractRequest) -> uniko.Extraction:
+        return uniko.Extraction(
+            [
+                uniko.Segment(
+                    "café crème orders", "transcript", start_ms=0, end_ms=900
+                ),
+                uniko.Segment(
+                    "東京 shipments are late", "transcript", start_ms=900, end_ms=2000
+                ),
+            ]
+        )
+
+    memory = TypedUniko(
+        uniko.Uniko.builder().in_memory().extractor("audio", transcribe).build_sync()
+    )
+    agent = memory.agent("viewer")
+    wav = b"RIFF" + b"\x00" * 40
+    agent.session("s").ingest_sync(
+        uniko.IngestSource.from_bytes(wav).with_mime("audio/wav").with_id("memo")
+    )
+    item = next(
+        i for i in agent.recall_sync("late shipments").items if "shipments" in i.content
+    )
+    assert isinstance(item.position, MediaPositionModel)
+    seg = item.position.segments[1]
+    assert (seg.time_start_ms, seg.time_end_ms) == (900, 2000)
+    # Offsets are UTF-8 bytes into the chunk text.
+    assert (
+        item.content.encode()[seg.start : seg.end].decode() == "東京 shipments are late"
+    )
