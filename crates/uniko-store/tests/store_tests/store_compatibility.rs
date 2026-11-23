@@ -767,6 +767,19 @@ async fn lock_child_opens_the_parents_store() {
         matches!(&err, UnikoError::Config(m) if m.contains("open for writing elsewhere")),
         "{err}"
     );
+    // Inspecting opens read-only, so the parent's writer lock doesn't
+    // stop it.
+    let started = std::time::Instant::now();
+    let (info, verdict) = KnowledgeBase::inspect(Path::new(&store), &UnikoConfig::default())
+        .await
+        .expect("inspecting a store open elsewhere");
+    assert!(info.exists);
+    assert!(verdict.is_compatible(), "{verdict}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "inspect waited for the writer: {:?}",
+        started.elapsed()
+    );
 }
 
 fn lock_child_test_name() -> String {
@@ -780,6 +793,7 @@ fn lock_child_test_name() -> String {
 
 /// A store open in one process can't be opened by another: uni-db's OS lock
 /// on its `writer.lock` refuses the second, and the first's close frees it.
+/// The other process can still inspect it.
 #[tokio::test]
 async fn a_second_process_cannot_open_an_open_store() {
     let dir = tempfile::tempdir().unwrap();

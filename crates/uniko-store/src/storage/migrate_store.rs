@@ -64,9 +64,10 @@ const DEFAULT_BACKFILL_BATCH: usize = 64;
 impl KnowledgeBase {
     /// What the store at `path` was built with, and how `config` compares.
     ///
-    /// Reads the stored schema and the stats row. It applies no schema,
-    /// changes no index or data, and loads no model; uni-db's own open and
-    /// close may still write bookkeeping files (a manifest, its WAL). A
+    /// Reads the stored schema and the stats row through a read-only open.
+    /// It applies no schema, changes no index or data, loads no model, and
+    /// takes no writer lock or lease, so it works while another process has
+    /// the store open; it then sees what that process last flushed. A
     /// local path that isn't a uni-db store (missing, empty, or some other
     /// directory) reports `exists: false` and no differences, and isn't
     /// touched at all.
@@ -75,8 +76,8 @@ impl KnowledgeBase {
     ///
     /// [`UnikoError::Config`] when a store at `path` is open, inspected or
     /// migrated in this process (inspect an open store through its handle's
-    /// [`store_info`](Self::store_info) instead), or open for writing in
-    /// another process; [`UnikoError::Unsupported`] for a URI other than
+    /// [`store_info`](Self::store_info) instead);
+    /// [`UnikoError::Unsupported`] for a URI other than
     /// `s3://` or `gs://`; or
     /// [`UnikoError::Storage`] when the store can't be read.
     pub async fn inspect(
@@ -160,7 +161,7 @@ impl KnowledgeBase {
         let _claim = super::OpenPath::claim_exclusive(path)?;
         {
             let catalog = inspection_catalog(&config, load_catalog(&config, &[])?);
-            let db = open_raw(path, &config, catalog).await?;
+            let db = open_raw(path, &config, catalog, false).await?;
             let outcome = migrate_db(&db, &config, migration, progress).await;
             let closed = db.shutdown().await;
             let Backfill {
@@ -255,7 +256,9 @@ pub(crate) async fn inspect_unclaimed(
     if !store_exists(path, config).await? {
         return Ok((StoreInfo::default(), Compatibility::default()));
     }
-    let db = open_raw(path, config, inspection_catalog(config, Vec::new())).await?;
+    // Read-only: no writer, so no writer lock or lease to wait for while
+    // another process has the store open, and nothing written.
+    let db = open_raw(path, config, inspection_catalog(config, Vec::new()), true).await?;
     let info = compatibility::inspect_db(&db, true).await;
     db.shutdown().await?;
     let info = info?;
@@ -309,9 +312,18 @@ async fn store_exists(path: &Path, config: &UnikoConfig) -> Result<bool> {
 }
 
 /// Open the store at `path` as uni-db alone: no schema applied, and models
-/// only from `catalog`, which loads them lazily.
-async fn open_raw(path: &Path, config: &UnikoConfig, catalog: Vec<ModelAliasSpec>) -> Result<Uni> {
+/// only from `catalog`, which loads them lazily. A `read_only` open creates
+/// no writer, so it takes neither uni-db's writer lock nor its lease.
+async fn open_raw(
+    path: &Path,
+    config: &UnikoConfig,
+    catalog: Vec<ModelAliasSpec>,
+    read_only: bool,
+) -> Result<Uni> {
     let mut builder = super::uni_builder(path, config, true)?;
+    if read_only {
+        builder = builder.read_only();
+    }
     if !catalog.is_empty() {
         builder = builder.xervo_catalog(catalog);
     }
