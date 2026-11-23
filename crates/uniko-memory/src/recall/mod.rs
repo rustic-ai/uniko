@@ -614,7 +614,8 @@ pub struct RecallConfig {
     pub enable_multimodal_channel: bool,
     /// Access-control scope. When [`ViewerScope::As`], `recall()` filters
     /// the returned bundle through [`crate::policy::filter_bundle`] so the
-    /// viewer only sees Facts/Observations their visibility admits. Default
+    /// viewer only sees the Facts, Observations, Messages and Chunks their
+    /// visibility admits. Default
     /// [`ViewerScope::Unrestricted`] (no filtering) — set this for any
     /// caller serving a specific participant. See issue #5.
     pub viewer: ViewerScope,

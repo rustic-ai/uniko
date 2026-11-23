@@ -176,7 +176,7 @@ mode, over the same LoCoMo10 question set.
 
 !!! tip "The one-line summary from the KTH comparison"
     uniko is the only system of six that ingests LoCoMo in under 10 minutes at $0 API cost, and the
-    only one with sub-4-second mean Q&A wall-time. Against the graph backends it is 33–76× faster at
+    fastest mean Q&A wall-time (4.04s). Against the graph backends it is 33–76× faster at
     ingest and uses half the LLM tokens per query.
 
 ---

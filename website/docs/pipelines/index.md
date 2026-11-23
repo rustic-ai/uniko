@@ -10,11 +10,11 @@ uniko splits that work into three movements, each with a different cost profile 
 sense of urgency:
 
 1. **Atomic ingest** — synchronous, single-transaction storage of a `Message`,
-   its entities, and its structural edges. Returns in milliseconds.
-2. **Async post-ingest** — observation extraction and embedding spawned off the
-   ingest path, plus a worker-driven *consolidation* cycle (and a *cortex sweep*:
-   procedure promotion, topic detection, decay, session maintenance) triggered by
-   a threshold or a timer.
+   its chunks, entities, observations, and structural edges, with the embeddings
+   uni-db computes on write. Returns in milliseconds.
+2. **Async post-ingest** — a worker-driven *consolidation* cycle (and a *cortex
+   sweep*: procedure promotion, topic detection, decay, session maintenance)
+   triggered by a threshold or a timer, or run explicitly with `agent.consolidate()`.
 3. **Three-phase recall** — a coverage-gated cascade that reads the *compiled*
    knowledge first and only broadens to raw content when it has to.
 
@@ -26,13 +26,10 @@ flowchart TB
         direction LR
         P1["P1 Ingest<br/>store node + edges<br/>&lt; 10ms"]
         P2["P2 NER<br/>entities + MENTIONS<br/>&lt; 100ms"]
-        P1 --> P2
-    end
-
-    subgraph spawned["Spawned off the ingest path — async"]
-        direction LR
         P3["P3 Observations<br/>extract statements<br/>&lt; 5s"]
         P7a["P7a Auto-embed<br/>Message embedding"]
+        P1 --> P2 --> P3
+        P1 --> P7a
     end
 
     subgraph worker["Consolidation worker — threshold OR timer"]
@@ -51,9 +48,7 @@ flowchart TB
     end
 
     msg --> P1
-    P2 -->|"ingest call returns"| P3
-    P2 --> P7a
-    P3 -->|ObservationsReady| P4
+    P3 -->|"commit, then ObservationsReady"| P4
 
     recall -.reads compiled knowledge.-> worker
 ```
@@ -70,8 +65,8 @@ flowchart TB
 ## What runs when
 
 The data flow spans eight numbered pipeline stages. What matters operationally
-is *who drives each one* — the calling thread, a spawned task, or a background
-worker reacting to a trigger.
+is *who drives each one* — the calling thread or a background worker reacting
+to a trigger.
 
 | Stage | Driver | Timing |
 |---|---|---|
@@ -269,7 +264,7 @@ println!("llm circuit: {:?}", health.llm_circuit);
 <div class="feature-grid" markdown>
 <div class="feature-card" markdown>
 ### [Ingest](ingest.md)
-Atomic single-transaction storage — P1 store, P2 NER, spawned P3/P7a, step error policies, and the IngestWorker.
+Atomic single-transaction storage — P1 store, P2 NER, P3 observations, P7 auto-embed, chunking, and step error policies.
 </div>
 <div class="feature-card" markdown>
 ### [Consolidation](consolidation.md)

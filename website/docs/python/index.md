@@ -55,7 +55,8 @@ uni = await uniko.Uniko.in_memory()
 agent = uni.agent("assistant")
 ```
 
-- **`uniko`** — the package you import. Re-exports the full public API (30 names).
+- **`uniko`** — the package you import. Re-exports the full public API (79 names: the classes
+  and exception types of the native extension).
 - **`uniko._uniko`** — the compiled native extension. You don't import this directly.
 - Ships **`py.typed`** and a hand-written **type stub** (`_uniko.pyi`), so editors and type
   checkers see the full signature surface, including the `*_sync` twins. Requires **Python ≥ 3.10**.
@@ -87,11 +88,11 @@ pip install uniko-metal    # Apple Silicon, macOS arm64
 ```
 
 `uniko.__version__` mirrors the native `_uniko.__version__`, which is single-sourced from the
-crate version (currently `0.2.0`) rather than hardcoded.
+crate version (currently `0.6.0`) rather than hardcoded.
 
-A handful of design-doc surfaces did not ship in this alpha — notably a `UnikoConfig` object
-(`config()` returns a plain `dict`), Python-authored extractors, and visibility scoping on
-`Scope`. The [API reference](api.md) documents only what actually ships.
+`Uniko.config()` returns a plain `dict`; the typed `uniko.models.UnikoConfigModel` mirrors it and
+is accepted wherever a config dict is. The [API reference](api.md) documents only what actually
+ships.
 
 ---
 
@@ -163,9 +164,10 @@ your skin — the async surface and the synchronous `*_sync` twins are line-for-
 ## Errors are structured
 
 Every failure raises a `uniko.UnikoError` (or a subclass), and every instance carries a `.kind`
-string you can branch on. Subclasses cover the cases you'll catch by type — `ConfigError`,
-`LlmError`, `UnikoTimeoutError`, `ConflictError` (a transient, retriable SSI abort), and
-`UnsupportedError`. Storage-domain failures fold into the base `UnikoError` with distinct kinds
+string you can branch on. Subclasses cover the cases you'll catch by type — `ConfigError` (and its
+subclass `IncompatibleStoreError`), `LlmError`, `UnikoTimeoutError`, `ConflictError` (a transient,
+retriable SSI abort), `IdConflictError` (an id reused for different content, not retriable),
+`UnsupportedError`, `ReadinessError` and `DegradedError`. Storage-domain failures fold into the base `UnikoError` with distinct kinds
 (`"storage"`, `"search"`, `"schema"`, `"pipeline"`, `"locy"`, `"embedding"`, `"internal"`), so
 branch on `e.kind` for those.
 

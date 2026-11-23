@@ -2,7 +2,7 @@
 
 *An embedded, Rust-native cognitive-memory engine that compiles conversations into a queryable knowledge graph.*
 
-**Workspace version 0.5.1 · Generated 2026-08-03 · Revised 2026-11-11**
+**Workspace version 0.6.0 · Generated 2026-08-03 · Revised 2026-11-11**
 
 ---
 
@@ -14,11 +14,11 @@ The central thesis is **write-time compile: "compile once, query forever."** Raw
 
 Architecturally, uniko is a strict stack of layered crates. **L1 uniko-store** is the sole boundary to `uni-db` — it owns the schema (26 node labels, 55 edge types), vector/fulltext/hybrid/sparse/ColBERT search, graph traversal and Personalized PageRank, bitemporal Facts, and SSI-aware concurrency with striped locks. **L2 uniko-pipes** supplies content-free pipeline machinery (the `Step` trait, circuit breaker, dead-letter queue, cancellation, content taxonomy). **L3 uniko-extract** turns messages, artifacts, and PDFs into graph nodes via the NLP cascade and atomic ingest. **L4 uniko-memory** is the public `Uniko` facade — the 3-phase recall cascade, P4 fact consolidation with drift and contradiction detection, the async pipeline, and the agent-tool surface. **L5 uniko-cortex** promotes recurring successful episode sequences into Procedures (P5) and clusters co-occurring entities into Topics (P6). A thin `uniko-api` facade plus an async-first PyO3 Python SDK form the outermost, logic-free surface. Layer numbers denote cognitive altitude, not build order.
 
-Knowledge in uniko is **derived, never merely stored**. Only Messages and Actions are observed directly; Entities, Observations, Facts, Topics, and Procedures are all derived and wired back to their evidence, so the schema itself *is* the provenance spine — every belief is walk-back-able to "why do we believe this?" Facts are bitemporal (a single BTIC valid-time interval with per-bound certainty), reinforced by Laplace-smoothed confidence, and subject to contradiction detection (F38) and entity drift (F39) that forces volatile-entity queries into deeper recall. Per-claim visibility scoping gates Fact and Observation access by viewer, team, and org.
+Knowledge in uniko is **derived, never merely stored**. Only Messages and Actions are observed directly; Entities, Observations, Facts, Topics, and Procedures are all derived and wired back to their evidence, so the schema itself *is* the provenance spine — every belief is walk-back-able to "why do we believe this?" Facts are bitemporal (a single BTIC valid-time interval with per-bound certainty), reinforced by Laplace-smoothed confidence, and subject to contradiction detection (F38) and entity drift (F39) that forces volatile-entity queries into deeper recall. Per-claim visibility scoping gates Fact, Observation, Message and Chunk access by viewer, team, and org.
 
 The headline benchmark proof comes from the repository's own harness on LoCoMo10 (1,986 questions, gemini-3.1 judge, 22-core CPU + 8 GB consumer GPU): **81.2% LLM-judge accuracy, 85.6% retrieval hit rate, 0.321 token-F1** — competitive on quality — while ingesting 5,882 turns in **7.5 minutes at $0** (no LLM on the write path) and answering at **4.04 s mean latency**. Against graph-backed peers measured in the KTH dmas-memory study, uniko ingests 33–76× faster at zero token cost and posts the fastest end-to-end Q&A wall-time of six systems. These are self-measured internal figures, not a third-party leaderboard, and the cost/latency tables use the 1,540-question non-adversarial subset — the two question sets should not be conflated.
 
-uniko is for founders and engineering leads shipping agents in their own process who want zero operational footprint, where ingest cost and offline capability matter, where conversation and provenance are central (tracking who-said-what across sessions and explaining beliefs), who organize memory around goals, and who prefer graph-native reasoning compiled at ingest over inference paid on every query. It ships today as six crates on crates.io (facade: `uniko-api = "0.5.1"`) and three interchangeable Python wheels (`uniko` CPU, `uniko-cuda`, `uniko-metal`). The Python SDK is alpha; HTTP/MCP servers, a CLI, multimodal ingest, rule induction, and cross-agent sharing are on the roadmap, not yet shipped.
+uniko is for founders and engineering leads shipping agents in their own process who want zero operational footprint, where ingest cost and offline capability matter, where conversation and provenance are central (tracking who-said-what across sessions and explaining beliefs), who organize memory around goals, and who prefer graph-native reasoning compiled at ingest over inference paid on every query. It ships today as six crates on crates.io (facade: `uniko-api = "0.6.0"`) and three interchangeable Python wheels (`uniko` CPU, `uniko-cuda`, `uniko-metal`). The Python SDK is alpha; HTTP/MCP servers, a CLI, audio transcription through a catalog model, rule induction, and cross-agent sharing are on the roadmap, not yet shipped.
 
 ---
 
@@ -148,7 +148,7 @@ uniko is for teams shipping agents **in their own process** who want a memory la
 
 **Agent long-term memory across sessions.** The interaction-first schema tracks who-said-what over arbitrarily many sessions. `observe()` writes a durable, read-after-write turn; the 3-phase recall cascade (below) then retrieves compiled facts, episodic evidence, and raw chunks, scoped by session / participant / time window via `Scope`. Streamed turns (`submit`/`flush`) exist for throughput but do not preserve cross-turn conversational context — `observe()` is the fidelity path.
 
-**Provenance and "why do we believe this?"** Because every derived node links back to its evidence, an `Answer` carries `citations()` and every `RecallItem` carries a `sources` lineage (`Message` / `Attachment` / `Document`, with chunk ids). Per-claim **visibility scoping** (`null`/`public`/`private:{id}`/`team:{id}`/`org:{id}`) gates `Fact` and `Observation` reads by `Viewer`; unknown visibility schemes fail closed. This suits agents that must explain or defend their outputs, or enforce access boundaries between users/teams.
+**Provenance and "why do we believe this?"** Because every derived node links back to its evidence, an `Answer` carries `citations()` and every `RecallItem` carries a `sources` lineage (`Message` / `Attachment` / `Document`, with chunk ids). Per-claim **visibility scoping** (`null`/`public`/`private:{id}`/`team:{id}`/`org:{id}`) gates `Fact`, `Observation`, `Message` and `Chunk` reads by `Viewer`; unknown visibility schemes fail closed. This suits agents that must explain or defend their outputs, or enforce access boundaries between users/teams.
 
 **Procedural learning.** Repeated successful `Episode` sequences (`FOLLOWED_BY`-adjacent, both `outcome='success'`, both recorded by the agent) are counted by the `sequence_detector` Locy rule and promoted into reusable `Procedure` nodes once a pair recurs ≥ 3 times (P5). A confidence-driven lifecycle then demotes/repromotes/prunes procedures by observed effectiveness. Agents that repeat multi-step workflows accumulate reusable know-how instead of re-planning from scratch.
 
@@ -220,7 +220,7 @@ The proof point that ties back to the thesis: **ingest costs $0 and needs no net
 
 ### 1.9 What is shipped, and what is not
 
-Shipped (Phases 1–3): the full Rust engine (six crates on crates.io, `uniko-api = "0.5.1"` as the facade), the 3-phase recall cascade, P4 consolidation with drift/contradiction, P5 procedures, P6 topics, the Locy rule lifecycle, bitemporal Facts, visibility scoping, PDF/artifact ingest, and an alpha Python SDK (three wheels).
+Shipped (Phases 1–3): the full Rust engine (six crates on crates.io, `uniko-api = "0.6.0"` as the facade), the 3-phase recall cascade, P4 consolidation with drift/contradiction, P5 procedures, P6 topics, the Locy rule lifecycle, bitemporal Facts, visibility scoping, PDF/artifact ingest (with OCR for scanned pages), image and video ingest through catalog models (OCR, captions, document extraction) with each chunk traced to its source, stores kept in an object store (`s3://` or `gs://`; tested against S3-compatible services only), and an alpha Python SDK (three wheels).
 
 Not yet shipped — do not build on these: HTTP/MCP server, CLI, cross-agent sharing, rule induction, and MCTS planning (Phases 4–6). The Python API is alpha and may change before 1.0. The largest known recall weakness is date-anchored/temporal questions, where retrieval tuning is ongoing.
 
@@ -306,7 +306,7 @@ Note the two things that violate a naive "L1→L2→…→L5" reading:
 | **uniko-extract** | L3 | `uniko-store`, `uniko-pipes`, `uni-xervo` (direct) | Content intelligence: the write-time ONNX NLP cascade (POS/NER/DEP/SRL/CLS via xervo's shared DeBERTa encoder), entity extraction (regex + tree-sitter + ONNX NER), DEP/SRL-reconstructed observations, chunking, embedding helpers, PDF ingest, and the atomic per-message ingest transaction (`ingest_message_atomic`). Implements `Step` (`IngestStep`). | `use uni_db` / call `.db()` |
 | **uniko-cortex** | L5 | `uniko-store` only | Higher reasoning: P5 procedure promotion (`promote_procedures_once`, driven by the Locy `sequence_detector` rule) and P6 topic detection (`detect_topics_once`, weighted Label Propagation over the entity co-occurrence graph). Deliberately thin — algorithms only; all graph I/O delegated to store repository helpers. | `use uni_db` / call `.db()`; depend on `uniko-memory` |
 | **uniko-memory** | L4 | `uniko-store`, `uniko-extract`, `uniko-pipes`, `uniko-cortex` | The `Uniko` facade and everything an end user touches: the 3-phase recall cascade, P4 fact consolidation (drift/contradiction), the `PipelineSystem` (ingest + consolidation workers, the latter triggering cortex sweeps), the Locy rule lifecycle, and the agent-tool free functions (goal/task/episode/action/observation/fact/summary/query). | `use uni_db` / call `.db()` |
-| **uniko-api** | facade | `uniko-cortex`, `uniko-memory` | The logic-free public surface: a wildcard re-export of `uniko_cortex` (`lib.rs`) plus a hand-curated ~55-type re-export list from `uniko_memory` (`tools.rs`). Negative surface (engine internals stay hidden) is enforced by `compile_fail` doctests; positive surface by a `surface.rs` guard test. | contain *any* logic |
+| **uniko-api** | facade | `uniko-cortex`, `uniko-memory` | The logic-free public surface: a wildcard re-export of `uniko_cortex` (`lib.rs`) plus a hand-curated ~140-item re-export list from `uniko_memory` (`tools.rs`). Negative surface (engine internals stay hidden) is enforced by `compile_fail` doctests; positive surface by a `surface.rs` guard test. | contain *any* logic |
 | **uniko-py / -cuda / -metal** | bindings | `uniko-api` | Async-first PyO3 SDK (`import uniko`). One shared multi-thread tokio runtime; every async verb has a blocking `*_sync` twin; a Pydantic overlay under `uniko.models`. cuda/metal are the *same source* (`[lib] path` → `../uniko-py/src/lib.rs`), differing only in the forwarded Cargo feature set. | — |
 | **uniko-bench** | tools | all uniko crates + `uni-db`, `uni-xervo` | The internal (`publish=false`) measurement harness: LoCoMo + LongMemEval benchmarks, recall + LLM answer + judge scoring, per-token USD cost tracking, and write-path microbenches (insert/update/bulk-vs-unwind). One of only two places (with `tests/`) permitted to call `.db()`. | — (out of scope for the seal) |
 
@@ -337,7 +337,7 @@ The practical consequence: if a higher crate needs a new graph operation, you ad
 
 ### 2.4 The uni-db foundation
 
-Everything uniko does rests on `uni-db` (5.3.0 from crates.io, tracked as `^5.3.0`, with `default-features = false` and an explicit provider list in the workspace `Cargo.toml`), an **embedded multi-model engine that combines graph, vector, full-text, and a logic runtime in a single in-process store** — nothing to keep in sync, nothing to deploy. `uniko-store` is a typed façade over it. Concretely, uni-db provides:
+Everything uniko does rests on `uni-db` (6.0.0 from crates.io, tracked as `^6.0.0`, with `default-features = false` and an explicit provider list in the workspace `Cargo.toml`), an **embedded multi-model engine that combines graph, vector, full-text, and a logic runtime in a single in-process store** — nothing to keep in sync, nothing to deploy. `uniko-store` is a typed façade over it. Concretely, uni-db provides:
 
 - **A property graph with OpenCypher.** uniko's entire memory is one property graph — 26 node labels, 55 edge types. Generic CRUD in store builds parameterized Cypher (`build_inline_props`/`build_set_clause`), with `validate_label`/`validate_edge_type`/`validate_property_name` gating every interpolated identifier while values are always `$pN`-bound.
 - **Vector, full-text (BM25), sparse, and multi-vector (ColBERT) indexes** in the same store as the graph. Store wraps `uni.vector.query`, `uni.fts.query`, `uni.sparse.query`, and a ColBERT MaxSim path. A hybrid embedder (BGE-M3) fuses dense + sparse + per-token ColBERT columns into a *single* `EmbedHybrid` forward pass. Default vector index is `HnswSq{m:16, ef_construction:100}`, Cosine metric, 384 dimensions.
@@ -435,7 +435,7 @@ let out = ctx.llm_breaker.call(|| async { provider.complete(prompt).await }).awa
 
 `DeadLetterQueue` (`crates/uniko-pipes/src/dead_letter.rs`) stores each failed streaming item as a standalone `DeadLetter` node, with no edges. It keeps the serialized `IngestTask` as `payload`.
 
-**What the worker records.** `run_step_chain` keeps each step's `UnikoError` and reports how the chain ended: completed, cancelled, or aborted. `record_dead_letter` (`crates/uniko-memory/src/pipeline/ingest_worker.rs:366`) then:
+**What the worker records.** `run_step_chain` keeps each step's `UnikoError` and reports how the chain ended: completed, cancelled, or aborted. `record_dead_letter` (`crates/uniko-memory/src/pipeline/ingest_worker.rs:370`) then:
 - for a new item, stores one letter: its first `DeadLetter`-policy failure;
 - for a retry, updates the letter it came from:
   - **completed with no failure:** resolved;
@@ -557,7 +557,7 @@ These are the load-bearing rules the rest of this book assumes:
 3. **`schema/constants.rs` is the schema source of truth** — 26 node labels, 55 edge types. `config/schema.json` is a generated snapshot (`cargo run --bin export-schema`), loaded only when `UnikoConfig::schema_path` is set; regenerate it alongside any schema change.
 4. **`uni-db` is a separate project** — never edit the local `../uni/` checkout; on a suspected uni-db bug, build a minimal isolated repro (pattern: `crates/uniko-store/tests/unidb_bytes_return_repro.rs`) and file upstream.
 5. **SSI does not catch insert-phantoms** — every check-then-create on a non-unique index must hold the correct `StripedLocks` key across both the existence re-read and the commit.
-6. **"Retry" in the pipeline is data-only** — the circuit breaker's `Open→HalfOpen` probe is the sole automatic recovery mechanism; the DLQ persists but does not re-drive.
+6. **Pipeline retry is opt-in** — the DLQ persists failed items and re-drives them only on an explicit retry (`dead_letters().retry` / `retry_pending`) or through the `dead_letter_auto_retry` scheduler, which is off by default; the circuit breaker's `Open→HalfOpen` probe is otherwise the only automatic recovery.
 
 ---
 
@@ -656,14 +656,14 @@ Memory in uniko is organized around **communication**, not around opaque documen
 
 Because who-said-what is structural, uniko can answer cross-session provenance questions ("when did Alice first mention X?", "which turn justifies this Fact?") that a flat vector store cannot.
 
-**Participant kinds.** `kind` is `agent` or `unknown`. Every write goes through `KnowledgeBase::ensure_participant` (`crates/uniko-store/src/storage/nodes.rs:330`), under the same `rmw_locks` key as `merge_node`:
+**Participant kinds.** `kind` is `agent` or `unknown`. Every write goes through `KnowledgeBase::ensure_participant` (`crates/uniko-store/src/storage/nodes.rs:332`), under the same `rmw_locks` key as `merge_node`:
 - it creates a missing participant with the given kind;
 - it upgrades `unknown` to a known kind, and never downgrades one;
 - on an existing row it fills only properties that are absent.
 
-It refuses an empty or blank id, and treats a stored `name` equal to the id (ingest's placeholder) as absent. It is called with kind `unknown` by ingest's sender setup (`crates/uniko-extract/src/ingest/session.rs:59`, which also updates `last_seen`), by explicit tool-call performers (`ensure_performers` in `crates/uniko-extract/src/ingest/tool.rs`), and by `add_membership`'s `ensure_group_node` for a Participant. It is called with kind `agent` only by `ensure_agent_participant` (`crates/uniko-memory/src/agent/ops.rs:95`), behind `Agent::register` (`:177`), goal/task creation (`facade/goals.rs:438`), and the session agent of `observe_tool` and `Session::record_action`.
+It refuses an empty or blank id, and treats a stored `name` equal to the id (ingest's placeholder) as absent. It is called with kind `unknown` by ingest's sender setup (`crates/uniko-extract/src/ingest/session.rs:59`, which also updates `last_seen`), by explicit tool-call performers (`ensure_performers` in `crates/uniko-extract/src/ingest/tool.rs`), and by `add_membership`'s `ensure_group_node` for a Participant. It is called with kind `agent` only by `ensure_agent_participant` (`crates/uniko-memory/src/agent/ops.rs:95`), behind `Agent::register` (`:178`), goal/task creation (`facade/goals.rs:439`), and the session agent of `observe_tool` and `Session::record_action`.
 
-**Tool-call performer.** An embedded call is `PERFORMED_BY` its turn's sender, and an `observe_tool` call by the session's agent, unless the call names a `performer`. Named performers are ensured outside the unit transaction, alongside the senders (`ingest/unit.rs:222`). The call's `payload_hash` covers its result only. On a repeated `action_id`, the stored `PERFORMED_BY` participant is compared with the performer the call resolves to, the named one or the context's default (`write_tool_calls_in_tx`, and the whole-unit replay check in `ingest/unit.rs`), so the same `action_id` under another performer is an `IdConflict` in any context. The derived `action_id` doesn't include the performer.
+**Tool-call performer.** An embedded call is `PERFORMED_BY` its turn's sender, and an `observe_tool` call by the session's agent, unless the call names a `performer`. Named performers are ensured outside the unit transaction, alongside the senders (`ingest/unit.rs:278`). The call's `payload_hash` covers its result only. On a repeated `action_id`, the stored `PERFORMED_BY` participant is compared with the performer the call resolves to, the named one or the context's default (`write_tool_calls_in_tx`, and the whole-unit replay check in `ingest/unit.rs`), so the same `action_id` under another performer is an `IdConflict` in any context. The derived `action_id` doesn't include the performer.
 
 Ensuring the Session and sender exist is a cold-path, first-sight-only operation guarded by `lock_session_setup` (a striped RMW lock) to avoid duplicate `Session`/`Participant`/`PARTICIPATED_IN` and SSI antidependency aborts under concurrent ingest. On the warm path (both ids cached in the in-memory `SessionContext`), it does no DB work.
 
@@ -776,8 +776,8 @@ Reference: `website/docs/reference/schema.md`. Property/index specifics from the
 **Index families** (`schema.md`):
 
 - **Hash** — every id prop except `Chunk.chunk_id` (unindexed — chunks are reached via `HAS_CHUNK`, vector, or BM25, never by id; `DeadLetter` rows are looked up by the hash-indexed `dead_letter_id` and filtered by the hash-indexed `status`), plus `Entity.name`, `Fact.subject`/`predicate`, `Entity.unstable`.
-- **BTree** — `Message.timestamp`, `Session.started_at`, `Fact.confidence`, `Observation.temporal_anchor`.
-- **FullText/BM25** — `Message.content`, `Chunk.text`, `Observation.content`, `Summary.text`, `Fact.subject`.
+- **BTree** — `Message.timestamp`, `Session.started_at`, `Fact.confidence`, `Observation.temporal_anchor`, among others (`Episode.timestamp`, `Action.started_at`, `Page.page_number`, `Source.first_seen`/`retired_at`, …).
+- **FullText/BM25** — `Message.content`, `Chunk.text`, `Observation.content`, `Summary.text`, `Fact.subject`/`object`, among others (`Entity.name`, `Block.text`, `Page.plain_markdown`, `Topic.name`, `Procedure.name`, …).
 - **Vector** — `HnswSq`, Cosine metric, 384-d by default.
 
 **Entity identity is canonical and single-sourced** (`id.rs`): `entity_id = "ent_" + hex64(SHA256(lower(name) \0 canonical_type))`. Every NER writer (regex rules, tree-sitter AST, ONNX NER) must pass a type drawn from **one shared lowercase vocabulary** (`person`/`organization`/`location`/…). Mixing vocabularies duplicates entities. Because `entity_id` is *non-unique* in uni-db, concurrent ingest of the same entity is serialized by a striped RMW lock (`lock_entity_ids`) held across the existence re-read and the commit — otherwise two callers both read "absent" and both `CREATE`.
@@ -809,7 +809,7 @@ Allen-algebra predicates (`btic_contains`/`overlaps`/`before`) back the temporal
 4. **Upsert** one `Fact` per group (`batch_upsert_facts`, within-batch dedup by `fact_id`), reusing/embedding as needed; wire `SUPPORTED_BY` edges with per-edge `weight = clamp(cos(Fact, Obs), 0, 1)` (fallback 1.0).
 5. Record a `ConsolidationCycle` audit node with `PROCESSED`→Observation, `CREATED`/`REINFORCED`/`INVALIDATED`→Fact, and `APPLIED_RULE`→Rule edges. (`INVOLVED` is registered in the schema but no code path writes it today.)
 
-`CycleStats` returns `observations_processed`, `facts_created`, `facts_reinforced`, `facts_invalidated`, `drift_alerts`.
+`CycleStats` returns `observations_processed`, `facts_created`, `facts_reinforced`, `facts_invalidated`, `drift_alerts`, plus `triples_requested`/`triples_refined`/`triples_failed` for LLM triple refinement.
 
 #### F38 — contradiction detection
 
@@ -847,10 +847,10 @@ Two distinct filters run at recall time and must not be conflated:
 
 Four load-bearing invariants:
 
-1. **Only `Fact` and `Observation` are policy-checked.** Every other node type — `Message`, `Chunk`, `Entity`, `Topic`, `Summary`, `Goal`, `Task`, `Episode`, … — carries no scope and passes `filter_bundle` untouched. Do not assume recall hides structural nodes.
+1. **Only `Fact`, `Observation`, `Message` and `Chunk` are policy-checked** (`carries_visibility`, `policy.rs:357`; a Message's Chunks inherit its `visibility`). Every other node type — `Entity`, `Topic`, `Summary`, `Goal`, `Task`, `Episode`, … — carries no scope and passes `filter_bundle` untouched. Do not assume recall hides structural nodes.
 2. **Unknown schemes fail closed.** A typo permanently locks a claim down; it can never accidentally widen access.
 3. **Recall is fail-open by default.** With `ViewerScope::Unrestricted` (the default for unscoped reads), policy-scoped Facts/Observations are returned **unfiltered** with only a `WARN`. Production callers serving a specific participant **must** set `RecallConfig.viewer`, call `recall_in(.., Scope::default().as_viewer(v))`, or build the facade with `.scope_to_agent()` — otherwise data leaks across visibility boundaries.
-4. `filter_bundle` batch-fetches visibilities, retains admitted items, and recomputes `total_tokens = items.len() * 50`.
+4. `filter_bundle` batch-fetches visibilities, retains admitted items, and recomputes `total_tokens` as the sum of the kept items' `token_count`.
 
 Beyond visibility, per-call **Dimensions** (`Scope`) apply *hard* filters orthogonal to access control — `sessions`, `participants`, `since`, `until`. These are resolved once into an id allow-set (`resolve_scope_allow_set`) that every candidate query then intersects (`AND id(n) IN $allow`).
 
@@ -939,11 +939,11 @@ Gotcha: unknown/arbitrary binary maps to `Modality::Text` (preserving legacy beh
 **Media extractors (issue #61).** Two extractors ship for `Image`/`Audio`/`Video`, both a `TextExtractor` (`ingest/text_extractor.rs`):
 
 - **A host function**: `TextExtractor::new` (returns `String`), `structured` (returns an `Extraction`), or `with_output` (either). The Python `UnikoBuilder.extractor` takes a callable returning a `str`, an `Extraction`, or a list of `Extraction`s (one per model).
-- **Catalog models**: `ModelExtractor` (`ingest/model_extractor.rs`) runs uni-xervo's `ocr`, `generate` with an attached image (captions), `document_extract` and `transcribe` tasks, chosen by alias. Captions need a provider that forwards images: `IMAGE_CAPABLE_PROVIDERS` (`model_extractor.rs:58`) is `remote/openai`, `remote/azure-openai` and `remote/llamacpp`, while Gemini, Vertex, Anthropic, Cohere and Mistral drop images. Transcription has no usable provider yet. uni-xervo's only transcriber is `local/whisper-cpp`, and uni-db's `build_model_runtime` doesn't register it, so `validate` refuses it (`WHISPER_CPP_PROVIDER`, `:55`). Audio is checked to be 16 kHz 16-bit PCM WAV (`check_wav`, `:797`). Model-call failures are `UnikoError::Llm`. There is no video task, so video takes a host composer that returns frames and a WAV track. `ModelExtractor::validate` (`:328`) runs in `UnikoBuilder::build` (`facade/uniko.rs:758`) before the store opens. `Requirement::Extractor` loads the extractor's aliases (`readiness.rs:234`).
+- **Catalog models**: `ModelExtractor` (`ingest/model_extractor.rs`) runs uni-xervo's `ocr`, `generate` with an attached image (captions), `document_extract` and `transcribe` tasks, chosen by alias. Captions need a provider that forwards images: `IMAGE_CAPABLE_PROVIDERS` (`model_extractor.rs:58`) is `remote/openai`, `remote/azure-openai` and `remote/llamacpp`, while Gemini, Vertex, Anthropic, Cohere and Mistral drop images. Transcription has no usable provider yet. uni-xervo's only transcriber is `local/whisper-cpp`, and uni-db's `build_model_runtime` doesn't register it (rustic-ai/uni-db#351), so `validate` refuses it (`WHISPER_CPP_PROVIDER`, `:55`). Audio is checked to be 16 kHz 16-bit PCM WAV (`check_wav`, `:797`). Model-call failures are `UnikoError::Llm`. There is no video task, so video takes a host composer that returns frames and a WAV track. `ModelExtractor::validate` (`:328`) runs in `UnikoBuilder::build` (`facade/uniko.rs:759`) before the store opens. `Requirement::Extractor` loads the extractor's aliases (`readiness.rs:234`).
 
 `Extraction::chunks` (`ingest/derivation.rs:322`) groups consecutive segments of one derivation, kind, page and speaker up to `max_chunk_tokens`. The newline joiners count toward the budget. It writes `chunk_type`, `metadata.{page_number, time_start_ms, time_end_ms, bbox, confidence, speaker, segments}` (`segments` keeps each grouped segment's byte range, time, page, box, confidence and speaker), and `modality` / `source_model_version`; `create_chunks_in_tx` copies the last two into their own columns (`message.rs:452`). Recall and search decode them into `MediaPosition` (`repository/media.rs`) on `RecallItem.position` and `SearchHit.position`.
 
-`MediaRetention` (`None` by default, `Identity`, `Bytes`) records the original as a `kind = "media"` artifact keyed by SHA-256 (`repository/media.rs:161`), with `HAS_CONTENT` only under `Bytes`. The text artifact points to it with `DERIVED_FROM {derivation_kind, derived_at}` (`:240`). The media hash joins the unit's `content_ids` lock set. With retention, the derived artifact is identified by its media: an auto id is `<modality>-<media sha256>`, a replay of the same media under the same id keeps the first text, and the auto-id content-hash dedup in `ingest_artifact_in_tx` skips artifacts derived from media, so equal captions on different images, or a plain document reading the same, never share one artifact. `PreparedSource::Modality` carries the `IngestContext`, so modality artifacts attach to their session and message like any other. `Data::artifact_access` treats a media source as readable only when every artifact derived from it is wholly readable (`facade/data.rs:237`), and `media_sources` checks each source that way. Deleting the last derived artifact deletes the source and its unshared content (`orphaned_media_ids`, `storage/deletion.rs:561`), from `delete_artifact`, the session cascade and the turn cascade (which also removes media-derived artifacts attached to nothing but that turn and its own session).
+`MediaRetention` (`None` by default, `Identity`, `Bytes`) records the original as a `kind = "media"` artifact keyed by SHA-256 (`repository/media.rs:161`), with `HAS_CONTENT` only under `Bytes`. The text artifact points to it with `DERIVED_FROM {derivation_kind, derived_at}` (`:240`). The media hash joins the unit's `content_ids` lock set. With retention, the derived artifact is identified by its media: an auto id is `<modality>-<media sha256>`, a replay of the same media under the same id keeps the first text, and the auto-id content-hash dedup in `ingest_artifact_in_tx` skips artifacts derived from media, so equal captions on different images, or a plain document reading the same, never share one artifact. `PreparedSource::Modality` carries the `IngestContext`, so modality artifacts attach to their session and message like any other. `Data::artifact_access` treats a media source as readable only when every artifact derived from it is wholly readable (`facade/data.rs:232`), and `media_sources` checks each source that way. Deleting the last derived artifact deletes the source and its unshared content (`orphaned_media_ids`, `storage/deletion.rs:561`), from `delete_artifact`, the session cascade and the turn cascade (which also removes media-derived artifacts attached to nothing but that turn and its own session).
 
 ### 4.4 The hot path: `ingest_message_atomic`
 
@@ -1149,9 +1149,9 @@ Nodes written across the L3 write paths: `Message, Chunk, Entity, Observation, S
 
 The default embedder is `BGESmallENV15` (384-d, query-side prefix only). When a hybrid embedder (bge-m3) is configured, the schema adds `sparse_embedding` (`SparseVector`) and `colbert_embedding` (`List<Vector>`) columns on Chunk/Observation, all pointing at the same `embed/hybrid` alias so uni-db fuses them into one `EmbedHybrid` forward pass. The embedding dimension is fixed at DB creation (it is part of the on-disk vector index), so switching embedders requires a fresh KB.
 
-**Store compatibility (#66).** Every open path applies the schema through `apply_schema` (`crates/uniko-store/src/storage/mod.rs:913`). Unless the config sets `schema_path`, it first runs two steps on the schema already on disk:
-- `inspect_db` (`storage/compatibility.rs:245`) reads the `Chunk` column types, the `Chunk.embedding` index config and the stats row's model record and migration marker. Its `with_counts` flag is off here, so the open-time check reads the schema and the stats row only. `inspect`, `store_info` and `migrate` count `hybrid_backfill_pending`, which scans Chunk and Observation;
-- `check` (`:372`) compares them with the config.
+**Store compatibility (#66).** Every open path applies the schema through `apply_schema` (`crates/uniko-store/src/storage/mod.rs:991`). Unless the config sets `schema_path`, it first runs two steps on the schema already on disk:
+- `inspect_db` (`storage/compatibility.rs:261`) reads the `Chunk` column types, the `Chunk.embedding` index config and the stats row's model record and migration marker. Its `with_counts` flag is off here, so the open-time check reads the schema and the stats row only. `inspect`, `store_info` and `migrate` count `hybrid_backfill_pending`, which scans Chunk and Observation;
+- `check` (`:390`) compares them with the config.
 
 Any difference returns `UnikoError::IncompatibleStore` before uni-db changes anything or a model loads. Each difference has one of two verdicts:
 - `Incompatible`, which needs a fresh store:
@@ -1163,19 +1163,21 @@ Any difference returns `UnikoError::IncompatibleStore` before uni-db changes any
   - `EnableHybrid` when the recorded model and dimensions match and the sparse and/or ColBERT column is added, a sparse-only store gaining ColBERT included;
   - `RebuildVectorIndexes` for an algorithm, metric, `query_prefix` or `batch_size` change.
 
-A store with no recorded model id, from before the record existed, is otherwise checked on its shape only (`check`'s `None` arm, `compatibility.rs:416`): another model with the same dimensions shows no difference, and opening with it records that model, since `init_kb_stats` writes the identity when the row has none (`kb_stats.rs:120`).
+A store with no recorded model id, from before the record existed, is otherwise checked on its shape only (`check`'s `None` arm, `compatibility.rs:450`): another model with the same dimensions shows no difference, and opening with it records that model, since `init_kb_stats` writes the identity when the row has none (`kb_stats.rs:120`).
 
 `Compatibility::migrations` returns nothing when any difference is `Incompatible`. The config's algorithm is compared through `VectorAlgorithm::to_index_type`, which resolves an automatic PQ `sub_vectors: 0` the way uni-db stores it, so such a store reopens.
 
-uni-db refuses at open a store whose indexes name an alias the catalog lacks. `build_or_explain` (`mod.rs:881`) turns that failure into the same report, so a hybrid store opened dense-only returns `IncompatibleStore` rather than uni-db's raw "Missing Uni-Xervo alias" error. It inspects through `inspect_unclaimed` (`migrate_store.rs:244`), since the opening path already holds its own claim.
+uni-db refuses at open a store whose indexes name an alias the catalog lacks. `build_or_explain` (`mod.rs:959`) turns that failure into the same report, so a hybrid store opened dense-only returns `IncompatibleStore` rather than uni-db's raw "Missing Uni-Xervo alias" error. It inspects through `inspect_unclaimed` (`migrate_store.rs:249`), since the opening path already holds its own claim.
 
-`KnowledgeBase::inspect` (`storage/migrate_store.rs:79`) and `migrate` (`:132`) need a local path: `reject_remote` (`:260`) returns `Unsupported` for any path containing `://`. Neither touches a local path that isn't a uni-db store: `is_store` (`:272`) requires uni-db's `catalog/schema.json` or a root `schema.json`, and `inspect` reports `exists: false` while `migrate` returns `Config`. On a real store, `inspect` applies no schema, changes no index or data and loads no model, but uni-db's own open and close still write bookkeeping files (a manifest, its WAL). `migrate` also refuses a `schema_path` config with `Config`, since the schema would come from that file rather than the config being migrated to.
+`KnowledgeBase::inspect` (`storage/migrate_store.rs:80`) and `migrate` (`:135`) take a local path or a remote-only store's `s3://` or `gs://` URL: `reject_remote` (`:266`) returns `Unsupported` for any other URI. Neither touches a path that isn't a uni-db store: `store_exists` (`:286`) requires uni-db's `catalog/schema.json` or a root `schema.json`, in the directory (`is_store`, `:279`) or under the store's prefix in its bucket, and `inspect` reports `exists: false` while `migrate` returns `Config`. On a real store, `inspect` applies no schema, changes no index or data and loads no model, but uni-db's own open and close still write bookkeeping files (a manifest, its WAL). `migrate` also refuses a `schema_path` config with `Config`, since the schema would come from that file rather than the config being migrated to.
 
-A store directory takes one claim at a time, since uni-db takes no lock and two handles on one directory are two writers that don't see each other's writes. `OPEN_PATHS` (`mod.rs:132`) maps each canonical store path to one claim: an open (`OpenPath::claim`, `:161`) or an inspection or migration (`claim_exclusive`, `:182`). A second claim of either kind is refused with `Config`. Each claim also holds an OS lock (`File::try_lock`) on `.uniko.lock` (`LOCK_FILE`) in the store directory, so another process is refused too, until the handle closes or its process exits; an exclusive claim on a directory that isn't a store yet takes no lock and writes nothing. A store in an object store (a URI with `://` other than `file://`) holds a lease instead (`storage/lease.rs`): `.uniko.lease` under its prefix, created with `PutMode::Create`, renewed every 10 s for 30 s with `PutMode::Update` on its ETag, taken over the same way once expired, and deleted at shutdown. A renewal that finds another holder marks the lease lost, and `KnowledgeBase::ensure_writable`, checked at every transaction start, then refuses writes. Both open the store with `inspection_catalog` (`migrate_store.rs:210`): the config's catalog, plus an `embed/hybrid` alias when it lacks one. That alias is a lazy `local/onnx` stub, so stores on `remote/*` or `llamacpp` embedders can be inspected and migrated.
+A store takes one writer at a time. Across processes uni-db enforces it: an OS lock on `writer.lock` in a local store's directory, and for a store in an object store a lease at `catalog/writer_lease.json` under its prefix (created with a conditional put, renewed every 10 s, lapsing 30 s after the last renewal, marked released at close), with a write fence that refuses a holder's commits once its lease is taken over. A second writable open waits `acquire_grace` (5 s) and fails with `UniError::StoreLocked`; a fenced writer fails with `WriterFenced`; a hybrid store's stale local WAL fails with `StaleWal`. `From<UniError>` (`error.rs:149`) turns all three into `Config`. Within the process `OPEN_PATHS` (`mod.rs:135`) refuses a second claim at once rather than after the grace: an open (`OpenPath::claim`, `:157`) or an inspection or migration (`claim_exclusive`, `:174`), keyed by canonical path. Inspection and migration open the store with `inspection_catalog` (`migrate_store.rs:215`): the config's catalog, plus an `embed/hybrid` alias when it lacks one. That alias is a lazy `local/onnx` stub, so stores on `remote/*` or `llamacpp` embedders can be inspected and migrated.
 
-`EnableHybrid` applies the schema, then `backfill_label` (`migrate_store.rs:384`) walks each label's rows once, in node-id order, a batch per transaction. It rewrites the Chunk `text` / Observation `content` (`SET n.text = n.text`) of each row that `pending_predicate` (`compatibility.rs:322`) matches: a row whose sparse and/or ColBERT column, whichever the store has, is empty. That makes uni-db re-embed every auto-embed column of the row. A row that still comes back empty is counted in `MigrationReport::rows_unfilled` and passed over in that run. It doesn't loop or error, but it still counts as pending, so `hybrid_backfill_pending` doesn't reach 0 and a rerun tries it again; `completed` is still true when the only pending rows are the unfilled ones. Backfill progress events count rows done (filled plus unfilled) per label, and the final `done` event has `done == total == rows_backfilled + rows_unfilled`. The step is resumable. A `migration` marker on the stats row covers the run. It is set before the schema step when the store already has the `migration` column, and after it otherwise, since an older store gets the column from that step. Only the kind that set a marker clears it, so a `RebuildVectorIndexes` run leaves an unfinished `EnableHybrid` marker in place; `MigrationReport::migration_in_progress` names such a marker, which is why `completed` can be false after a run that did its own part.
+`UnikoConfig::remote_storage` (`config.rs`, `RemoteStorage`) keeps a store's data in a bucket. `ResolvedRemote::resolve` (`storage/remote.rs:93`) fills unset settings from the `AWS_*` / `GOOGLE_APPLICATION_CREDENTIALS` environment once. `uni_builder` (`mod.rs:217`) picks the mode from the path: a local directory opens uni-db hybrid, `Uni::open(path).hybrid(url).cloud_storage(config)`, with the graph tables, indexes and schema in the bucket and the write-ahead log and id allocator in the directory; the store's own `s3://` or `gs://` URL opens it remote-only, `Uni::open(url).cloud_storage(config)`, with everything in the bucket. A URI naming a different store (`same_store`, `remote.rs:70`) is refused. `remote_storage.set_aside_stale_wal` passes `set_aside_stale_wal()` for a hybrid host whose WAL went stale. A store keeps everything under its URL's prefix, so prefixes of one bucket are separate stores. `store_exists` (`migrate_store.rs:286`) looks for `catalog/schema.json` (or a flat store's `schema.json`) under the prefix through `remote::for_path` (`remote.rs:77`), which also serves a remote-only URL opened with no `remote_storage`, from the environment. An in-memory store refuses `remote_storage` (`refuse_remote_in_memory`, `mod.rs:197`).
 
-The stats row's `embedding` map, written by `identity_map` (`compatibility.rs:607`), records the model id and the dense, sparse and multi-vector dimensions, the algorithm and the metric. The prefixes and batch size aren't in it: `inspect_db` reads them from the stored `Chunk.embedding` index config. `init_kb_stats` (`kb_stats.rs:78`) completes an older `{model_id, dimensions}` record on reopen. Its own model and dimension comparison is the backstop for a `schema_path` config, which skips the open-time check.
+`EnableHybrid` applies the schema, then `backfill_label` (`migrate_store.rs:465`) walks each label's rows once, in node-id order, a batch per transaction. It rewrites the Chunk `text` / Observation `content` (`SET n.text = n.text`) of each row that `pending_predicate` (`compatibility.rs:340`) matches: a row whose sparse and/or ColBERT column, whichever the store has, is empty. That makes uni-db re-embed every auto-embed column of the row. A row that still comes back empty is counted in `MigrationReport::rows_unfilled` and passed over in that run. It doesn't loop or error, but it still counts as pending, so `hybrid_backfill_pending` doesn't reach 0 and a rerun tries it again; `completed` is still true when the only pending rows are the unfilled ones. Backfill progress events count rows done (filled plus unfilled) per label, and the final `done` event has `done == total == rows_backfilled + rows_unfilled`. The step is resumable. A `migration` marker on the stats row covers the run. It is set before the schema step when the store already has the `migration` column, and after it otherwise, since an older store gets the column from that step. Only the kind that set a marker clears it, so a `RebuildVectorIndexes` run leaves an unfinished `EnableHybrid` marker in place; `MigrationReport::migration_in_progress` names such a marker, which is why `completed` can be false after a run that did its own part.
+
+The stats row's `embedding` map, written by `identity_map` (`compatibility.rs:641`), records the model id and the dense, sparse and multi-vector dimensions, the algorithm and the metric. The prefixes and batch size aren't in it: `inspect_db` reads them from the stored `Chunk.embedding` index config. `init_kb_stats` (`kb_stats.rs:78`) completes an older `{model_id, dimensions}` record on reopen. Its own model and dimension comparison is the backstop for a `schema_path` config, which skips the open-time check.
 
 ### 4.11 Build features and testing
 
@@ -1204,7 +1206,7 @@ cargo nextest run -p uniko-extract --features onnx
 - **BTIC/temporal columns** must be read via a bare projection (`RETURN f.valid_at`), never `RETURN n` — Node-wrapped projection stringifies temporals lossily. `temporal_anchor` (the SRL `ARGM-TMP`-resolved date) is a plain `DateTime` on `Observation`, BTree-indexed for temporal recall.
 - **`suppress_onnx_over_structured` before `admit_entities`** — the ordering matters: structured rule matches win over model guesses on the same span.
 - **PDF failures don't propagate.** Check `PdfIngestResult.extraction_failure`; the artifact and blob are already durably stored.
-- **There is a stray `eprintln!` (`RECALL_PROF`)** noted in the recall read layer (L1) — not L3, but it shares the ingest-adjacent read path; treat stderr noise there as known.
+- **Recall profiling is `tracing::debug!`, not stderr.** The old `RECALL_PROF` `eprintln!` in the recall read layer (L1) is now a `recall chunk and entity-scoped search` debug event (`repository/recall.rs:1339`).
 
 ---
 
@@ -1214,7 +1216,7 @@ cargo nextest run -p uniko-extract --features onnx
 
 ### 5.1 The "issue #2" boundary
 
-`uni-db` is meant to be an implementation detail. `uniko-store` enforces that by wrapping it behind `KnowledgeBase` and re-exporting only the handful of `uni-db` types a caller legitimately needs (`lib.rs:54-80`):
+`uni-db` is meant to be an implementation detail. `uniko-store` enforces that by wrapping it behind `KnowledgeBase` and re-exporting only the handful of `uni-db` types a caller legitimately needs (`lib.rs:61-100`):
 
 | Re-exported | Purpose |
 |---|---|
@@ -1226,7 +1228,7 @@ cargo nextest run -p uniko-extract --features onnx
 | `ModelAliasSpec`, `ModelTask`, `WarmupPolicy` | Naming a model alias when registering an extra model (what the facade's `LlmSpec` builds) |
 | `ModelRuntime` | Shared ONNX/model runtime handle |
 
-A CI grep gate forbids `use uni_db` and `KnowledgeBase::db()` in the `src/` of product crates. `.db() -> &Uni` remains a `pub` escape hatch but is documented as tests/benchmark-only (`storage/mod.rs:555-566`). Reviewed exceptions are tagged `// ALLOW:` on the same line. If a product crate needs a new graph operation, the operation is added *here* rather than by reaching past the seal.
+A CI grep gate forbids `use uni_db` and `KnowledgeBase::db()` in the `src/` of product crates. `.db() -> &Uni` remains a `pub` escape hatch but is documented as tests/benchmark-only (`storage/mod.rs:632-643`). Reviewed exceptions are tagged `// ALLOW:` on the same line. If a product crate needs a new graph operation, the operation is added *here* rather than by reaching past the seal.
 
 The crate is deliberately **policy-free for scoring**: recall/working-memory/consolidation reads return *decoded* Rust structs (never raw `Record`s), and the ranking math — RRF fusion, tier weights, MMR, coverage — lives one layer up in `uniko-memory`. What lives here is the schema, the graph walks, bitemporal Facts, idempotent id derivation, and the concurrency primitives.
 
@@ -1244,7 +1246,7 @@ pub struct KnowledgeBase {
     open_path: Option<Arc<OpenPath>>,       // shared claim on the path (#66); None in memory
 }
 ```
-(`storage/mod.rs:84-127`). It is `Clone` (the `Arc<Uni>` is shared).
+(`storage/mod.rs:85-126`). It is `Clone` (the `Arc<Uni>` is shared).
 
 **Constructors** (all validate config, build the xervo catalog via `load_catalog`→file or `embed_catalog`, open `Uni`, `apply_schema`, optionally `prefetch_models`, then `finalize_init`→`init_kb_stats`):
 
@@ -1255,15 +1257,15 @@ pub struct KnowledgeBase {
 | `open_with_xervo[_no_prefetch]` / `open_with_prefetch(.., PrefetchPolicy)` | Persistent + explicit catalog |
 | `SharedRuntime::build(cfg, specs, policy)` + `in_memory_shared` / `open_shared` | Share ONE model runtime (one ONNX session / VRAM arena) across many KBs |
 
-`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and `model_status()` reads each alias's load state from the runtime's own snapshot (`ModelRuntime::aliases`), so every store over it sees one load history, whichever path loaded a model. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`. (It was also once the only open path that let a BGE-M3 hybrid KB reopen, uni-db #130. That is fixed upstream: `crates/uniko-store/tests/unidb_hybrid_reopen_repro.rs` asserts both paths reopen one, and `store_compatibility::a_hybrid_store_reopens` checks it at the `KnowledgeBase` level.) (`open_shared` and `over_shared`, `crates/uniko-store/src/storage/mod.rs:423` and `:442`).
+`SharedRuntime::build` calls `uni_db::xervo::build_model_runtime`, which registers the same compiled-in providers a store would, and keeps the catalog next to the runtime. `open_shared` checks that the runtime serves every model the store's config names (same provider, model, revision and options; execution providers may differ) and `model_status()` reads each alias's load state from the runtime's own snapshot (`ModelRuntime::aliases`), so every store over it sees one load history, whichever path loaded a model. The older `build_shared_runtime` + `open_with_runtime` pair is deprecated: it skips that check and knows no catalog. Sharing is mandatory for concurrent benchmark harnesses: per-KB ONNX sessions OOM an 8 GB GPU past `--question-concurrency 3`. (It was also once the only open path that let a BGE-M3 hybrid KB reopen, uni-db #130. That is fixed upstream: `crates/uniko-store/tests/unidb_hybrid_reopen_repro.rs` asserts both paths reopen one, and `store_compatibility::a_hybrid_store_reopens` checks it at the `KnowledgeBase` level.) (`open_shared` and `over_shared`, `crates/uniko-store/src/storage/mod.rs:503` and `:522`).
 
-Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`apply_perf_knobs_from_env`, `mod.rs:29-52`, applied at `:362`, `:433` and `:504`, and by `migrate_store.rs:283` for inspect and migrate).
+Persistent-open honors env perf knobs that override `UniConfig`: `UNIKO_WAL_DISABLED`, `UNIKO_AUTOFLUSH_THRESHOLD`, `UNIKO_AUTOFLUSH_INTERVAL_OFF` (`apply_perf_knobs_from_env`, `mod.rs:30-53`, applied at `:441`, `:513` and `:584`, and by `migrate_store.rs:316` for inspect and migrate).
 
 ### 5.3 Concurrency: SSI + striped locks + retry
 
 This is the central correctness story of L1. `uni-db` runs with **Serializable Snapshot Isolation (SSI)** enabled. Two things follow.
 
-**SSI protects read-modify-write, and `transact_with_retry` handles the aborts.** Two concurrent RMW callers won't lose updates: the second committer aborts with a retriable `SerializationConflict`, surfaced as `UnikoError::Conflict`. `UnikoError::is_retriable()` is true *only* for `Conflict`, and `From<uni_db::UniError>` preserves `uni-db`'s own retriability classification (`error.rs:77-89`).
+**SSI protects read-modify-write, and `transact_with_retry` handles the aborts.** Two concurrent RMW callers won't lose updates: the second committer aborts with a retriable `SerializationConflict`, surfaced as `UnikoError::Conflict`. `UnikoError::is_retriable()` is true *only* for `Conflict`, and `From<uni_db::UniError>` preserves `uni-db`'s own retriability classification (`error.rs:149-172`); the exceptions are `StoreLocked`, `WriterFenced` and `StaleWal`, which become `Config`.
 
 ```rust
 pub async fn transact_with_retry<T, F, Fut>(
@@ -1272,7 +1274,7 @@ pub async fn transact_with_retry<T, F, Fut>(
 where F: FnMut(Transaction) -> Fut,
       Fut: Future<Output = (Transaction, Result<T>)>;
 ```
-It threads the `Transaction` *by value* through the closure to stay `Send` and free of higher-ranked trait bounds. Each attempt gets a **fresh** transaction; commit errors are also retried; backoff is capped exponential with **no jitter** — `base * 2^min(attempt-2, 20)` clamped to `max_backoff` (`mod.rs:379-418, 505-512`). No jitter is deliberate because the hot paths are already pre-serialized by locks. Because the closure re-runs per attempt, any consumed input must be re-usable across attempts (capture by `Copy` or re-clone inside).
+It threads the `Transaction` *by value* through the closure to stay `Send` and free of higher-ranked trait bounds. Each attempt gets a **fresh** transaction; commit errors are also retried; backoff is capped exponential with **no jitter** — `base * 2^min(attempt-2, 20)` clamped to `max_backoff` (`mod.rs:697-736, 904-911`). No jitter is deliberate because the hot paths are already pre-serialized by locks. Because the closure re-runs per attempt, any consumed input must be re-usable across attempts (capture by `Copy` or re-clone inside).
 
 **SSI does *not* catch insert-phantoms — this is the load-bearing subtlety.** An empty `MATCH` registers no read-set, so a check-then-create on a **non-unique** index (`entity_id`, `content_id`, `session_id`, `fact_id`, and `merge_node`) lets two callers both read "absent" and both `CREATE` a duplicate. This is the bug class behind issue #1 (entity duplication). The fix is `StripedLocks`.
 
@@ -1293,7 +1295,7 @@ let out = kb.transact_with_retry(RetryOptions::default(), |tx| async move {
 drop(guards);
 ```
 
-`lock_many` sorts and dedups by **stripe index** (not key bytes), giving both a global acquisition order (prevents AB/BA deadlock) and self-deadlock safety when two distinct keys collide on one non-reentrant stripe (`locks.rs:110-142`). The mutexes are **non-reentrant**: acquiring the same stripe twice self-deadlocks — always use `lock_many` for multi-key acquisition, never a hand-rolled per-key loop. `batch_upsert_facts` learned this the hard way; a per-fact loop self-deadlocked past ~50 facts (`operations/facts.rs:330-338`).
+`lock_many` sorts and dedups by **stripe index** (not key bytes), giving both a global acquisition order (prevents AB/BA deadlock) and self-deadlock safety when two distinct keys collide on one non-reentrant stripe (`locks.rs:124-145`). The mutexes are **non-reentrant**: acquiring the same stripe twice self-deadlocks — always use `lock_many` for multi-key acquisition, never a hand-rolled per-key loop. `batch_upsert_facts` learned this the hard way; a per-fact loop self-deadlocked past ~50 facts (`operations/facts.rs:406-413`).
 
 `bump_modality_presence` is a separate case: it uses the single shared `kb_stats_lock` because `uni-db` `Map` props are atomic-per-column (no per-key `SET`), so the full 4-entry map is round-tripped under lock (`kb_stats.rs:238-300`).
 
@@ -1309,7 +1311,7 @@ with lock_entity_ids([X]):
 
 ### 5.4 Write paths: Cypher vs bulk
 
-Generic CRUD builds **parameterized** Cypher via `build_inline_props` / `build_set_clause` (`storage/mod.rs:1248-1276`). Every interpolated *identifier* (label, edge type, property name) is gated by `validate_label` / `validate_edge_type` / `validate_property_name`; *values* are always `$pN`-bound.
+Generic CRUD builds **parameterized** Cypher via `build_inline_props` / `build_set_clause` (`storage/mod.rs:1337-1365`). Every interpolated *identifier* (label, edge type, property name) is gated by `validate_label` / `validate_edge_type` / `validate_property_name`; *values* are always `$pN`-bound.
 
 | API | Path | Notes |
 |---|---|---|
@@ -1317,9 +1319,9 @@ Generic CRUD builds **parameterized** Cypher via `build_inline_props` / `build_s
 | `create_edge`, `create_edges[_in_tx]`, `get_edges[_filtered]`, `delete_edge[s_between]`, `update_edge` | Cypher | |
 | `batch_create_nodes[_in_tx]` → `tx.bulk_insert_vertices` | **Bulk** | bypasses Cypher executor |
 | `batch_create_edges_fast[_in_tx]` → `tx.bulk_insert_edges` | **Bulk** | |
-| `create_message_edges_in_tx` | **Bulk** | hand-writes SENT_BY / IN_SESSION / ADDRESSED_TO / NEXT (`edges.rs:193-279`) |
+| `create_message_edges_in_tx` | **Bulk** | hand-writes SENT_BY / IN_SESSION / ADDRESSED_TO / NEXT (`edges.rs:213-299`) |
 
-The bulk fast paths bypass the Cypher executor entirely because VIDs are already known. The comment at `batch.rs:225-235` records a measured **~980×** gap (bulk ~150 µs/edge vs Cypher ~147 ms/edge at session-concurrency 24) — pure per-row Cypher-executor overhead. Trade-offs of the bulk path: it **does not** return allocated EIDs and **does not** re-validate property names, so callers must validate keys up front (`batch.rs` does). When EIDs are needed, `create_edges_in_tx`'s `return_ids` arm falls back to UNWIND-Cypher; it groups mixed edge types by `BTreeMap` and consults a static `edge_type_label_hints` map (only relevant on the return_ids Cypher arm; inert on bulk).
+The bulk fast paths bypass the Cypher executor entirely because VIDs are already known. The comment at `batch.rs:224-234` records a measured **~980×** gap (bulk ~150 µs/edge vs Cypher ~147 ms/edge at session-concurrency 24) — pure per-row Cypher-executor overhead. Trade-offs of the bulk path: it **does not** return allocated EIDs and **does not** re-validate property names, so callers must validate keys up front (`batch.rs` does). When EIDs are needed, `create_edges_in_tx`'s `return_ids` arm falls back to UNWIND-Cypher; it groups mixed edge types by `BTreeMap` and consults a static `edge_type_label_hints` map (only relevant on the return_ids Cypher arm; inert on bulk).
 
 `NodeId`/`EdgeId` are `i64` aliases; conversion to `uni-db` `Vid(u64)`/`Eid(u64)` happens at the storage boundary (`types.rs:1-11`).
 
@@ -1355,7 +1357,7 @@ L6  PROCESSED INVOLVED CREATED REINFORCED INVALIDATED PROMOTED APPLIED_RULE
 L7  MEMBER_OF PART_OF_TEAM TEAM_IN_ORG
 ```
 
-`register_schema` (`schema/mod.rs:181-235`) is **two-phase and idempotent**: Phase 1 registers every node type's properties + indexes; Phase 2 registers all edge types; then a single `.apply()`. Each node type is a submodule exposing `register_labels(builder, config)` / `register_edges(builder)`.
+`register_schema` (`schema/mod.rs:189-243`) is **two-phase and idempotent**: Phase 1 registers every node type's properties + indexes; Phase 2 registers all edge types; then a single `.apply()`. Each node type is a submodule exposing `register_labels(builder, config)` / `register_edges(builder)`.
 
 **Embed aliases** (defined as consts in `schema/mod.rs`): `EMBED_ALIAS`, `HYBRID_EMBED_ALIAS`, `NLP_ALIAS`, `RERANK_ALIAS`, `OCR_ALIAS`.
 
@@ -1363,7 +1365,7 @@ L7  MEMBER_OF PART_OF_TEAM TEAM_IN_ORG
 
 - `vector_index` (no auto-embed) — for app-computed embeddings (Entity, Fact): the crate computes the vector and writes it.
 - `auto_embed_vector_index` — for `uni-db`-computed columns (Message, Summary): `uni-db` runs the embedder on write.
-- Hybrid (BGE-M3) additionally adds a `sparse_embedding` (`SparseVector`) column and a `colbert_embedding` (`List<Vector>`) column on Chunk/Observation, **all three pointing at the same `embed/hybrid` alias and the same source property** so `uni-db` fuses them into ONE `EmbedHybrid` forward pass. ColBERT uses `VectorAlgo::Flat` — per-token vectors feed only MaxSim rerank, never first-stage search (`schema/chunks.rs:56-104`, `schema/mod.rs:94-169`).
+- Hybrid (BGE-M3) additionally adds a `sparse_embedding` (`SparseVector`) column and a `colbert_embedding` (`List<Vector>`) column on Chunk/Observation, **all three pointing at the same `embed/hybrid` alias and the same source properties** (Chunk: `context` + `text`) so `uni-db` fuses them into ONE `EmbedHybrid` forward pass. ColBERT uses `VectorAlgo::Flat` — per-token vectors feed only MaxSim rerank, never first-stage search (`schema/chunks.rs:93-153`, `schema/mod.rs:105-178`).
 
 A hybrid model implements only `HybridEmbeddingModel`, so it **cannot** back lone-dense columns. This is why a hybrid deployment needs **two** aliases: `embed/default` (dense, `ModelTask::Embed`) and `embed/hybrid` (`ModelTask::EmbedHybrid`), both backed by the same model — the model loads twice (~2× VRAM). Sparse/ColBERT columns exist only when `config.embedding.{sparse,multivector}_dimensions` is `Some`; `config.validate()` rejects `recall_sparse_enabled` or `reranker.style = colbert` without them.
 
@@ -1375,7 +1377,7 @@ The single identity source (issue #1 — divergent id derivation duplicates rows
 |---|---|
 | `new_id()` | UUIDv7 (time-sortable) |
 | `entity_id(name, type)` | `"ent_" + hex64(SHA256(lower(name) \0 canonical_type))` (`id.rs:114-120`) |
-| `stable_hex64(prefix, bytes)` | `"{prefix}_{u64:016x}"` over the **leading 64 bits** of the SHA-256 digest — a 16-hex-char id ("hex64" = 64-bit, not 64 hex chars) (`id.rs:66-98`) |
+| `stable_hex64(prefix, bytes)` | `"{prefix}_{u64:016x}"` over the **leading 64 bits** of the SHA-256 digest — a 16-hex-char id ("hex64" = 64-bit, not 64 hex chars) (`id.rs:66-99`) |
 | chunk/page/block ids | deterministic from `(parent_ext_id, index)` |
 
 `entity_id` is the canonical entity identity: **all** NER writers must pass a type from the ONE shared lowercase vocabulary (`person`/`organization`/`location`/…). Mixing vocabularies duplicates entities. `text::normalize_canonical` (lowercase, strip punctuation, collapse whitespace) is the single name-key normalizer.
@@ -1412,11 +1414,11 @@ Items appearing in multiple lists accumulate. `hybrid_search_weighted(&[SearchTa
 **Recall reads** (`repository/recall.rs`, the largest read module) return decoded `ScoredRow`/`TemporalRow`/`NodeContentRow`:
 
 - `resolve_scope_allow_set(ScopeFilter)` — unions per-anchor-type MATCH arms (Message/Observation/Episode/Chunk) into an id allow-set; each candidate query then filters with `AND id(n) IN $allow`.
-- `recall_vector_search`, `recall_fulltext_search`, `recall_sparse_search` (`uni.sparse.query`), `recall_colbert_maxsim`. Sparse restricts at the *index* level via a `_vid IN (...)` SQL filter string — `_vid` equals Cypher `id(n)`. uni-db 5.3 applies it (5.2.1 rejected it, rustic-ai/uni-db#344, so scoped sparse recall reported `sparse: failed`). ColBERT reads the candidates' `colbert_embedding` token vectors with `MATCH … WHERE id(node) IN $ids` and computes MaxSim in process (`repository/recall.rs:806`): a rerank needs exact scores for exactly those ids, which a filtered top-k search does not promise. (Before uni-db 5.3 that search also admitted unflushed rows outside its filter, rustic-ai/uni-db#343.)
+- `recall_vector_search`, `recall_fulltext_search`, `recall_sparse_search` (`uni.sparse.query`), `recall_colbert_maxsim`. Sparse restricts at the *index* level via a `_vid IN (...)` SQL filter string — `_vid` equals Cypher `id(n)`. uni-db 5.3 and later apply it (5.2.1 rejected it, rustic-ai/uni-db#344, so scoped sparse recall reported `sparse: failed`). ColBERT reads the candidates' `colbert_embedding` token vectors with `MATCH … WHERE id(node) IN $ids` and computes MaxSim in process (`repository/recall.rs:812`): a rerank needs exact scores for exactly those ids, which a filtered top-k search does not promise. (Before uni-db 5.3 that search also admitted unflushed rows outside its filter, rustic-ai/uni-db#343.)
 - `temporal_window_hits` — `btic_overlaps(f.valid_at, $qbtic)` UDF for Facts; BTree range for Observation/Episode.
 - `recall_chunk_and_entity_scoped`, `resolve_entity_seeds`, `any_unstable_entities` (drift override signal), `fetch_node_contents`, `query_cypher` (read-only decoded rows).
 
-> Gotcha: `recall_chunk_and_entity_scoped` still ships an `eprintln!` `RECALL_PROF` profiling line (`recall.rs:857`) that writes to stderr in production. The recall sub-queries are best-effort/infallible — failures are logged at debug and skipped.
+> Gotcha: `recall_chunk_and_entity_scoped` logs its profiling as a `tracing::debug!` event, `recall chunk and entity-scoped search` (`recall.rs:1339`; it was once a `RECALL_PROF` `eprintln!`). The recall sub-queries are best-effort/infallible — failures are logged at debug, recorded as a `source` diagnostic, and skipped.
 
 ### 5.8 Bitemporal Facts (BTIC)
 
@@ -1448,7 +1450,7 @@ Content-addressed backends for `:ArtifactContent` bytes, behind an async `BlobSt
 | `Fs` | local content-addressed store | two-level hex fanout `<aa>/<bb>/<content_id>` |
 | `S3` | S3/R2/GCS/MinIO via `object_store` | same key layout |
 
-The content-addressed key is the SHA-256 hex; PUT is idempotent on a matching size (`blob_store/mod.rs:161-168`). API: `sha256_hex`, `put_blob`, `merge_artifact_content(MergeContent)`, `fetch_blob`. The chosen backend is persisted in `:KnowledgeBaseStats`; **reopening a KB with a different `blob_storage.kind` is a HARD error** — there is no implicit migration (`kb_stats.rs`).
+The content-addressed key is the SHA-256 hex; PUT is idempotent on a matching size (`blob_store/fs.rs:66`, `blob_store/s3.rs:118`). API: `sha256_hex`, `put_blob`, `merge_artifact_content(MergeContent)`, `fetch_blob`. The chosen backend is persisted in `:KnowledgeBaseStats`; **reopening a KB with a different `blob_storage.kind` is a HARD error** — there is no implicit migration (`kb_stats.rs`).
 
 ### 5.10 Deletion & GDPR (`storage/deletion.rs`)
 
@@ -1546,10 +1548,10 @@ External overrides: `catalog_path` (xervo model catalog) and `schema_path` (inst
 
 ### 5.14 Errors
 
-`UnikoError` is the unified error: `Storage`, `Search`, `Schema`, `Pipeline`, `Locy`, `Config`, `Embedding`, `Llm`, `Timeout`, `Conflict`, `Internal`, `Unsupported`. `is_retriable()` is true **only** for `Conflict`; `From<uni_db::UniError>` preserves `uni-db`'s retriability classification so the retry loop behaves correctly.
+`UnikoError` is the unified error: `Storage`, `Search`, `Schema`, `Pipeline`, `Locy`, `Config`, `Embedding`, `Llm`, `Timeout`, `Conflict`, `IdConflict`, `Internal`, `Unsupported`, plus the structured variants below. `is_retriable()` is true **only** for `Conflict`; `From<uni_db::UniError>` preserves `uni-db`'s retriability classification so the retry loop behaves correctly, except that a store held by another writer (`StoreLocked`), a fenced writer (`WriterFenced`) and a stale hybrid WAL (`StaleWal`) become `Config` (`error.rs:149`).
 
-`NotReady(Vec<ReadinessFailure>)` (readiness, `readiness.rs`) and `Degraded(Vec<Diagnostic>)`
-(strict recall) carry structured lists rather than a message.
+`NotReady(Vec<ReadinessFailure>)` (readiness, `readiness.rs`), `Degraded(Vec<Diagnostic>)`
+(strict recall) and `IncompatibleStore(Box<Compatibility>)` (store compatibility, §4.10) carry structured data rather than a message.
 
 ### 5.14.1 Stage diagnostics (`diagnostics.rs`)
 
@@ -1609,7 +1611,7 @@ succeed, counts degraded ones in `HealthTracker::record_degradations`
 
 `uniko-memory` is the crate an end user actually holds. Everything below it — `uniko-store` (the sole uni-db boundary), `uniko-pipes` (the `Step`/worker/circuit-breaker machinery), `uniko-extract` (ingest, NLP, embeddings), and `uniko-cortex` (P5 procedures, P6 topics) — exposes primitives. Driving them directly means hand-assembling a `KnowledgeBase`, a `PipelineSystem`, catalogs, and an agent. This crate hides all of that behind one owning `Uniko` handle and four cognitive subsystems:
 
-1. **Recall** — a 3-phase Compact→Expand→Broaden cascade with coverage gating, RRF fusion, optional cross-encoder/ColBERT rerank, temporal + graph-PPR + cross-modal channels, MMR dedup, and access-control/redaction filtering (`recall/mod.rs`, ~2289 lines).
+1. **Recall** — a 3-phase Compact→Expand→Broaden cascade with coverage gating, RRF fusion, optional cross-encoder/ColBERT rerank, temporal + graph-PPR + cross-modal channels, MMR dedup, and access-control/redaction filtering (`recall/mod.rs`, ~3140 lines).
 2. **Consolidation** — P4 derivation of Facts from Observations by grouping on `(subject, predicate)`, cosine-clustering object surface forms, mode-voting a canonical object, upserting bitemporal Facts, and running F38 contradiction + F39 entity drift (`consolidation.rs`).
 3. **The pipeline** — a `PipelineSystem` orchestrating an ingest worker and a consolidation worker whose loop also fires the cortex sweep (P5/P6), rule execution, rule decay, memory decay, and session maintenance (`pipeline/`).
 4. **Rules** — registration of 4 stdlib Locy rules plus a confidence-driven lifecycle for authored/induced rules (`rules/`).
@@ -1637,7 +1639,7 @@ let memory = Uniko::builder()
 let agent = memory.agent("assistant-1");
 ```
 
-`UnikoBuilder` is chainable: `.path`/`.in_memory`, `.embedding(EmbeddingConfig)`, `.llm(LlmSpec)`, `.raw_config`, `.streaming(bool)`, `.scope_to_agent`/`.scope(RecallScope)`, `.extractor(Arc<dyn ModalityExtractor>)`, `.model_extractor(ModelExtractor)`, then `.build().await`.
+`UnikoBuilder` is chainable: `.path`/`.in_memory`, `.embedding(EmbeddingConfig)`, `.reranker`, `.nlp`, `.llm(LlmSpec)`, `.answer_alias`, `.raw_config`, `.streaming(bool)`, `.scope_to_agent`/`.scope(RecallScope)`, `.extractor(Arc<dyn ModalityExtractor>)`, `.model_extractor(ModelExtractor)`, `.runtime(SharedRuntime)`, `.prefetch`, `.require`/`.readiness_timeout`/`.verify_remote`, then `.build().await` (`facade/uniko.rs:444-732`).
 
 `LlmSpec` registers the generation model for the answer path. It lowers to a uni-db `ModelAliasSpec` (task `Generate`, `Lazy` warmup):
 
@@ -1648,11 +1650,11 @@ let agent = memory.agent("assistant-1");
 | `LlmSpec::llamacpp(alias, model, base_url)` | A llama.cpp `llama-server` over its OpenAI-compatible routes (`base_url` includes `/v1`) |
 | `LlmSpec::llamacpp_with_key_env(alias, model, base_url, key_env)` | Same, for a server started with `--api-key` |
 
-`llamacpp` is a **remote** provider (`remote/llamacpp`): inference runs in a `llama-server` the operator starts, so no inference kernels compile into the host process and no CUDA or Metal toolchain is needed at build time. That makes it the route to open-weights generation from the base CPU wheel, with no feature enabled (`crates/uniko-memory/src/facade/uniko.rs:400-447`). A `llama-server` holds one loaded model, so `model_id` is only echoed back in the request body.
+`llamacpp` is a **remote** provider (`remote/llamacpp`): inference runs in a `llama-server` the operator starts, so no inference kernels compile into the host process and no CUDA or Metal toolchain is needed at build time. That makes it the route to open-weights generation from the base CPU wheel, with no feature enabled (`crates/uniko-memory/src/facade/uniko.rs:1040-1088`). A `llama-server` holds one loaded model, so `model_id` is only echoed back in the request body.
 
 **Handle graph.** `Uniko::agent(id)` returns an `Agent` bound to `(kb, agent_id)`, which caches its resolved `Viewer` for `AsAgent` scope. From `Agent` you reach `session(id) -> Session`, `goals() -> Goals`, `data() -> Data`, plus the read verbs and Locy surface.
 
-**Shutdown ordering is load-bearing.** `Uniko::shutdown` skips the pipeline drain (with a `WARN`) if any `Agent`/`Session` clone still shares the `Arc<PipelineSystem>` (`uniko.rs:140-161`). Drop all handles first, or the pipeline is never drained.
+**Shutdown ordering is load-bearing.** `Uniko::shutdown` skips the pipeline drain (with a `WARN`) if any `Agent`/`Session` clone still shares the `Arc<PipelineSystem>` (`uniko.rs:337-367`). Drop all handles first, or the pipeline is never drained.
 
 `RecallScope` (Unrestricted / AsAgent / As) is resolved to a `ViewerScope` at recall time (`facade/mod.rs`).
 
@@ -1660,13 +1662,13 @@ let agent = memory.agent("assistant-1");
 
 ### 6.2 The recall cascade
 
-`recall(kb, query, &RecallConfig) -> ContextBundle` (`recall/mod.rs:688`) is a thin wrapper that runs `recall_unfiltered()` and then applies, in order:
+`recall(kb, query, &RecallConfig) -> ContextBundle` (`recall/mod.rs:896`) is a thin wrapper that runs `recall_unfiltered()` and then applies, in order:
 
 1. `filter_redacted` — unconditional soft-forget drop.
-2. viewer access-control filter — **fail-open** with a `WARN` when `ViewerScope::Unrestricted` still returns `Fact`/`Observation` items.
+2. viewer access-control filter — **fail-open** with a `WARN` when `ViewerScope::Unrestricted` still returns `Fact`/`Observation`/`Message`/`Chunk` items.
 3. `populate_sources` — stamps lineage onto the small final bundle.
 
-`recall_unfiltered` (`:925`) short-circuits on an empty query, resolves `Dimensions` into an id allow-set once via `resolve_scope_allow_set`, builds an `IntentProfile` via `build_intent_at`, then runs the three phases.
+`recall_unfiltered` (`:1305`) short-circuits on an empty query, resolves `Dimensions` into an id allow-set once via `resolve_scope_allow_set`, builds an `IntentProfile` via `build_intent_at`, then runs the three phases.
 
 ```
                     ┌──────────────────────────────────────────┐
@@ -1696,42 +1698,42 @@ let agent = memory.agent("assistant-1");
    ─▶ optional rerank (ColBERT MaxSim OR cross-encoder)             │
    ─▶ answer-type boost ─▶ Phase-1 contribution (Merge/Boost/Off)   │
         ▼                                                             │
-   finalize_bundle: sort desc · truncate to limit · sum 50 tok/item ◀┘
+   finalize_bundle: sort desc · truncate · fit token_budget     ◀┘
 ```
 
-#### Phase 1 — Compact (`phase1_compact`, `:1394`)
+#### Phase 1 — Compact (`phase1_compact`, `:1933`)
 
 Vector search over the **consolidated** tier only: `Fact.embedding` top-20, `Procedure.embedding` top-10, `Topic.embedding` top-5. (Procedure/Topic return 0 rows until P5/P6 have run.) Coverage is computed against `COVERAGE_GATE_PHASE1 = 0.75` **and** requires `>= 3` items.
 
 With `recall_fact_hybrid` (default on) the Fact target runs `recall_hybrid_search` instead: `similar_to([embedding, object], [qvec, keywords], weighted)` over a full-text index on `Fact.object`, with the recall vector/BM25 weights, so a fact whose words match the query is found even when its embedding is not the nearest. On the LongMemEval oracle split (100 questions, retrieval only, same reused stores) it moved R@5 from 0.847 to 0.934 and NDCG@5 from 0.888 to 0.954.
 
-**F58 drift override** (`:975`): if Phase 1 would exit early but a query `entity_ref` resolves to an `unstable` Entity (`kb.any_unstable_entities`), the cascade is forced past Phase 1 into Phase 2+. This makes queries about volatile entities consult recent episodic evidence rather than trusting a stale consolidated Fact.
+**F58 drift override** (`:1373`): if Phase 1 would exit early but a query `entity_ref` resolves to an `unstable` Entity (`kb.any_unstable_entities`), the cascade is forced past Phase 1 into Phase 2+. This makes queries about volatile entities consult recent episodic evidence rather than trusting a stale consolidated Fact.
 
-#### Phase 2 — Expand (`phase2_expand`, `:1472`)
+#### Phase 2 — Expand (`phase2_expand`, `:2034`)
 
 Fans out **in parallel** (`join_all`):
 
 - Episode / Observation / Message vector search
 - Observation / Message fulltext (BM25)
 - optional sparse-Observation channel (`uni.sparse.query`)
-- cross-modal image/audio/multimodal channels — gated (`phase2_activation`, `:1635`) on `modality_presence` AND the config toggle AND the query carrying a per-modality vector (dormant in text-only corpora)
-- temporal channel (`phase2_temporal`, `:1855`) via `temporal_window_hits` (BTIC overlap for Facts, BTree range for Observation/Episode)
-- graph channel (`phase2_graph_activation`, `:1918`) — `personalized_pagerank_weighted` from resolved entity seeds, seed-excluded
+- cross-modal image/audio/multimodal channels — gated (`phase2_activation`, `:2197`) on `modality_presence` AND the config toggle AND the query carrying a per-modality vector (dormant in text-only corpora)
+- temporal channel (`phase2_temporal`, `:2537`) via `temporal_window_hits` (BTIC overlap for Facts, BTree range for Observation/Episode)
+- graph channel (`phase2_graph_activation`, `:2601`) — `personalized_pagerank_weighted` from resolved entity seeds, seed-excluded
 
 Each source is min-max normalized (`normalize_scores_in_place`), RRF-fused (`rrf_fuse`, `1/(k+rank)`), tier-weighted (`fuse_and_score_phase2`), then MMR-deduped. If coverage ≥ `phase2_coverage_gate = 0.65` and `>= 3` items, it early-exits with `phase2_only = true`, merging up to 3 Phase-1 Facts under the Merge strategy.
 
-#### Phase 3 — Broaden (`:1047+`)
+#### Phase 3 — Broaden (`:1449+`)
 
 Per-variant fan-out: each `QueryVariant` runs `run_recall_for_variant` (`kb.recall_chunk_and_entity_scoped` — hybrid vector + BM25 + entity-scoped), concurrently; optional sparse Chunk channels; RRF-fused across variants + sparse. If the scored set is empty, it falls back to the Phase-2 items.
 
 **Message-owned chunks and the lexical channel.** The owner-scoped arms of `recall_chunk_and_entity_scoped` search Artifact-owned chunks (2 × limit) and, since the tool-output work, Message-owned chunks (limit) — the pieces of a long turn were previously reachable only through graph expansion. After the variants, `run_lexical_source` searches `Chunk.search_text` with the query's literals (`intent::extract_literals`: quoted phrases, tokens with a digit, joined identifiers, inner case changes, acronyms), normalised like the index; without literals it uses the keyword variant. Its list joins the RRF pool (`rrf_fuse_weighted`) at weight `lexical_literal_weight` (2.0) when literals exist, 1.0 otherwise. `populate_sources` maps a chunk of an artifact an Action `PRODUCED` to `RecallSource::Tool`, a session transcript chunk to `RecallSource::Session`, and copies a chunk's `context` and `address` onto the item.
 
-`RecallItem`s are then built with tier weights, and optionally reranked (`:1160`):
+`RecallItem`s are then built with tier weights, and optionally reranked (`:1578`):
 
 - **ColBERT** — in-process MaxSim over the `colbert_embedding` column, rescaled into the top-window score band; a candidate with no token vectors is ranked just below the lowest rescored one (`apply_maxsim`), OR
 - **xervo cross-encoder** — `top_n` candidates rescored, optional sigmoid mapping.
 
-An **answer-type boost** (`:1197`) runs one Cypher per item over `top_n` (default multiplier 1.0 = no-op). Finally a **Phase-1 contribution strategy** (`:1230`) folds consolidated Facts back in.
+An **answer-type boost** (`:1637`) runs one Cypher per item over `top_n` (default multiplier 1.0 = no-op). Finally a **Phase-1 contribution strategy** (`:1661`) folds consolidated Facts back in.
 
 #### Kinds, tiers and coverage
 
@@ -1754,26 +1756,28 @@ facet_coverage = min(#semantic+procedural items, facet_count) / facet_count
 
 #### Intent profiling (`recall/intent.rs`)
 
-`build_intent_at` (`:147`) runs `analyze_query` (the NLP cascade under `onnx`, else rule-based NER) and builds up to **4 query variants**:
+`build_intent_at` (`:154`) runs `analyze_query` (the NLP cascade under `onnx`, else rule-based NER) and builds up to **4 query variants**:
 
 - **keywords** — POS-filtered NOUN/VERB/PROPN/ADJ/NUM
 - **original** — the raw query
 - **declarative** — an SVO reconstruction from the DEP tree
 - **type_anchored** — entity + predicted answer-type
 
-The default (empty `enabled_variants`) is **keywords-only**. Enabling all four measured **−2.1pt evidence% and ~3× latency** on LoCoMo, so multi-variant reformulation is opt-in (`:165-174`). Variant embeddings are computed concurrently; failures fall back to an empty vector (BM25-only for that variant).
+The default (empty `enabled_variants`) is **keywords-only**. Enabling all four measured **−2.1pt evidence% and ~3× latency** on LoCoMo, so multi-variant reformulation is opt-in (`:172-189`). Variant embeddings are computed concurrently; failures fall back to an empty vector (BM25-only for that variant).
 
-`predict_answer_type` (`:350`) is a precision-tuned ordered regex (`who → person`, `where → location`, `when → date`, `how many → measurement`, …). The temporal window is resolved via `resolve_temporal_with_granularity` against `reference_ts` (else `now`).
+`predict_answer_type` (`:440`) is a precision-tuned ordered regex (`who → person`, `where → location`, `when → date`, `how many → measurement`, …). The temporal window is resolved via `resolve_temporal_with_granularity` against `reference_ts` (else `now`).
 
 #### `RecallConfig`
 
 A ~40-field tuning struct, normally built from the KB config via `RecallConfig::from_uniko_config()` so recall honors the reranker/recall knobs set at ingest rather than standalone defaults. Salient fields: `limit`, `token_budget`, `min_score`, vector/bm25 weights, reranker (`enabled`/`top_n`/`style`/`sigmoid`), sparse toggles, `query_variants`, `rrf_k`, `per_variant_limit`, `phase1_strategy` + `alpha`, phase2 gates/mmr/temporal/graph/edge_weights, cross-modal toggles, `viewer`, `dimensions`, `drift_override`, and `reference_ts`.
 
-`ContextBundle` returns `items: Vec<RecallItem>`, `total_tokens`, `phase1_only`, `phase2_only`, `coverage`. Each `RecallItem` is `{ node_id, kind: RecallKind, score, content, sources: Vec<RecallSource> }`, where `RecallSource` is the lineage tag:
+`ContextBundle` returns `items: Vec<RecallItem>`, `total_tokens`, `phase1_only`, `phase2_only`, `coverage`, `diagnostics`. Each `RecallItem` is `{ node_id, kind: RecallKind, score, content, sources: Vec<RecallSource>, … }` (plus `category`, `source_id`, `revision_id`, `token_count`, `context`, `address`, `position`), where `RecallSource` is the lineage tag:
 
 - `Message { message_id, chunk_id? }`
 - `Attachment { message_id, artifact_id, chunk_id? }`
 - `Document { artifact_id, chunk_id? }`
+- `Session { session_id, chunk_id? }`
+- `Tool { call_id, tool_name?, artifact_id, chunk_id? }`
 
 **MMR dedup** (`recall/mmr.rs`) maximizes `λ·rel(i) − (1−λ)·max_sim(i, selected)` using Jaccard token overlap, with a hard-drop for candidates over `duplicate_threshold = 0.85` (default `λ = 0.7`).
 
@@ -1787,9 +1791,9 @@ A ~40-field tuning struct, normally built from the KB config via `RecallConfig::
 
 #### Recall gotchas
 
-- **Recall is FAIL-OPEN by default.** `ViewerScope::Unrestricted` returns policy-scoped `Fact`/`Observation` items **unfiltered** with only a `WARN` (`:704-714`). A production caller serving a specific participant MUST set `RecallConfig.viewer` or build with `.scope_to_agent()`, or data leaks across visibility. (Unknown visibility schemes fail **closed** — see §6.6.)
-- **`reference_ts` is a per-query anchor, never a KB setting.** Recalling a historical corpus without setting it computes the temporal window around *now*, which never overlaps old data and silently disables the Phase-2 temporal channel (`:424-431`).
-- **`answer_type_boost` defaults to 1.0 (no-op) deliberately** — the naive rule measured −0.149 R@5 / −0.186 NDCG@5 because common predicted types (e.g. `measurement` for "how many") swamp top-K (`:492-500`).
+- **Recall is FAIL-OPEN by default.** `ViewerScope::Unrestricted` returns policy-scoped `Fact`/`Observation`/`Message`/`Chunk` items **unfiltered** with only a `WARN` (`:944-955`). A production caller serving a specific participant MUST set `RecallConfig.viewer` or build with `.scope_to_agent()`, or data leaks across visibility. (Unknown visibility schemes fail **closed** — see §3.6.)
+- **`reference_ts` is a per-query anchor, never a KB setting.** Recalling a historical corpus without setting it computes the temporal window around *now*, which never overlaps old data and silently disables the Phase-2 temporal channel (`:580-587`).
+- **`answer_type_boost` defaults to 1.0 (no-op) deliberately** — the naive rule measured −0.149 R@5 / −0.186 NDCG@5 because common predicted types (e.g. `measurement` for "how many") swamp top-K (`:536-540`).
 - **Debug prints.** The `RECALL_PROF` `eprintln!`s that used to ship in the hot path are now `tracing::debug!` events (`recall phase 2 sparse gate`, `recall sparse source`, `recall phase 2 source`, `recall chunk and entity-scoped search`).
 - `populate_sources` and the viewer/redaction filters run on the **small final bundle**, not the candidate set — a `populate_sources` failure is swallowed (items keep empty `sources`) rather than failing the recall.
 
@@ -1799,7 +1803,7 @@ A ~40-field tuning struct, normally built from the KB config via `RecallConfig::
 
 There is **no stored working-memory node**. Working memory is recomputed on demand by traversing `Goal → Task → Session → Messages/Facts/Entities`, so it is always current and never cached.
 
-The expander is `Goals::context(goal_id)` (`facade/goals.rs:278`):
+The expander is `Goals::context(goal_id)` (`facade/goals.rs:300`):
 
 ```
 GoalContext {
@@ -1837,24 +1841,24 @@ let wm = agent.goals().context(&gid).await?;   // Goal→Task→Session→Messag
 
 ### 6.4 Consolidation (P4) — Facts, drift & contradiction
 
-Consolidation is the heartbeat that turns accumulated Observations into bitemporal Facts. `run_cycle_with(kb, agent_id, opts, &TripleSource)` (`consolidation.rs:154`) does:
+Consolidation is the heartbeat that turns accumulated Observations into bitemporal Facts. `run_cycle_with(kb, agent_id, opts, &TripleSource)` (`consolidation.rs:168`) does:
 
 1. **Fetch unprocessed Observations** — those with no inbound `PROCESSED` edge (the idempotency anchor), capped at `DEFAULT_BATCH_SIZE = 500`.
-2. **Optional LLM triple refinement** (`:183`, `refine_triples`) when `TripleSource::Llm { alias }` is chosen; default is `SrlDep` (no LLM), which falls back to `SrlDep` on any LLM failure.
-3. **Group** by `(normalize_canonical(subject), predicate)` (`:240`).
-4. **Batched prior-Fact lookup** via `find_stale_open_facts_batched` (`:278`).
+2. **Optional LLM triple refinement** (`:215`, `refine_triples_counted`) when `TripleSource::Llm { alias }` is chosen; default is `SrlDep` (no LLM), which falls back to `SrlDep` on any LLM failure.
+3. **Group** by `(normalize_canonical(subject), predicate)` (`:281`).
+4. **Batched prior-Fact lookup** via `find_stale_open_facts_batched` (`:312`).
 5. **Collect all unique object surface forms**, embed them in one batched, chunked call (`EMBED_BATCH_CHUNK_SIZE = 64` — do not remove; larger single batches OOM the ORT BFC arena at ~1.3 GB / ~6k inputs).
 6. **Per group:**
-   - `build_clusters` (`:717`) — greedy single-pass agglomeration with running-mean centroids over sorted keys, `COSINE_THRESHOLD = 0.88`; a missing embedding becomes a singleton.
-   - `canonical_object` (`:812`) — mode over clusters, then mode over surface forms, with a recency tie-break.
+   - `build_clusters` (`:757`) — greedy single-pass agglomeration with running-mean centroids over sorted keys, `COSINE_THRESHOLD = 0.88`; a missing embedding becomes a singleton.
+   - `canonical_object` (`:852`) — mode over clusters, then mode over surface forms, with a recency tie-break.
    - **F38 contradiction** — `vote_tallies` in cluster space vs `CONTRADICTION_THRESHOLD = 0.40`.
-   - `compose_embed_text` (`:868`) — optional `[Month Year]` date prefix, doc-side only.
-7. **Single batched Fact embed + `batch_upsert_facts`** (`:463`).
+   - `compose_embed_text` (`:908`) — optional `[Month Year]` date prefix, doc-side only.
+7. **Single batched Fact embed + `batch_upsert_facts`** (`:500`).
 8. **`SUPPORTED_BY` edges** batched, each with `weight = clamp(cosine(Fact, Obs), 0, 1)` (fallback 1.0).
 9. **Per stale prior Fact:** `invalidate_fact` + `record_entity_invalidation`; `DRIFT_THRESHOLD = 4` flips `Entity.unstable = true` (F39).
 10. **`write_consolidation_cycle`** audit node with `PROCESSED`/`CREATED`/`REINFORCED`/`INVALIDATED`/`APPLIED_RULE` edges.
 
-`CycleStats` returns `{ observations_processed, facts_created, facts_reinforced, facts_invalidated, drift_alerts }`. Phase timing is logged under target `p4_prof`.
+`CycleStats` returns `{ observations_processed, facts_created, facts_reinforced, facts_invalidated, drift_alerts, triples_requested, triples_refined, triples_failed }` (the last three count `TripleSource::Llm` refinement). Phase timing is logged under target `p4_prof`.
 
 **Bitemporality.** Each Fact carries one atomic `valid_at` of `DataType::Btic` — a half-open interval `[lo, hi)`, **not** split `valid_from`/`valid_until`. Active = `[observed_at, +inf)`; invalidation closes `hi` at now. Certainty is `approximate` below `CERTAINTY_THRESHOLD = 10` supporting observations and upgrades to `definite` at ≥ 10. Recall matches validity via the `btic_overlaps(valid_at, $window)` scalar Cypher fn.
 
@@ -1914,7 +1918,7 @@ Four stdlib Locy rules are registered idempotently on open (`rules/stdlib.rs`) w
 
 Authored/induced rules follow a confidence lifecycle (`rules/lifecycle.rs`): `add_rule` validates the Locy up-front (no node created on syntax error) → `candidate@0.5`. `apply_decay_cycle` applies `confidence *= 0.95`, `missed_cycles++`, demote `<0.40`, repromote/promote `>=0.60`, and prunes `demoted|candidate` rules `>= 90d` since last scored. `record_rule_match` adds `+0.05`, resets `missed_cycles`, and promotes `candidate/demoted → active` at `>= 0.60`.
 
-`run_active_rules` (`rules/execution.rs`) runs active **and** candidate rules (candidates must run to bind and promote), skipping dedicated-sweep rules. **It must pass the UNION of all stdlib rules' params on every `query_rule` call** — uni-db evaluates all registered rules together, so an unresolved `$decay_rate` in `relevance_decay` would fail every other rule (`:69-71`). `consume_episode_patterns` computes `mean_importance` in Rust (working around uni-db #145, where a FOLD value-aggregate returns 0.0 when YIELD renames it — only COUNT is trusted in Locy FOLDs).
+`run_active_rules` (`rules/execution.rs`) runs active **and** candidate rules (candidates must run to bind and promote), skipping dedicated-sweep rules. **It must pass the UNION of all stdlib rules' params on every `query_rule` call** — uni-db evaluates all registered rules together, so an unresolved `$decay_rate` in `relevance_decay` would fail every other rule (`:66-69`). `consume_episode_patterns` computes `mean_importance` in Rust (working around uni-db #145, where a FOLD value-aggregate returns 0.0 when YIELD renames it — only COUNT is trusted in Locy FOLDs).
 
 The `Agent` also exposes the interactive Locy surface: `define_rule`, `run_rule`, `assume`, `abduce`.
 
@@ -1932,7 +1936,7 @@ The `Agent` also exposes the interactive Locy surface: `define_rule`, `run_rule`
 
 Recording failure never breaks the answer (`episode = None` on failure). The Episode's `state` JSON duplicates the question into `topic` so the embedding path picks it up. `finite_or_zero` guards a NaN coverage.
 
-`record_query_episode` is also the standalone primitive that feeds P5 — any recall consumer can call it. `Agent::answer` wires `answer_query` with a **synchronous** prompt-build closure to keep the future's captures owned (`agent.rs:374-406`).
+`record_query_episode` is also the standalone primitive that feeds P5 — any recall consumer can call it. `Agent::answer` wires `answer_query` with a **synchronous** prompt-build closure to keep the future's captures owned (`agent.rs:513-554`).
 
 ```rust
 let answer = agent.answer("what does alice like?").await?;
@@ -1949,7 +1953,7 @@ println!("{} — {} citations", answer.text, answer.citations().len());
 
 #### `nl_to_cypher.rs` (F61) — NL → read-only Cypher
 
-`translate(...)` turns a natural-language question into a read-only Cypher query for `Agent::query`. It uses a process-global LRU cache, a schema-snapshot prompt, and LLM retry. Every candidate passes `is_safe_read_only`:
+`translate(kb, nl_query, llm_alias)` turns a natural-language question into a read-only Cypher string that a caller can then run with `Agent::query` (which itself takes Cypher only and never translates). It uses a process-global LRU cache, a schema-snapshot prompt, and LLM retry. Every candidate passes `is_safe_read_only`:
 
 ```rust
 // Conservative word-boundary regex rejecting mutating keywords, even inside string literals:
@@ -1982,7 +1986,7 @@ Each subjective act that cannot be inferred from message content is a free funct
 | `assert_fact` (F33) / `invalidate_fact` (F37) | — | direct bitemporal Fact assert/close |
 | `generate_session_summary` (F59) | `llm` (abstractive) | idempotent Summary |
 
-**Bootstrap invariant:** `record_episode`/`record_action`/`create_goal`/`create_task`/`add_observation` all require the agent's `Participant` node to already exist (they fail with `UnikoError::Storage` otherwise). An embedding failure still creates the node (back-fillable) but returns the error.
+**Bootstrap invariant:** `record_episode`/`record_action`/`create_goal`/`create_task`/`add_observation` all require the agent's `Participant` node to already exist (they fail with `UnikoError::Storage` otherwise); the `Goals` creation verbs and `Session::record_action` / `observe_tool` create it first through `ensure_agent_participant`. An embedding failure still creates the node (back-fillable) but returns the error.
 
 ---
 
@@ -2000,7 +2004,7 @@ Each subjective act that cannot be inferred from message content is a free funct
 | `org:{oid}` | members of that org |
 | unknown scheme | **no one (fail-closed)** |
 
-`filter_bundle` checks **only** `Fact` and `Observation` items (batch `fetch_visibilities`); every other node type passes through untouched — recall does not hide structural nodes. `filter_redacted` runs on *every* recall (redaction ≠ access control): it drops `redacted:`-scheme Facts/Observations and `redacted`-flag Messages/Chunks. Both recompute `total_tokens = items.len() * 50`.
+`filter_bundle` checks **only** `Fact`, `Observation`, `Message` and `Chunk` items (batch `fetch_visibilities`; a Message's Chunks inherit its `visibility`); every other node type passes through untouched — recall does not hide structural nodes. `filter_redacted` runs on *every* recall (redaction ≠ access control): it drops `redacted:`-scheme Facts/Observations and `redacted`-flag Messages/Chunks. Both recompute `total_tokens` as the sum of the kept items' `token_count`.
 
 An unrecognized visibility string like `secret:42` locks a claim down permanently — it can never accidentally widen access.
 
@@ -2008,14 +2012,14 @@ An unrecognized visibility string like `secret:42` locks a claim down permanentl
 
 ### 6.11 Invariants & gotchas summary
 
-- **Fail-open recall.** Unscoped reads default to `ViewerScope::Unrestricted`; scope to a viewer (`.scope_to_agent()` or `Scope::default().as_viewer(v)`) before serving a specific participant, or `Fact`/`Observation` visibility is not enforced.
+- **Fail-open recall.** Unscoped reads default to `ViewerScope::Unrestricted`; scope to a viewer (`.scope_to_agent()` or `Scope::default().as_viewer(v)`) before serving a specific participant, or `Fact`/`Observation`/`Message`/`Chunk` visibility is not enforced.
 - **Streamed vs observed turns.** `submit`/`submit_source` do **not** advance the Session's cross-turn context and are not session-linked; only `observe()` preserves conversational fidelity and links attachments. `await flush()` before a recall that must see streamed turns, and use one path per session.
 - **Multi-query is opt-in and usually a loss** (−2.1pt / 3× latency). Keep `query_variants` empty (keywords-only) unless you have evidence otherwise.
 - **`reference_ts` is per-query** — never a KB setting; forgetting it silently disables the temporal channel on historical corpora.
 - **Consolidation embed batching is chunked at 64** to dodge the ORT BFC arena OOM — do not remove `EMBED_BATCH_CHUNK_SIZE`.
 - **`run_active_rules` must pass the union of all stdlib params** every call, or one unresolved param fails every rule.
 - **Shutdown ordering:** drop all `Agent`/`Session` clones before `Uniko::shutdown`, or the pipeline never drains.
-- **Leftover `RECALL_PROF` stderr prints** ship in the recall hot path (three sites).
+- **No stderr prints in the recall hot path:** the old `RECALL_PROF` `eprintln!`s are now `tracing::debug!` events.
 - Facade re-exports surface `uniko_store` types directly (`FactUpsert`, `*IngestResult`, `FactUpsertInput`, …) so the public API names no un-nameable types.
 
 ---
@@ -2110,9 +2114,9 @@ The returned `PromotionReport { created, reinforced, promoted }` tallies new pro
 
 ### 7.5 Where lifecycle classification happens: `upsert_procedure`
 
-`upsert_procedure` (`procedures.rs:276-347`) is the heart of F41. It is the only place the sequence-count path can promote `candidate → active`.
+`upsert_procedure` (`procedures.rs:276-369`) is the heart of F41. It is the only place the sequence-count path can promote `candidate → active`.
 
-**Deterministic id.** `stable_procedure_id(agent_id, a, b)` = `stable_hex64("proc", agent \0 a \0 b)` (`procedures.rs:356-360`). The hasher is fed in order **agent, then a, then b**, NUL-separated. This is order-sensitive on purpose: `(a → b)` and `(b → a)` hash to distinct ids, and the NUL prevents aliasing across component boundaries. Do not "simplify" the ordering — it would break every persisted id.
+**Deterministic id.** `stable_procedure_id(agent_id, a, b)` = `stable_hex64("proc", agent \0 a \0 b)` (`procedures.rs:376-384`). The hasher is fed in order **agent, then a, then b**, NUL-separated. This is order-sensitive on purpose: `(a → b)` and `(b → a)` hash to distinct ids, and the NUL prevents aliasing across component boundaries. Do not "simplify" the ordering — it would break every persisted id.
 
 **Status decision** (`procedures.rs:291-305`), given `support_count` (the rule's `success_count`) and the existing snapshot from `read_procedure_snapshot`:
 
@@ -2130,7 +2134,7 @@ Demotion and re-promotion are **owned exclusively** by `record_procedure_use` �
 
 **Effectiveness.** `effectiveness = success / (success + failure)`, defaulting to **1.0** when the denominator is 0 (a fresh procedure, `procedures.rs:311-316`). Note this default is asymmetric with `record_procedure_use`, which defaults effectiveness to **0.0** when it has no uses (`procedures.rs:205`). A never-used but promoted `active` procedure therefore reads effectiveness `1.0`.
 
-**Write.** `kb.merge_node(PROCEDURE, …)` (idempotent upsert) persists `name = "{a} → {b}"`, a human description, `precondition_rule = "last_action_type={action_a}"`, status, counters, effectiveness, `created_at` (only when new), and `last_used_at`.
+**Write.** `kb.merge_node(PROCEDURE, …)` (idempotent upsert) persists `name = "{a} → {b}"`, a human description, `precondition_rule = "last_action_type={action_a}"`, status, counters, effectiveness, `created_at` and an `embedding` of the description (only when new; a failed embed stores the node without one, reachable by `match_procedures` but not recall), and `last_used_at` (`procedures.rs:338-366`).
 
 ### 7.6 F42 — `record_procedure_use` and the demote/repromote state machine
 
@@ -2167,7 +2171,7 @@ let matches = match_procedures(&kb, &state).await?; // Vec<MatchedProcedure>
 
 `match_procedures` (`procedures.rs:242-259`) fetches all `ACTIVE` procedures (`fetch_procedures_by_status` → `MATCH (p:Procedure) WHERE p.status=$st … ORDER BY eff DESC`, `repository/procedures.rs:33-61`) and keeps those whose precondition is satisfied by `state`.
 
-The MVP matcher, `precondition_matches` (`procedures.rs:368-386`):
+The MVP matcher, `precondition_matches` (`procedures.rs:390-408`):
 
 - Split `precondition_rule` on `,`; each clause must be `key=value`.
 - A clause with no `=` **fails closed** (the whole match fails).
@@ -2257,7 +2261,7 @@ Both entry points are called from `uniko-memory`'s consolidation worker (`pipeli
 - `run_topic_sweep` → `detect_topics_once` (**global**, global throttle),
 - then decay/rule-execution/session-maintenance sweeps.
 
-All cortex sweeps are cadence-gated by `cortex_min_interval`; **all failures are logged and dropped** — a cortex error never breaks consolidation. The `agent_id` label on the P6 topic metric is only the *trigger* label; the sweep itself is global (`consolidation_worker.rs:466-503`). The metric surface (registered in `uniko-pipes::metrics`) exposes `uniko.cortex.{procedure_cycles_total, procedure_cycle_ms, procedures_promoted_total, topic_cycles_total, topic_cycle_ms, topics_created_total}`.
+All cortex sweeps are cadence-gated by `cortex_min_interval`; **all failures are logged and dropped** — a cortex error never breaks consolidation. The `agent_id` label on the P6 topic metric is only the *trigger* label; the sweep itself is global (`consolidation_worker.rs:471-504`). The metric surface (registered in `uniko-pipes::metrics`) exposes `uniko.cortex.{procedure_cycles_total, procedure_cycle_ms, procedures_promoted_total, topic_cycles_total, topic_cycle_ms, topics_created_total}`.
 
 ### 7.11 How learned knowledge re-enters recall
 
@@ -2309,11 +2313,11 @@ uniko-py / uniko-cuda / uniko-metal   (PyO3 wheels — import uniko)
    uni-db  +  uni-xervo   (embedded graph+vector+FTS+Locy engine; model runtime)
 ```
 
-`uniko-api/src/lib.rs` is a single wildcard re-export (`pub use uniko_cortex::*`) plus `pub mod tools;`. `tools.rs` is a hand-curated, explicit re-export of ~55 intent types from `uniko_memory`. The negative surface — what must *never* leak — is enforced at compile time: nine `compile_fail` doctests in `tools.rs` prove that `KnowledgeBase`, `PipelineSystem`, `IngestMessage`, `Document`, `PdfSource`, the free functions `create_goal`/`working_memory`, and internal result types like `QueryOutcome`/`GeneratedAnswer` are unreachable through `uniko_api::tools`. A positive guard, `tests/surface.rs::facade_entry_points_are_exported`, asserts ~45 facade types stay reachable.
+`uniko-api/src/lib.rs` is a single wildcard re-export (`pub use uniko_cortex::*`) plus `pub mod tools;`. `tools.rs` is a hand-curated, explicit re-export of ~140 intent types and functions from `uniko_memory`. The negative surface — what must *never* leak — is enforced at compile time: nine `compile_fail` doctests in `tools.rs` prove that `KnowledgeBase`, `PipelineSystem`, `IngestMessage`, `Document`, `PdfSource`, the free functions `create_goal`/`working_memory`, and internal result types like `QueryOutcome`/`GeneratedAnswer` are unreachable through `uniko_api::tools`. A positive guard, `tests/surface.rs::facade_entry_points_are_exported`, asserts ~54 facade types stay reachable.
 
 The practical rule for a Rust consumer: **depend on `uniko-api` and import from `uniko_api::tools`.** The quickstart examples in the repo import from `uniko_memory` directly (that also works and exposes the same types), but `uniko-api::tools` is the sanctioned lean surface.
 
-The `tools` module re-exports (from `crates/uniko-api/src/tools.rs`):
+The `tools` module re-exports, among others (from `crates/uniko-api/src/tools.rs`):
 
 | Category | Types / functions |
 |---|---|
@@ -2325,7 +2329,7 @@ The `tools` module re-exports (from `crates/uniko-api/src/tools.rs`):
 | Results | `AtomicIngestResult`, `ObserveResult`, `ArtifactIngestResult`, `PdfIngestResult`, `DeletionReport` |
 | Views | `MessageView`, `ArtifactView` |
 | Reasoning | `AssumeBuilder`, `AbductionResult`, `AbducedModification`, `DerivationTree`, `DerivationNode` |
-| Policy | `policy::Viewer`, `policy::visibility_admits` |
+| Policy | `Viewer`, `Visibility`, `policy::visibility_admits` |
 | Config / primitives | `UnikoConfig`, `EmbeddingConfig`, `UnikoError`, `NodeId`, `Value`, `Record` |
 
 ### 8.2 The `Uniko` handle and `UnikoBuilder`
@@ -2351,7 +2355,7 @@ let memory = Uniko::builder()
     .build().await?;
 ```
 
-`UnikoBuilder` chain methods: `.path(p)` / `.in_memory()`, `.embedding(EmbeddingConfig)`, `.llm(LlmSpec)`, `.raw_config(UnikoConfig)`, `.streaming(bool)`, `.scope_to_agent()` / `.scope(RecallScope)`, `.extractor(Arc<dyn ModalityExtractor>)`, and the terminal `.build().await`. Opening registers the four stdlib Locy rules idempotently.
+`UnikoBuilder` chain methods: `.path(p)` / `.in_memory()`, `.embedding(EmbeddingConfig)`, `.llm(LlmSpec)`, `.raw_config(UnikoConfig)`, `.streaming(bool)`, `.scope_to_agent()` / `.scope(RecallScope)`, `.extractor(Arc<dyn ModalityExtractor>)` / `.model_extractor(ModelExtractor)`, the others listed in §6.1, and the terminal `.build().await`. Opening registers the four stdlib Locy rules idempotently.
 
 `memory.agent(id) -> Agent` mints an agent-scoped handle. `memory.config()` returns the effective `UnikoConfig`. `memory.purge()` clears the store. `memory.shutdown().await` drains the pipeline and closes the DB.
 
@@ -2379,7 +2383,7 @@ session.observe(
 ).await?;   // returns ObserveResult, synchronous, read-after-write
 ```
 
-`observe` runs the **atomic per-message ingest** (`ingest_message_atomic`): all NLP/NER/observation extraction happens before a single transaction that writes the `Message` + edges + chunks + entities + `MENTIONS` + observations, committing once. It advances the session's cross-turn context (pronoun resolution, the `NEXT` chain) and links attachments. The Rust `ObserveResult` (`facade/session.rs:276-282`) is **not** flat — it is `{ message: AtomicIngestResult, attachments: Vec<IngestOutcome> }`, so you reach `result.message.message_node_id`, `result.message.chunk_node_ids`, `result.message.extracted_entities: Vec<(i64, String)>`, `result.message.extracted_observations`, etc. The *flattened* view (`message_node_id`, `chunk_node_ids`, `session_node_id`, `sender`, `extracted_entities`, `extracted_observations`, `attachment_count`) is the Python wrapper `PyObserveResult` (`bindings/uniko-py/src/outputs.rs:307-333`).
+`observe` runs the **atomic per-message ingest** (`ingest_message_atomic`): all NLP/NER/observation extraction happens before a single transaction that writes the `Message` + edges + chunks + entities + `MENTIONS` + observations, committing once. It advances the session's cross-turn context (pronoun resolution, the `NEXT` chain) and links attachments. The Rust `ObserveResult` (`facade/session.rs:649-662`) is **not** flat — it is `{ message: AtomicIngestResult, attachments: Vec<IngestOutcome>, tool_calls: Vec<ToolCallResult>, diagnostics: Vec<Diagnostic> }`, so you reach `result.message.message_node_id`, `result.message.chunk_node_ids`, `result.message.extracted_entities: Vec<(i64, String)>`, `result.message.extracted_observations`, etc. The *flattened* view (`message_node_id`, `chunk_node_ids`, `session_node_id`, `sender_node_id`, `sender_id`, `extracted_entities`, `extracted_observations`, `attachments`, `tool_calls`, `diagnostics`) is the Python wrapper `PyObserveResult` (`bindings/uniko-py/src/outputs.rs:456-489`).
 
 The streaming path — `session.submit(Turn)` / `session.submit_source(IngestSource)` then `session.flush()` — requires `.streaming(true)` on the builder. It is fire-and-forget onto the pipeline.
 
@@ -2396,7 +2400,7 @@ let answer = agent.answer("what pet does alice have?").await?;
 println!("{}", answer.text);
 for src in answer.citations() { println!("  {src:?}"); }
 
-// 3. query   -> Vec<Record> (read-only Cypher; NL->Cypher via translate happens under query())
+// 3. query   -> Vec<Record> (read-only Cypher only; NL->Cypher is the separate nl_to_cypher::translate)
 let rows = agent.query("MATCH (m:Message) RETURN count(m) AS n").await?;
 ```
 
@@ -2413,7 +2417,7 @@ let ctx = agent.recall_in(
 
 `Agent` also carries the Locy surface (`define_rule`, `run_rule`, `assume`, `abduce`), goal/data sub-handles (`agent.goals()`, `agent.data()`), and lifecycle verbs (`delete_session`, `forget_participant`).
 
-> **Recall is FAIL-OPEN by default.** `ViewerScope::Unrestricted` returns policy-scoped `Fact`/`Observation` items **unfiltered** (only a `WARN` is logged). A production caller serving a specific participant **must** either build with `.scope_to_agent()` or pass `Scope::default().as_viewer(v)` on the `_in` variant, or Fact/Observation data leaks across visibility boundaries. Unknown visibility schemes, by contrast, fail *closed*.
+> **Recall is FAIL-OPEN by default.** `ViewerScope::Unrestricted` returns policy-scoped `Fact`/`Observation`/`Message`/`Chunk` items **unfiltered** (only a `WARN` is logged). A production caller serving a specific participant **must** either build with `.scope_to_agent()` or pass `Scope::default().as_viewer(v)` on the `_in` variant, or that data leaks across visibility boundaries. Unknown visibility schemes, by contrast, fail *closed*.
 
 ### 8.4 The `ContextBundle` / `Answer` shapes
 
@@ -2426,6 +2430,7 @@ ContextBundle {
     phase1_only: bool,        // cascade exited at Phase 1
     phase2_only: bool,
     coverage: f64,
+    diagnostics: Vec<Diagnostic>,  // what each best-effort stage did
 }
 
 RecallItem {
@@ -2434,23 +2439,27 @@ RecallItem {
     score: f64,
     content: String,
     sources: Vec<RecallSource>,  // provenance lineage stamped from graph edges
+    token_count: usize,
+    // + category, source_id, revision_id, context, address, position
 }
 
 RecallSource =
     Message   { message_id, chunk_id? }
   | Attachment{ message_id, artifact_id, chunk_id? }
   | Document  { artifact_id, chunk_id? }
+  | Session   { session_id, chunk_id? }
+  | Tool      { call_id, tool_name?, artifact_id, chunk_id? }
 ```
 
-`RecallKind` maps to a `RecallTier` weight during fusion: `Semantic`(Fact/Topic)=1.0, `Procedural`=0.9, `Episodic`(Episode)=0.7, `KnowledgeBase`(Observation/Chunk)=0.5, `Provenance`(Message/Other)=0.4. (There is no `Artifact` `RecallKind` — the enum is Chunk/Observation/Fact/Procedure/Topic/Episode/Message/Other, `recall/mod.rs:88-97`.)
+`RecallKind` maps to a `RecallTier` weight during fusion: `Semantic`(Fact/Topic)=1.0, `Procedural`=0.9, `Episodic`(Episode)=0.7, `KnowledgeBase`(Observation/Chunk)=0.5, `Provenance`(Message/Other)=0.4. (There is no `Artifact` `RecallKind` — the enum is Chunk/Observation/Fact/Procedure/Topic/Episode/Message/Other, `recall/mod.rs:70-87`.)
 
 `answer` returns:
 
 ```
 Answer {
     text: String,
-    model: String,
-    input_tokens, output_tokens,
+    model: Option<String>,
+    input_tokens, output_tokens,     // Option<u64>
     recorded_episode: Option<...>,   // the query Episode fed to P5
     context: ContextBundle,          // the evidence the answer was grounded in
     // citations() -> Vec<&RecallSource>
@@ -2476,7 +2485,7 @@ let wm: uniko_api::tools::GoalContext = agent.goals().context(&gid).await?;
 
 Reads: `all` / `active` / `planned` / `completed` / `in_phase` / `get` / `tasks` / `tasks_in` / `tasks_of` / `context`. Transitions: `start` / `abandon` / `complete` / `set_status` / `start_task` / `block_task` / `complete_task`. Creation: `create` / `create_task`.
 
-> Goal/Task phases (`GoalPhase::{Planned,Active,Completed,Abandoned}`, `TaskPhase::{...,Blocked}`) are derived from **free-form** status strings via a fixed match table; an unrecognized status defaults to `Active`. The recording tools (`create_goal`, `record_episode`, etc.) also **require the agent's `Participant` to already exist** — bootstrap it once (e.g. via a first `observe`).
+> Goal/Task phases (`GoalPhase::{Planned,Active,Completed,Abandoned}`, `TaskPhase::{...,Blocked}`) are derived from **free-form** status strings via a fixed match table; an unrecognized status defaults to `Active`. The free recording functions (`create_goal`, `record_episode`, etc.) also **require the agent's `Participant` to already exist**; the facade's `goals().create`/`create_task`, `Session::record_action` and `observe_tool` create it first, and `Agent::register` does so explicitly.
 
 ### 8.6 End-to-end Rust example
 
@@ -2527,7 +2536,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-uniko-api = "0.5.1"
+uniko-api = "0.6.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -2584,7 +2593,7 @@ ans  = await uni.agent("a").answer("where does alice like to hike?")
 print(ans.text, ans.citations())
 ```
 
-`LlmSpec` static constructors: `openai(alias, model_id, base_url=None)`, `openai_with_key_env(alias, model_id, key_env, base_url=None)`, `llamacpp(alias, model_id, base_url, key_env=None)` (`bindings/uniko-py/src/facade.rs:294-337`).
+`LlmSpec` static constructors: `openai(alias, model_id, base_url=None)`, `openai_with_key_env(alias, model_id, key_env, base_url=None)`, `llamacpp(alias, model_id, base_url, key_env=None)` (`bindings/uniko-py/src/facade.rs:1009-1049`).
 
 > `llamacpp` is a remote provider, so open-weights generation works from the **base CPU wheel** — nothing is compiled in and `base_url` points at a `llama-server` you run yourself. Pass `key_env` only when that server was started with `--api-key`.
 
@@ -2608,7 +2617,7 @@ print(ans.text, ans.citations())
 
 **Frozen output wrappers** (immutable snapshots, `__repr__` + `from_rust`): `RecallSource`, `RecallItem`, `ContextBundle` (`__len__`), `Answer` (`citations()`), `ObserveResult`, `DeletionReport`, `MessageView`, `ArtifactView`, `GoalView`, `TaskView`, `GoalContext`, `IngestOutcome`, `AbductionResult` (`__len__`).
 
-**Exceptions** — `UnikoError` (base, carries a `.kind` string attribute) plus `ConfigError`, `LlmError`, `TimeoutError`, `ConflictError`, `UnsupportedError`. The five dedicated subclasses map from the corresponding `UnikoError` variants; the seven storage-domain variants (Storage/Search/Schema/Pipeline/Locy/Embedding/Internal) fold into the base — always distinguishable via `.kind`.
+**Exceptions** — `UnikoError` (base, carries a `.kind` string attribute) plus `ConfigError`, `LlmError`, `UnikoTimeoutError` (the old `uniko.TimeoutError` name still resolves, with a deprecation warning), `ConflictError`, `IdConflictError`, `UnsupportedError`, `ReadinessError`, `DegradedError` and `IncompatibleStoreError`. The dedicated subclasses map from the corresponding `UnikoError` variants (`bindings/uniko-py/src/errors.rs`); the seven storage-domain variants (Storage/Search/Schema/Pipeline/Locy/Embedding/Internal) fold into the base — always distinguishable via `.kind`.
 
 **The Pydantic overlay** — `uniko.models.*` — a pure-Python layer that never clobbers the native top-level names (`uniko.ContextBundle` stays the native class; `uniko.models.ContextBundle` is the Pydantic model). It adds validation, JSON-schema/serialization (FastAPI-ready), and "typed handles" that auto-accept specs and auto-return models:
 
@@ -2634,7 +2643,7 @@ Input specs (`GoalSpec`/`TaskSpec`/`ScopeSpec`/`IngestSourceSpec`/`TurnSpec`/`Ll
 - **Binary payloads go through `Data.artifact_bytes`.** `Value::Bytes` cannot round-trip through a Cypher `RETURN` (a uni-db limitation), so `artifact_bytes(id)` reads the blob store directly. Do not expect bytes to come back through `query`.
 - **Pass tz-aware datetimes.** `py_to_datetime` uses Python's `.timestamp()`; a tz-naive datetime is interpreted in the *local* timezone per CPython.
 - **Graph elements render as plain dicts.** `Node`/`Edge`/`Path` values from `query`/`run` come back as `{id, labels, properties}` / `{id, type, start, end, properties}` / `{nodes, edges}` — not dedicated classes.
-- **Scope visibility (`as_viewer`) is deferred in Python** — only session/participant/time dimensional filters exist on `PyScope`; instance-level `scope_to_agent` covers the common visibility case.
+- **Scope visibility is per call in Python too** — `PyScope` has `as_participant(id)` and `as_viewer(Viewer)` beside the session/participant/time filters (`bindings/uniko-py/src/scope.rs:144-155`); instance-level `scope_to_agent` covers the common case.
 
 ### 8.10 The three wheel variants and feature flags
 
@@ -2642,9 +2651,9 @@ Input specs (`GoalSpec`/`TaskSpec`/`ScopeSpec`/`IngestSourceSpec`/`TurnSpec`/`Ll
 
 | Wheel | Platform | `uniko-api` features | GPU stack |
 |---|---|---|---|
-| `uniko` (base) | Linux x86_64/aarch64, macOS arm64, Windows x64 | `[onnx]` | none (CPU ONNX Runtime, statically bundled) |
-| `uniko-cuda` | Linux x86_64 | `[onnx, gpu-cuda, candle]` | ONNX Runtime CUDA EP + candle CUDA kernels |
-| `uniko-metal` | macOS arm64 | `[onnx, gpu-metal, candle]` | ONNX Runtime CoreML + candle Metal kernels |
+| `uniko` (base) | Linux x86_64/aarch64, macOS arm64, Windows x64 | `[onnx, pdf-ocr]` | none (CPU ONNX Runtime, statically bundled) |
+| `uniko-cuda` | Linux x86_64 | `[onnx, pdf-ocr, gpu-cuda, candle]` | ONNX Runtime CUDA EP + candle CUDA kernels |
+| `uniko-metal` | macOS arm64 | `[onnx, pdf-ocr, gpu-metal, candle]` | ONNX Runtime CoreML + candle Metal kernels |
 
 All wheels are `abi3` for CPython ≥ 3.10 — one wheel per platform spans every supported minor version. GPU wheels resolve host CUDA/cuDNN at load time rather than bundling them.
 
@@ -2694,7 +2703,7 @@ Beyond `observe` (which *infers* entities/observations from message content), th
 | `generate_session_summary` (F59) | `Session::summarize` | extractive by default; LLM-abstractive behind the `llm` feature |
 | `answer_query` / `record_query_episode` | `Agent::answer` | recall + generator closure + opt-in query `Episode` (feeds P5 from production traffic) |
 
-All the recording tools require the agent's `Participant` to already exist. Embedding failure still creates the node (back-fillable) but returns the error.
+All the recording free functions require the agent's `Participant` to already exist (the `Goals` creation verbs, `Session::record_action` and `observe_tool` create it first). Embedding failure still creates the node (back-fillable) but returns the error.
 
 **Locy reasoning** is reachable through `Agent` in both languages:
 
@@ -2710,7 +2719,7 @@ rows = await agent.assume(
 
 - **`reference_ts` is a per-query anchor, never a KB setting.** Recalling a historical corpus without setting a reference timestamp computes the temporal window around *now*, which never overlaps old data and silently disables the Phase-2 temporal channel. (In the Rust `RecallConfig` this is `reference_ts`; the LME bench sets it to the question date.)
 - **Multi-query variant reformulation is opt-in.** The default is keywords-only. Enabling all four variants measured −2.1 pt evidence and 3× latency on LoCoMo — don't turn it on expecting a win.
-- **The reranker is on by default** (`cross-encoder/ms-marco-MiniLM-L-6-v2`, top_n=50, ~50–100 ms/query). Disable via `RerankerConfig { enabled: false, .. }` if latency matters more than precision. (The config *doc comment* saying "disabled by default" is stale — the `Default` impl enables it. Trust the code.)
+- **The reranker is on by default** (`cross-encoder/ms-marco-MiniLM-L-6-v2`, top_n=50, ~50–100 ms/query). Disable via `RerankerConfig { enabled: false, .. }` if latency matters more than precision. (The `RerankerConfig` doc comment at `config.rs:463` and the `UnikoConfig::reranker` field comment at `:858` still say "disabled by default" — stale; `RerankerConfig::default` (`:529-542`) sets `enabled: true`. Trust the code.)
 - **Embedding dimension is fixed at DB creation** — it's baked into the on-disk vector index. Switching embedders (e.g. to a 1024-d model) requires a fresh KB; `validate()` catches zero dims but not a model/dimension mismatch, which the open-time compatibility check refuses with `UnikoError::IncompatibleStore` (see *Store compatibility (#66)*).
 - **The negative-surface guards are the API contract.** If you extend `uniko-api::tools`, the nine `compile_fail` doctests and `tests/surface.rs` will break on drift — treat them as load-bearing, not incidental.
 - **Not yet shipped** (do not build against): HTTP/MCP server, CLI, cross-agent sharing, rule induction, MCTS planning. The Python SDK is alpha and its API may change before 1.0.
@@ -2725,13 +2734,14 @@ uniko ships with its own measurement crate — `crates/uniko-bench` (`publish = 
 2. **What does a query cost** in LLM tokens/USD, and how long does it take (recall latency vs generation latency)?
 3. **Where does write-path time go** during ingest, so uni-db and NLP regressions can be isolated into minimal repros and filed upstream?
 
-The crate is **CPU-by-default** (`features = default = []`) so `cargo check/clippy/nextest --workspace` builds on CUDA-less CI. GPU is opt-in via `--features gpu-cuda` / `gpu-metal`, which `crates/uniko-bench/run.sh` supplies along with the ORT CUDA execution provider, cuDNN-13, and a linker shim. It defines **eleven `[[bin]]` targets**: two full benchmark harnesses, a Cypher console, an NLP comparison + parity pair, and five write-path microbenches.
+The crate is **CPU-by-default** (`features = default = []`) so `cargo check/clippy/nextest --workspace` builds on CUDA-less CI. GPU is opt-in via `--features gpu-cuda` / `gpu-metal`, which `crates/uniko-bench/run.sh` supplies along with the ORT CUDA execution provider, cuDNN-13, and a linker shim. It defines **twelve `[[bin]]` targets**: two full benchmark harnesses, a Cypher console, the schema exporter, an NLP comparison + parity pair, the tool-output recall bench, and five write-path microbenches.
 
 | Binary | Kind | Purpose |
 | --- | --- | --- |
 | `uniko-bench` | Harness | LoCoMo10 accuracy + cost + latency |
 | `longmemeval-bench` | Harness | LongMemEval retrieval + judge |
 | `uniko-cypher` | Tool | Cypher console over an ingested KB |
+| `export-schema` | Tool | Writes the `config/schema.json` snapshot from the code schema |
 | `nlp-compare` | Tool | One NLP preset against gold labels: NER, POS, dialogue act, gate, latency |
 | `tool-recall` | Tool | Recall and the read tools on answers that live in agent tool output |
 | `nlp-parity` | Tool | A/B in-crate NLP decode vs xervo |
@@ -2760,7 +2770,7 @@ QuestionCategory          category #
 
 #### Control flow
 
-The per-conversation loop (`main.rs:299-512`) is the spine of the whole harness:
+The per-conversation loop (`main.rs:299-515`) is the spine of the whole harness:
 
 ```
 reject_retired_flags(argv)              # migration errors before clap
@@ -2768,22 +2778,22 @@ reject_retired_flags(argv)              # migration errors before clap
   → data::load_locomo → filter by --conversations / --categories
   → UnikoConfig::default() + bench_cfg.apply_to_uniko_config    (:214)
   → build_catalog_specs
-  → SharedRuntime::build                                         (:234)   ← ONE xervo runtime
+  → SharedRuntime::build                                         (:233)   ← ONE xervo runtime
   → load Pricing + open EventWriter
   for each conversation:
       parse_sessions
       → open_kb_with_runtime(kb_dir, config, shared_runtime)
-      → reuse-or-ingest      (reuse_existing checked BEFORE open, :321)
+      → reuse-or-ingest      (reuse_existing checked BEFORE open, :324)
       → run_post_ingest_sweep    (P4 consolidation + P5 procedures + P6 topics)
       → ensure_bench_agent
       for each question:
           resolve_evidence → run_query → token_f1 → llm_judge (skip Adversarial)
           → write Query event (answer_cost + judge_cost)
           → record_query_episode      (feeds P5; f1 as importance)
-      shutdown_kb + checkpoint write_json_with_pricing    (aggregate :506, checkpoint write :508)
+      shutdown_kb + checkpoint write_json_with_pricing    (aggregate :509, checkpoint write :511)
 ```
 
-Two structural details matter. First, the **shared `ModelRuntime`** (`main.rs:234`) is built once and passed to every per-conversation KB so N conversations reuse one set of ONNX sessions instead of OOMing an 8 GB GPU. Second, the **per-conversation checkpoint** (`write_json_with_pricing`) is written after each conversation completes, so a `SIGKILL` mid-run preserves finished conversations — the checkpoint-batch discipline the project follows for all long jobs.
+Two structural details matter. First, the **shared `ModelRuntime`** (`main.rs:233`) is built once and passed to every per-conversation KB so N conversations reuse one set of ONNX sessions instead of OOMing an 8 GB GPU. Second, the **per-conversation checkpoint** (`write_json_with_pricing`) is written after each conversation completes, so a `SIGKILL` mid-run preserves finished conversations — the checkpoint-batch discipline the project follows for all long jobs.
 
 `RecallConfig` is derived from `kb.config()` via `RecallConfig::from_uniko_config` (`query.rs:100`), so the bench honors the reranker/recall knobs set at ingest rather than falling back to `RecallConfig::default()`.
 
@@ -2793,7 +2803,7 @@ Three metrics run per question (`crates/uniko-bench/src/eval.rs`):
 
 - **Token-F1** — the original LoCoMo metric. `token_f1` (`eval.rs:21`) dispatches on category: Porter-stemmed bag-of-words F1 for the common case (lowercase, strip punctuation, drop articles `a/an/the/and`, harmonic mean of precision/recall); multi-hop splits the gold answer on commas and averages the per-sub-answer F1; adversarial is binary over a negation-phrase whitelist that accepts both past-participle ("not mentioned") and verb-form ("does not mention") abstentions.
 - **Evidence hit-rate** — `evidence_hit` (`eval.rs:177`) is a two-stage retrieval metric: build three fingerprints per evidence text (head-50 chars / skip-first-word / middle-slice, all UTF-8-boundary-safe via `floor/ceil_char_boundary`), substring-match against recalled contents, then a gold-answer word-boundary fallback that fires only when zero evidence matched and the gold length ≥ 4.
-- **LLM judge** — `llm_judge_with_usage` (`eval.rs:313`; the verbatim prompt `format!` begins at `eval.rs:327`) runs the **verbatim Mem0 CORRECT/WRONG prompt** so uniko's numbers are directly comparable to published Mem0 figures. `parse_mem0_judge_label` prefers the JSON `label` field, then last-occurrence `CORRECT/WRONG`, defaulting to `WRONG` on ambiguity. Adversarial questions are excluded from the judge (`main.rs:395`) and scored only by the negation whitelist.
+- **LLM judge** — `llm_judge_with_usage` (`eval.rs:313`; the verbatim prompt `format!` begins at `eval.rs:327`) runs the **verbatim Mem0 CORRECT/WRONG prompt** so uniko's numbers are directly comparable to published Mem0 figures. `parse_mem0_judge_label` prefers the JSON `label` field, then last-occurrence `CORRECT/WRONG`, defaulting to `WRONG` on ambiguity. Adversarial questions are excluded from the judge (`main.rs:398`) and scored only by the negation whitelist.
 
 #### Cost model
 
@@ -2803,11 +2813,11 @@ Three metrics run per question (`crates/uniko-bench/src/eval.rs`):
 - `total_judge_cost_usd` — **bench-only evaluator overhead**.
 - `total_query_cost_usd` (answer + judge) is retained but **deprecated** — never use it for headline numbers.
 
-Pricing (`crates/uniko-bench/src/pricing.rs`) reads `pricing.csv` into `Rates { input_per_m, output_per_m, embedding_per_m: Option<f64> }`. A blank CSV cell is `None`, never a fabricated zero; unknown models warn once. Embedding tokens are **estimated as `chars/4`** because uni-db's `xervo.embed()` discards the provider usage struct (`events.rs:8`, `ingest.rs:272`) — treat embedding cost as approximate, and note it is nonzero only for remote embedders (local models are `$0` by construction).
+Pricing (`crates/uniko-bench/src/pricing.rs`) reads `pricing.csv` into `Rates { input_per_m, output_per_m, embedding_per_m: Option<f64> }`. A blank CSV cell is `None`, never a fabricated zero; unknown models warn once. Embedding tokens are **estimated as `chars/4`** because uni-db's `xervo.embed()` discards the provider usage struct (`events.rs:9`, `ingest.rs:276`) — treat embedding cost as approximate, and note it is nonzero only for remote embedders (local models are `$0` by construction).
 
 Two cost gotchas are load-bearing:
 
-- Pricing keys are HF model ids, but `run_query` sets `answer_model` to the *alias* (`llm/gen`); `main.rs:388` substitutes the real `gen_model_id` back before the cost lookup — forget it and costs silently read `$0`.
+- Pricing keys are HF model ids, but `run_query` sets `answer_model` to the *alias* (`llm/gen`); `main.rs:392` substitutes the real `gen_model_id` back before the cost lookup — forget it and costs silently read `$0`.
 - `gemini-3.1-pro-preview` **thoughts-tokens are not captured** (uni-xervo drops `thoughtsTokenCount`); `pricing.csv` warns the real Vertex bill may be **5–50× the reported cost**. The `$3.55` headline understates true reasoning-judge spend.
 
 ---
@@ -2828,12 +2838,12 @@ LmeQuestionType          code (via as_str)
 
 Abstention questions carry an `_abs` suffix. Structurally the LME harness (`longmemeval_main.rs`) differs from LoCoMo in two ways:
 
-- **Items run concurrently** via `stream::for_each_concurrent(question_concurrency)` (`:198`), each holding its own KB over the shared runtime.
-- **Within an item, sessions ingest concurrently** via `buffer_unordered(session_concurrency)` (`ingest.rs:246`) with atomic counters and a `Mutex<EvidenceMap>`. Pronoun resolution stays causal *within* a session — concurrency is across sessions, not turns.
+- **Items run concurrently** via `stream::for_each_concurrent(question_concurrency)` (`:203`), each holding its own KB over the shared runtime.
+- **Within an item, sessions ingest concurrently** via `buffer_unordered(session_concurrency)` (`longmemeval/ingest.rs:250`) with atomic counters and a `Mutex<EvidenceMap>`. Pronoun resolution stays causal *within* a session — concurrency is across sessions, not turns.
 
 Because per-turn timing differs (LoCoMo ingests a conversation single-threaded in a sequential turn loop; LME ingests sessions concurrently), **per-turn ms is not comparable across the two harnesses**.
 
-The critical LME correctness detail is `reference_ts = question_date` (`query.rs:70`): setting the recall temporal anchor to ask-time (not wall-clock) lets the Phase-2 temporal channel resolve "last May" against a corpus that is two years old. Without it the temporal window centers on `now`, never overlaps old data, and silently disables the channel.
+The critical LME correctness detail is `reference_ts = question_date` (`longmemeval/query.rs:70`): setting the recall temporal anchor to ask-time (not wall-clock) lets the Phase-2 temporal channel resolve "last May" against a corpus that is two years old. Without it the temporal window centers on `now`, never overlaps old data, and silently disables the channel.
 
 LME metrics (`longmemeval/eval.rs`):
 
@@ -2843,7 +2853,7 @@ LME metrics (`longmemeval/eval.rs`):
 - `lme_judge` — category-specific yes/no prompt (TR allows off-by-one days, KU checks the updated value is present, SSP checks personal info is used).
 - `abstention_score` — yes/no over a refusal-phrase whitelist.
 
-A dedicated `--phase1` mode runs only SSU+SSA+MS in retrieval-only mode and gates **PASS at overall `context_contains@R5 ≥ 0.90`** (`:396`) — the fast retrieval-quality check used during recall tuning before spending on generation.
+A dedicated `--phase1` mode runs only SSU+SSA+MS in retrieval-only mode and gates **PASS at overall `context_contains@R5 ≥ 0.90`** (`:400`) — the fast retrieval-quality check used during recall tuning before spending on generation.
 
 ---
 
@@ -2975,7 +2985,7 @@ Measured on an M2 Max at 24 sessions (120 calls, 180 answerable questions), seed
 
 ### 9.5 The perf journey (~300× ingest speedup)
 
-The ≈300× number is one *369-turn* LoCoMo conversation going from **2h 7m (2026-04-21) to ~22–28s** at ~62 ms/turn (`website/docs/benchmarks/index.md:145-146`). Do **not** conflate it with the 7.5-min figure, which is the *full 5,882-turn corpus* (a different, ~16× larger workload) at the same per-turn rate. The speedup is the compounding of several changes surfaced by the microbenches above:
+The ≈300× number is one *369-turn* LoCoMo conversation going from **2h 7m (2026-04-21) to ~22–28s** at ~62 ms/turn (`website/docs/benchmarks/index.md:144-145`). Do **not** conflate it with the 7.5-min figure, which is the *full 5,882-turn corpus* (a different, ~16× larger workload) at the same per-turn rate. The speedup is the compounding of several changes surfaced by the microbenches above:
 
 1. **Atomic per-message ingest.** `ingest_message_atomic` (`crates/uniko-extract/src/ingest/atomic.rs`) folded the three legacy per-message steps (message create, entity extraction, observation extraction) into a single prep-then-commit flow. All CPU work and read-only lookups happen *before* the transaction opens; then **one** transaction writes Message + edges + chunks + Entity upserts + MENTIONS + Observations + OBSERVED_IN + ABOUT and commits once. This cut **commits-per-message from 3 → 1**.
 
@@ -3026,8 +3036,8 @@ Add `--reuse` to skip ingest and re-query an existing KB (default to this — do
 
 Two operational invariants worth internalizing before trusting a run:
 
-- `reuse_existing` **must be computed before** `open_kb_with_runtime`, because `open` creates `kb_dir` and a naive `exists()` check afterward always returns true (`main.rs:321`).
-- The **shared `ModelRuntime` is mandatory** at `question_concurrency ≥ 3` — per-KB ONNX sessions OOM an 8 GB GPU, and the prebuilt-runtime open path is the only way a bge-m3 hybrid KB reopens.
+- `reuse_existing` **must be computed before** `open_kb_with_runtime`, because `open` creates `kb_dir` and a naive `exists()` check afterward always returns true (`main.rs:321-324`).
+- The **shared `ModelRuntime` is mandatory** at `question_concurrency ≥ 3` — per-KB ONNX sessions OOM an 8 GB GPU. (It was once also the only way a bge-m3 hybrid KB reopened, uni-db #130; that is fixed upstream, see §5.2.)
 
 ---
 
@@ -3047,7 +3057,7 @@ uniko is configured in three layers, in increasing order of specificity:
 
 #### 10.1.1 `UnikoConfig` at a glance
 
-`UnikoConfig` (config.rs:616) is the root runtime config. Its sub-configs and their spec-mandated defaults (config.rs:840–909):
+`UnikoConfig` (config.rs:838) is the root runtime config. Its sub-configs and their spec-mandated defaults (config.rs:1090–1164):
 
 | Area | Field(s) | Default |
 |---|---|---|
@@ -3065,10 +3075,11 @@ uniko is configured in three layers, in increasing order of specificity:
 | Entity admission | `entity_strict_admission`, `entity_other_min_confidence` | `true`, `0.9` |
 | Session upkeep | `session_inactivity_secs` | `3600` |
 | External overrides | `catalog_path`, `schema_path`, `observation_rules_path` | `None` |
+| Object storage | `remote_storage: Option<RemoteStorage>` (`config.rs:747`) | `None` — a local store. `Some` keeps the data in an `s3://` or `gs://` bucket: hybrid with a local path, remote-only with the URL as the path (§4.10); unset credentials come from `AWS_*` / `GOOGLE_APPLICATION_CREDENTIALS`; `set_aside_stale_wal` (off) moves a hybrid host's stale WAL to `wal_set_aside/` instead of failing the open |
 
 `validate()` enforces cross-field constraints. Two that matter in practice: reranker `top_n` must be `>= recall_limit`; and enabling `recall_sparse_enabled` or setting `reranker.style=colbert` is rejected unless the embedding config actually has `sparse_dimensions` / `multivector_dimensions` set (i.e. a hybrid embedder is configured). `validate()` catches zero dimensions but **cannot** catch a model/dimension mismatch against an existing on-disk index; the open-time compatibility check does, with `UnikoError::IncompatibleStore`.
 
-> **Trust the code, not the prose.** A comment near config.rs:636 says the reranker is "disabled by default", which contradicts the actual `Default` impl (`enabled: true`). The reranker costs ~50–100 ms/query; if you don't want it, set `RerankerConfig{ enabled: false, .. }` explicitly.
+> **Trust the code, not the prose.** The comments at `config.rs:463` and `:858` say the reranker is "disabled by default", which contradicts the actual `Default` impl (`enabled: true`). The reranker costs ~50–100 ms/query; if you don't want it, set `RerankerConfig{ enabled: false, .. }` explicitly.
 
 > **Effective defaults come from `UnikoConfig::default()`.** The pipeline builds its `RecallConfig` via `RecallConfig::from_uniko_config(...)`. The standalone `RecallConfig::default()` and `ChunkConfig::default()` differ from what the running system uses — do not quote those as runtime defaults.
 
@@ -3083,7 +3094,7 @@ uniko is configured in three layers, in increasing order of specificity:
 | `nomic_v15` | 768 | requires `search_document:` / `search_query:` prefixes |
 | `bge_large` | 1024 | larger dense |
 | `bge_m3` | 1024 dense + sparse(250002) + ColBERT multivector | the only **hybrid** embedder today |
-| `embeddinggemma` | — | alternate preset |
+| `embeddinggemma` | 768 | alternate preset (`embedding_gemma_300m`) |
 
 The hybrid (`bge-m3`) path needs **two xervo aliases** backed by the same model: `embed/default` (`ModelTask::Embed`, dense) and `embed/hybrid` (`ModelTask::EmbedHybrid`). The hybrid model implements only `HybridEmbeddingModel` and cannot back lone-dense columns, so the model loads twice (~2× VRAM). Sparse (`SparseVector`) and ColBERT (`List<Vector>`) columns exist on `Chunk`/`Observation` **only** when the hybrid dimensions are set; ColBERT vectors use `VectorAlgo::Flat` and feed only the MaxSim rerank, never first-stage retrieval.
 
@@ -3096,7 +3107,7 @@ The catalog is the xervo model manifest that maps aliases to concrete models/pro
 - `embed/default` → `BGESmallENV15`
 - `nlp/default` → `kniv-deberta` xsmall + `cascade-int8.onnx`
 
-`config/catalog_minilm.json` is an alternate that swaps the embed alias to `AllMiniLML6V2` (legacy 384-d). It also still carries the **pre-2026-06 `task: "raw"` NLP alias shape** (`options: {artifact, max_batch_size}`) rather than the current `ModelTask::Nlp` shape (`{onnx_path, tokenizer_path, label_maps_path, max_seq_len}`), so loading it via `catalog_path` yields a stale, incompatible NLP alias — it needs regenerating. Either catalog must match the dimensions the KB was created with.
+`config/catalog_minilm.json` is an alternate that swaps the embed alias to `AllMiniLML6V2` (legacy 384-d); its NLP alias has the same current `task: "nlp"` shape (`onnx_path`, …) as the default catalog. Either catalog must match the dimensions the KB was created with.
 
 Aliases used throughout the schema and search code are consts in `schema/mod.rs`: `EMBED_ALIAS`, `HYBRID_EMBED_ALIAS`, `NLP_ALIAS` (`"nlp/default"`), `RERANK_ALIAS`, `OCR_ALIAS`. LLM aliases (for `answer()`, triple refinement, topic naming, NL→Cypher) are registered separately through `LlmSpec` (`openai` / `openai_with_key_env` / `llamacpp`), which lowers to a uni-db `ModelAliasSpec` with `ModelTask::Generate` and a lazy warmup policy.
 
@@ -3129,7 +3140,7 @@ Beyond `UnikoConfig`, a handful of environment variables tune the persistent-ope
 | `UNIKO_BENCH_NO_MSG_EMBED=1` | pre-populate a zero message embedding to skip auto-embed — **measurement-only; invalidates recall** |
 | `StripedLocks` stripe count | `UNIKO_RMW_STRIPES` (default 256) — `StripedLocks::from_env` supports env-driven sizing (default 256 stripes) |
 
-The `RECALL_PROF` `eprintln!` lines in `recall/mod.rs` and `recall.rs` are unconditional stderr noise in the current hot path (they should be `tracing::debug!`) — expect them until removed.
+The `RECALL_PROF` `eprintln!` lines that once sat in `recall/mod.rs` and `recall.rs` are now `tracing::debug!` events (`recall phase 2 sparse gate`, `recall sparse source`, `recall phase 2 source`, `recall chunk and entity-scoped search`); enable `debug` tracing for `uniko_memory` / `uniko_store` to see them.
 
 ### 10.3 Building uniko
 
@@ -3141,7 +3152,7 @@ The `RECALL_PROF` `eprintln!` lines in `recall/mod.rs` and `recall.rs` are uncon
 - **`mold`** on Linux — `.cargo/config.toml` unconditionally sets `-C link-arg=-fuse-ld=mold`, so it is a hard build dependency, not an optimization.
 - **`uv`** for the Python bindings and the docs site.
 
-Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 5.3` and `uni-xervo 0.20.0`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
+Dependencies come from crates.io with **no token, private repo, or credentials**: `uni-db 6.0` and `uni-xervo 0.20.0`. (Docs drift: `reasoning-with-locy.md` references `uni-db 2.4.1` Locy behavior; trust the manifest.)
 
 > **The first build is slow.** `ort`, `tokenizers`, and `half` compile at `opt-level=3` even in the dev profile.
 
@@ -3217,7 +3228,7 @@ cargo deny check
 
 Tooling installs: `cargo install cargo-nextest --locked`, `cargo install cargo-deny --locked`. CI runs on `ubuntu-latest` (`.github/workflows/ci.yml`) with a separate `cargo deny` job. Per the global testing policy, run tests in parallel; nextest parallelizes by default.
 
-**The API surface is a tested contract.** `uniko-api` is logic-free by design: `lib.rs` is a wildcard `pub use uniko_cortex::*` and `tools.rs` is a curated explicit re-export of ~55 intent types from `uniko-memory`. The negative surface (what must stay hidden — `KnowledgeBase`, `PipelineSystem`, `IngestMessage`, etc.) is enforced by nine `compile_fail` doctests in `tools.rs`; the positive surface (~45 facade types must remain reachable) is enforced by `assert_exists::<T>()` in `tests/surface.rs`. These break loudly if the re-export list drifts — treat them as the API definition.
+**The API surface is a tested contract.** `uniko-api` is logic-free by design: `lib.rs` is a wildcard `pub use uniko_cortex::*` and `tools.rs` is a curated explicit re-export of ~140 intent types and functions from `uniko-memory`. The negative surface (what must stay hidden — `KnowledgeBase`, `PipelineSystem`, `IngestMessage`, etc.) is enforced by nine `compile_fail` doctests in `tools.rs`; the positive surface (~54 facade types must remain reachable) is enforced by `assert_exists::<T>()` in `tests/surface.rs`. These break loudly if the re-export list drifts — treat them as the API definition.
 
 **uni-db is a separate project.** Never edit `../uni/`. On a suspected uni-db bug, build a minimal isolated repro (the pattern is `crates/uniko-store/tests/unidb_bytes_return_repro.rs`) and file it upstream against `rustic-ai/uni-db` rather than working around it in uniko.
 
@@ -3252,7 +3263,7 @@ uniko-store → uniko-pipes → uniko-extract → uniko-cortex → uniko-memory 
 
 Release-runbook gotchas that will bite an unprepared release engineer:
 
-- **Dry-run only verifies the leaf crate.** `cargo publish --dry-run` fully verifies only `uniko-store`; the other five use `cargo package --no-verify`, because their packaged form resolves `uniko-store = "^<workspace version>"` against the index and errors until that exact version is published. That step is **advisory and never fails the release** (`.github/workflows/release.yml:90-105`); full-chain verification happens only at the real ordered publish, where each crate is on the index before the next packages.
+- **Dry-run only verifies the leaf crate.** `cargo publish --dry-run` fully verifies only `uniko-store`; the other five use `cargo package --no-verify`, because their packaged form resolves `uniko-store = "^<workspace version>"` against the index and errors until that exact version is published. That step is **advisory and never fails the release** (`.github/workflows/release.yml:86-106`); full-chain verification happens only at the real ordered publish, where each crate is on the index before the next packages.
 - **Publish from a clean clone.** `git clone --local . /tmp/…` first — libgit2's status walk fails over the gitignored `data/`, `target/`, `.venv` (millions of files), and `--allow-dirty` does **not** help.
 - **Brand-new crate names** need one manual `cargo publish` before Trusted Publishing can be configured.
 - **PyPI publishing is DISABLED** until per-project 100 MB file-size increases land — all three wheels exceed the default limit (the base wheel bundles ~113 MiB of ONNX Runtime; GPU wheels add candle kernels). It is gated behind a repo **variable** `PYPI_PUBLISH_ENABLED` (must be a variable, not env). Until then, `github-release` attaches the wheels (2 GB/asset limit) as the interim distribution channel.
@@ -3263,11 +3274,11 @@ Pre-release suffixes and `ort` binary constraints (see §10.7) mean aarch64 Linu
 ### 10.6 Security posture
 
 - **Private disclosure only.** No public issues/PRs for vulnerabilities. Preferred channel: GitHub private security advisories (`github.com/rustic-ai/uniko/security/advisories/new`); fallback `security@dragonscale.ai`. Acknowledgement target: a few business days.
-- **Supported versions:** only the current `0.1.x` series.
+- **Supported versions:** only the current `0.6.x` series (`SECURITY.md`).
 - **Supply-chain gate:** `cargo deny check` enforces a license allow-list and security advisories per `deny.toml` in every check-loop run and in CI.
 - **No stored secrets:** releases use OIDC Trusted Publishing, so there are no API tokens in the repository.
 
-**Access-control posture inside the engine** is worth restating here because it is an operational footgun. Recall is **fail-open by default**: `ViewerScope::Unrestricted` returns policy-scoped `Fact`/`Observation` items *unfiltered* with only a `WARN`. Production callers serving a specific participant **must** set `RecallConfig.viewer` or build with `.scope_to_agent()`, or data leaks across visibility boundaries. Conversely, **unknown visibility schemes fail closed** — a typo like `secret:42` permanently admits no one. Visibility is enforced **only** for `Fact` and `Observation`; all other node types (Message, Chunk, Entity, Topic, Summary, Goal, Task, Episode…) carry no scope and pass the filter untouched. Recognized schemes: `null` / `""` / `public` (all), `private:{pid}`, `team:{tid}`, `org:{oid}`.
+**Access-control posture inside the engine** is worth restating here because it is an operational footgun. Recall is **fail-open by default**: `ViewerScope::Unrestricted` returns policy-scoped `Fact`/`Observation`/`Message`/`Chunk` items *unfiltered* with only a `WARN`. Production callers serving a specific participant **must** set `RecallConfig.viewer` or build with `.scope_to_agent()`, or data leaks across visibility boundaries. Conversely, **unknown visibility schemes fail closed** — a typo like `secret:42` permanently admits no one. Visibility is enforced **only** for `Fact`, `Observation`, `Message` and `Chunk` (a Message's Chunks inherit its visibility); all other node types (Entity, Topic, Summary, Goal, Task, Episode…) carry no scope and pass the filter untouched. Recognized schemes: `null` / `""` / `public` (all), `private:{pid}`, `team:{tid}`, `org:{oid}`.
 
 ### 10.7 System dependencies and native linkage
 
@@ -3285,9 +3296,9 @@ The Python SDK ships as **three interchangeable maturin wheels** that all instal
 
 | Wheel | Platform | ONNX Runtime EP | Local LLM | `uniko-api` features |
 |---|---|---|---|---|
-| `uniko` (base) | per-platform CPU | CPU (statically bundled, ~113 MiB) | none in-process (a remote `llama-server` via `LlmSpec.llamacpp` works here) | `[onnx]` |
-| `uniko-cuda` | Linux x86_64 | CUDA EP | candle CUDA kernels | `[onnx, gpu-cuda, candle]` |
-| `uniko-metal` | macOS arm64 | CoreML | candle Metal kernels | `[onnx, gpu-metal, candle]` |
+| `uniko` (base) | per-platform CPU | CPU (statically bundled, ~113 MiB) | none in-process (a remote `llama-server` via `LlmSpec.llamacpp` works here) | `[onnx, pdf-ocr]` |
+| `uniko-cuda` | Linux x86_64 | CUDA EP | candle CUDA kernels | `[onnx, pdf-ocr, gpu-cuda, candle]` |
+| `uniko-metal` | macOS arm64 | CoreML | candle Metal kernels | `[onnx, pdf-ocr, gpu-metal, candle]` |
 
 The GPU crates are **not separate source trees**: `bindings/uniko-cuda/Cargo.toml` and `bindings/uniko-metal/Cargo.toml` point `[lib] path` at `../uniko-py/src/lib.rs`, and their Python package is **copied** in from `bindings/uniko-py/python` by `scripts/bootstrap-wheel-variants.sh` (copy, not symlink — maturin does not follow symlinks). The only real difference between the three is the `uniko-api` feature set. All are `abi3` for CPython ≥ 3.10; the GPU wheels resolve host CUDA/cuDNN at runtime rather than bundling it.
 
@@ -3329,13 +3340,13 @@ Both are required workarounds, not tuning. The Python module owns exactly one mu
 
 ### 10.10 Operational shutdown and quiescence
 
-`Uniko::shutdown()` **skips the pipeline drain** (with a `WARN`) if any `Agent`/`Session` clone still shares the `Arc<PipelineSystem>` — drop all derived handles first or in-flight work is not drained. The pipeline exposes a `quiesce()` barrier (polls the in-flight `AtomicUsize` to zero) for callers that need to wait for ingest to settle before shutdown. Graceful shutdown is phased in `ShutdownCoordinator::shutdown`: cancel ingest (5 s drain) → cancel consolidation (10 s drain) → cancel root → bounded join-or-abort within the total timeout (default `30 s`). Note the two drain sleeps are additive and independent of the join deadline, so a small `total_timeout` can be consumed entirely by the sleeps.
+`Uniko::shutdown()` **skips the pipeline drain** (with a `WARN`) if any `Agent`/`Session` clone still shares the `Arc<PipelineSystem>` — drop all derived handles first or in-flight work is not drained. The pipeline exposes a `quiesce()` barrier (polls the in-flight `AtomicUsize` to zero) for callers that need to wait for ingest to settle before shutdown. Graceful shutdown is phased in `ShutdownCoordinator::shutdown`: cancel ingest (5 s drain) → cancel consolidation (10 s drain) → cancel root → bounded join-or-abort within the total timeout (default `30 s`). Note the two drain sleeps are additive: each is capped at `total_timeout`, and the join deadline starts only after them, so the worst case is `min(5 s, T) + min(10 s, T) + T` (`crates/uniko-pipes/src/cancel.rs:73-93`).
 
 The Python `Uniko.shutdown()` additionally **poisons** its handle (`take()`s the inner `Option`), so any subsequent use raises `ConfigError("shut down")` — this models the consuming Rust `shutdown` that Python cannot otherwise express.
 
 ### 10.11 What is not yet shipped
 
-For operational planning, these are explicitly **not** available in the current release and must not be depended on: an HTTP/MCP server, a CLI, production sparse/ColBERT late-interaction retrieval defaults (the machinery exists but is default-off and config-gated), multimodal ingest beyond the extension seam, rule induction, MCTS planning, and cross-agent sharing. The Python SDK is **alpha** — the API may change before 1.0. The largest known recall-quality gap is date-anchored/temporal questions.
+For operational planning, these are explicitly **not** available in the current release and must not be depended on: an HTTP/MCP server, a CLI, production sparse/ColBERT late-interaction retrieval defaults (the machinery exists but is default-off and config-gated), audio transcription through a catalog model (uni-db does not register uni-xervo's whisper.cpp provider, rustic-ai/uni-db#351; a host extractor can transcribe instead), rule induction, MCTS planning, and cross-agent sharing. The Python SDK is **alpha** — the API may change before 1.0. The largest known recall-quality gap is date-anchored/temporal questions.
 
 ---
 
@@ -3348,7 +3359,7 @@ This chapter is the working manual for anyone who builds *on* uniko or *inside* 
 uniko is a single Cargo workspace. The engine is six publishable crates in a strict linear dependency stack, plus one internal benchmark crate and the Python bindings.
 
 ```
-uniko2/
+uniko/
 ├── crates/
 │   ├── uniko-store/     L1  typed façade over uni-db: schema, search, Locy, model seam, blobs, locks
 │   ├── uniko-pipes/     L2  content-free pipeline machinery: Step trait, circuit breaker, DLQ, cancel
@@ -3363,7 +3374,7 @@ uniko2/
 │   └── uniko-metal/     GPU wheel variant: same source, Metal features
 ├── config/             catalog.json, catalog_minilm.json, schema.json (external overrides)
 ├── website/            zensical docs site (uv-built)
-├── scripts/            bootstrap-wheel-variants.sh and release helpers
+├── scripts/            bootstrap-wheel-variants.sh, ci/ (CI guards), s3/ (S3 test services)
 └── AGENTS.md, CONTRIBUTING.md, DEV.md, RELEASING.md, SECURITY.md, CHANGELOG.md
 ```
 
@@ -3394,13 +3405,13 @@ Rules of the gate:
 - `.db()` remains a `pub` escape hatch — but only for `tests/` and the `uniko-bench` crate, which are out of scope for the seal.
 - Comments are exempt (the `grep -vE` strips comment lines).
 - A reviewed, intentional exception is tagged with a same-line `// ALLOW:` comment.
-- The engine only re-exports the handful of uni-db types callers legitimately need: `Value`, `Transaction`, `RetryOptions`, `temporal::{Btic, TemporalValue}` (re-exported from `uni_db::common`), `xervo::{GenerationOptions, Message}`, `ModelAliasSpec`/`ModelTask`/`WarmupPolicy` (needed so a caller registering an extra model can name them — see `LlmSpec::into_alias_spec`), and `ModelRuntime` (from `uni_xervo::runtime`) (`crates/uniko-store/src/lib.rs:54`, `:65-87`).
+- The engine only re-exports the handful of uni-db types callers legitimately need: `Value`, `Transaction`, `RetryOptions`, `temporal::{Btic, TemporalValue}` (re-exported from `uni_db::common`), `xervo::{GenerationOptions, Message}`, `ModelAliasSpec`/`ModelTask`/`WarmupPolicy` (needed so a caller registering an extra model can name them — see `LlmSpec::into_alias_spec`), and `ModelRuntime` (from `uni_xervo::runtime`) (`crates/uniko-store/src/lib.rs:67`, `:78-100`).
 
 **When you need a graph capability the façade doesn't expose, add it to `uniko-store` (a `repository/`, `operations/`, `search/`, or `*_in_tx` helper) — do not reach past the seal.** Note that `uni-xervo` NLP types (`NlpModel`, `NlpRequest`, `NlpResult`, `NlpTasks`) are a documented exception: uni-db doesn't re-export them, so `uniko-extract` depends on `uni-xervo` directly for the NLP cascade.
 
 #### Invariant 2 — never edit `../uni/`
 
-uni-db lives at `../uni/` (or `../uni-db/`) as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 5.3 and uni-xervo 0.20.0 from crates.io. When you hit a uni-db bug, the discipline is:
+uni-db lives at `../uni/` (or `../uni-db/`) as a **reference checkout only**. It is a separate crates.io project (`rustic-ai/uni-db`); the workspace pulls uni-db 6.0 and uni-xervo 0.20.0 from crates.io. When you hit a uni-db bug, the discipline is:
 
 1. Build a **minimal, isolated reproduction test** in `uniko-store` (the canonical pattern is `crates/uniko-store/tests/unidb_bytes_return_repro.rs`).
 2. File it upstream against `rustic-ai/uni-db`.
@@ -3410,7 +3421,7 @@ Never silently work around a uni-db bug without a repro that pins it there.
 
 #### Invariant 3 — schema source of truth
 
-`crates/uniko-store/src/schema/constants.rs` is authoritative for the graph model: `labels::ALL` = **26 node labels**, `edges::ALL` = **55 edge types**. The module doc at `schema/mod.rs:3` still says 25/54 and is stale — it is a doc comment, not a registration list. When in doubt, grep `constants.rs`.
+`crates/uniko-store/src/schema/constants.rs` is authoritative for the graph model: `labels::ALL` = **26 node labels**, `edges::ALL` = **55 edge types**. The module doc at `schema/mod.rs:3` agrees today (26/55), but it is a doc comment, not a registration list, and has drifted before. When in doubt, grep `constants.rs`.
 
 `Pattern` and `CONTRADICTED_BY` are Locy-consumer additions (`episode_pattern_detector`, `contradiction_detector`); `Source` and `FROM_SOURCE` are the typed-provenance additions (issues #39/#41). Those four are the ones downstream catalogs most often miss.
 
@@ -3418,7 +3429,7 @@ Never silently work around a uni-db bug without a repro that pins it there.
 
 #### Invariant 4 — config defaults come from `UnikoConfig::default()`
 
-Effective runtime defaults are what the pipeline actually builds: `RecallConfig::from_uniko_config(...)`, seeded from `UnikoConfig::default()` (`crates/uniko-store/src/config.rs`, defaults around `config.rs:860-927`). The standalone `RecallConfig::default()` and `ChunkConfig::default()` **differ** and must not be quoted as runtime behavior. One trap in particular: `config.rs:654` has a stale comment saying the reranker is "disabled by default," but the `Default` impl sets `enabled: true` (`config.rs:452`; ms-marco-MiniLM-L-6-v2, top_n=50). Trust the code.
+Effective runtime defaults are what the pipeline actually builds: `RecallConfig::from_uniko_config(...)`, seeded from `UnikoConfig::default()` (`crates/uniko-store/src/config.rs`, defaults at `config.rs:1090-1164`). The standalone `RecallConfig::default()` and `ChunkConfig::default()` **differ** and must not be quoted as runtime behavior. One trap in particular: `config.rs:463` and `:858` have stale comments saying the reranker is "disabled by default," but the `Default` impl sets `enabled: true` (`config.rs:538`; ms-marco-MiniLM-L-6-v2, top_n=50). Trust the code.
 
 Two more AGENTS.md house rules: **never `cargo test`** (nextest is the runner of record), and **never commit/push without explicit maintainer approval** — and never add AI-attribution trailers to any artifact.
 
@@ -3513,7 +3524,7 @@ maturin build --profile dist -m bindings/uniko-metal/Cargo.toml   # macOS/aarch6
 
 `uniko-cuda` requires the CUDA toolkit (`nvcc`) at build time; `CUDA_COMPUTE_CAP=80` (Ampere) forward-JITs to newer archs, and `--auditwheel skip` means CUDA runtime libs resolve at load time rather than being bundled.
 
-**Security** (`SECURITY.md`): private disclosure only — GitHub private security advisories or `security@dragonscale.ai`, never public issues. Only the current `0.1.x` series is supported.
+**Security** (`SECURITY.md`): private disclosure only — GitHub private security advisories or `security@dragonscale.ai`, never public issues. Only the current `0.6.x` series is supported.
 
 ### 11.6 The uni-db workarounds catalogue
 
@@ -3553,12 +3564,12 @@ These are the sharp edges spread across the layers. They fall into a few familie
 
 #### Recall behavior
 
-- **Recall is fail-open by default.** `ViewerScope::Unrestricted` returns policy-scoped `Fact`/`Observation` items *unfiltered* with only a `WARN`. Production callers serving a specific participant **must** set `RecallConfig.viewer` or build with `.scope_to_agent()`, or data leaks across visibility. Unknown visibility schemes fail *closed* (a typo like `secret:42` locks a claim down permanently).
-- **Visibility is enforced only for `Fact` and `Observation`.** All structural nodes (`Message`, `Chunk`, `Entity`, `Topic`, `Summary`, `Goal`, `Task`, `Episode`) carry no scope and pass `filter_bundle` untouched.
+- **Recall is fail-open by default.** `ViewerScope::Unrestricted` returns policy-scoped `Fact`/`Observation`/`Message`/`Chunk` items *unfiltered* with only a `WARN`. Production callers serving a specific participant **must** set `RecallConfig.viewer` or build with `.scope_to_agent()`, or data leaks across visibility. Unknown visibility schemes fail *closed* (a typo like `secret:42` locks a claim down permanently).
+- **Visibility is enforced only for `Fact`, `Observation`, `Message` and `Chunk`.** All structural nodes (`Entity`, `Topic`, `Summary`, `Goal`, `Task`, `Episode`) carry no scope and pass `filter_bundle` untouched.
 - **`reference_ts` is a per-query anchor, never a KB setting.** Recalling a historical corpus without setting it computes the temporal window around *now*, which never overlaps old data and silently disables the Phase-2 temporal channel.
 - **Multi-query variant reformulation is opt-in** (empty `query_variants` = keywords-only). Enabling all four measured **−2.1pt** evidence and **3× latency** on LoCoMo. Don't turn it on expecting a win.
 - **`answer_type_boost` defaults to 1.0 (no-op)** deliberately — the naive rule measured −0.149 R@5 / −0.186 NDCG@5.
-- **Leftover debug prints ship in the hot path.** `recall/mod.rs` has three `eprintln!("RECALL_PROF ...")` statements (phase2 gate, sparse source, phase2 source) and `recall.rs:857` has a `RECALL_PROF` line. They write to stderr on every recall and should be `tracing::debug!` or removed.
+- **Recall profiling is debug tracing.** The three `RECALL_PROF` `eprintln!`s in `recall/mod.rs` (phase2 gate, sparse source, phase2 source) and the one in `recall.rs` are now `tracing::debug!` events (`recall/mod.rs:2092`, `:2368`, `:2516`; `repository/recall.rs:1339`); nothing is written to stderr.
 
 #### Pipeline semantics
 
@@ -3606,7 +3617,7 @@ Three larger initiatives shape where uniko is headed.
 
 #### Sparse + ColBERT hybrid retrieval
 
-The plumbing is landed and config-gated default-off. With a bge-m3 hybrid embedder, `Chunk`/`Observation` nodes gain a `sparse_embedding` (`SparseVector`) column and a `colbert_embedding` (`List<Vector>`, per-token) column *in addition to* the dense vector — all three pointing at the same `embed/hybrid` alias and source property so uni-db fuses them into one `EmbedHybrid` forward pass. ColBERT vectors use `VectorAlgo::Flat` because per-token vectors feed only the MaxSim rerank, never first-stage retrieval. Recall wires a sparse channel (`uni.sparse.query`, filtered at the index level via `_vid IN (...)`) and an in-process ColBERT MaxSim rerank rescaled into the top-window score band. The next step is turning these on by default once the accuracy/latency trade validates on the benchmark arms (the bench already ships `arm0/A/B/C` sparse+colbert sweep configs).
+The plumbing is landed and config-gated default-off. With a bge-m3 hybrid embedder, `Chunk`/`Observation` nodes gain a `sparse_embedding` (`SparseVector`) column and a `colbert_embedding` (`List<Vector>`, per-token) column *in addition to* the dense vector — all three pointing at the same `embed/hybrid` alias and source properties so uni-db fuses them into one `EmbedHybrid` forward pass. ColBERT vectors use `VectorAlgo::Flat` because per-token vectors feed only the MaxSim rerank, never first-stage retrieval. Recall wires a sparse channel (`uni.sparse.query`, filtered at the index level via `_vid IN (...)`) and an in-process ColBERT MaxSim rerank rescaled into the top-window score band. The next step is turning these on by default once the accuracy/latency trade validates on the benchmark arms (the bench already ships `arm0/A/B/C` sparse+colbert sweep configs).
 
 #### LTM masterbook — the four-pillar proposal
 
@@ -3654,7 +3665,7 @@ Two bench-specific gotchas worth carrying into any perf investigation: **a share
 
 **ConsolidationCycle** — Meta/audit node recording one P4 sweep, with PROCESSED/CREATED/REINFORCED/INVALIDATED edges; PROCESSED is the idempotency anchor.
 
-**CONTRADICTED_BY** — Source-only edge (Fact→Episode) drawn by the contradiction_detector rule; present in `constants.rs` but omitted from the docs.
+**CONTRADICTED_BY** — Edge (Fact→Episode, `detected_at`) drawn by the contradiction_detector rule; one of the additions downstream catalogs most often miss.
 
 **contradiction (F38)** — Within a (subject,predicate) group, if the fraction of votes outside the prior Fact's cluster exceeds 0.40, close the prior open-BTIC Fact and wire INVALIDATES.
 
@@ -3696,7 +3707,7 @@ Two bench-specific gotchas worth carrying into any perf investigation: **a share
 
 **Participant** — Node for a communication participant (user/assistant/system/tool); resolves team/org memberships for the Viewer policy.
 
-**Pattern** — Node label added by the episode_pattern_detector Locy consumer; present in `constants.rs` but undocumented.
+**Pattern** — Node label added by the episode_pattern_detector Locy consumer; one of the additions downstream catalogs most often miss.
 
 **Procedure** — Procedural node promoted from recurring successful (action_a→action_b) Episode pairs (P5); lifecycle candidate→active→deprecated via `promote_threshold` and effectiveness hysteresis (demote <0.4, repromote ≥0.6).
 

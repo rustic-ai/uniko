@@ -26,10 +26,10 @@ Requires **Rust >= 1.95** (edition 2024) — the workspace's `rust-version`.
     ```toml
     # Cargo.toml
     [dependencies]
-    uniko-api = { version = "0.2.0", features = ["onnx"] }
+    uniko-api = { version = "0.6.0", features = ["onnx"] }
     # ...or depend on a specific layer directly:
-    uniko-memory = { version = "0.2.0", features = ["onnx"] }
-    uniko-store  = "0.2.0"
+    uniko-memory = { version = "0.6.0", features = ["onnx"] }
+    uniko-store  = "0.6.0"
     ```
 
 === "Git dependency"
@@ -50,14 +50,14 @@ Requires **Rust >= 1.95** (edition 2024) — the workspace's `rust-version`.
 
 ### Build prerequisites
 
-Building uniko compiles ONNX Runtime and a large native dependency tree from source, so a
-few tools must be present before `cargo build`:
+Building uniko links a prebuilt ONNX Runtime and compiles a large native dependency tree from
+source, so a few tools must be present before `cargo build`:
 
 | Requirement | Why |
 |---|---|
 | **Rust ≥ 1.95** (edition 2024) | the workspace `rust-version` |
 | **A C/C++ toolchain** | ONNX Runtime and other native crates |
-| **`protoc`** (protobuf-compiler) on `PATH` | `ort` needs it at build time |
+| **`protoc`** (protobuf-compiler) on `PATH` | Lance (uni-db's storage layer) compiles its protobuf definitions at build time |
 | **`mold`** — Linux only | `.cargo/config.toml` sets `-C link-arg=-fuse-ld=mold` unconditionally, so the link step fails without it |
 
 None of this applies if you install the Python wheels — they ship prebuilt.
@@ -92,13 +92,15 @@ pip install uniko-cuda --extra-index-url https://rustic-ai.github.io/uniko/packa
 
 ## Build a Uniko instance
 
-The `Uniko` facade is the entry point. Everything else hangs off the handle — `memory.agent(id)`
-for an agent, `agent.session(id)` for a conversation:
+The `Uniko` facade is the entry point, re-exported from `uniko-api` as `uniko_api::tools`
+(the same types live at the `uniko_memory` crate root if you depend on `uniko-memory` instead).
+Everything else hangs off the handle — `memory.agent(id)` for an agent, `agent.session(id)` for a
+conversation:
 
 ```rust
-use uniko_memory::Uniko;
+use uniko_api::tools::Uniko;
 
-# async fn demo() -> Result<(), uniko_store::UnikoError> {
+# async fn demo() -> Result<(), uniko_api::tools::UnikoError> {
 // Persistent on disk, zero-config defaults. Registers the schema
 // (idempotent) and eagerly warms the embedding / NLP models.
 let memory = Uniko::open("./memory.db").await?;
@@ -113,9 +115,9 @@ Reach for the builder to tune capabilities — the embedder, an LLM for `answer(
 or a fully custom config:
 
 ```rust
-use uniko_memory::{EmbeddingConfig, LlmSpec, Uniko};
+use uniko_api::tools::{EmbeddingConfig, LlmSpec, Uniko};
 
-# async fn demo() -> Result<(), uniko_store::UnikoError> {
+# async fn demo() -> Result<(), uniko_api::tools::UnikoError> {
 let memory = Uniko::builder()
     .path("./memory.db")
     .embedding(EmbeddingConfig::bge_small_en_v15())

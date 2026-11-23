@@ -154,9 +154,9 @@ A `Uniko` instance is one in-process handle. Build it, observe messages, recall 
 No services, no network, no separate vector index to reconcile.
 
 ```rust
-use uniko_memory::{Turn, Uniko};
+use uniko_api::tools::{Turn, Uniko};
 
-# async fn demo() -> Result<(), uniko_store::UnikoError> {
+# async fn demo() -> Result<(), uniko_api::tools::UnikoError> {
 // 1. Build an embedded instance — no external services.
 let memory = Uniko::open("./agent-memory").await?;
 let agent = memory.agent("assistant");

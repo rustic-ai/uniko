@@ -43,11 +43,12 @@ before any public disclosure.
 ## Supported Versions
 
 uniko is in early, active development. Security fixes are provided for the
-current `0.1.x` release series.
+current `0.6.x` release series.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 0.6.x   | :white_check_mark: |
+| < 0.6   | :x:                |
 
 As the project matures, this policy will be updated to reflect a longer-term
 support window.

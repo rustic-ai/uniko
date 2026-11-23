@@ -57,6 +57,13 @@ and `shutdown` when done.
 | `builder` | `fn builder() -> UnikoBuilder` | Configure capabilities, then `build()`. |
 | `agent` | `fn agent(&self, agent_id: impl Into<String>) -> Agent` | Mint an agent identity (cheap). |
 | `config` | `fn config(&self) -> &UnikoConfig` | The resolved configuration. |
+| `health` | `fn health(&self) -> Option<PipelineHealth>` | Streaming-pipeline queue depth, throughput, latency and LLM circuit state; `None` without `.streaming(true)`. |
+| `dead_letters` | `fn dead_letters(&self) -> DeadLetters` | List, count, retry (`retry`, `retry_pending`) and `resolve` failed streaming items. |
+| `capabilities` | `async fn capabilities(&self) -> Capabilities` | Which models and stages loaded, and which failed. |
+| `store_info` | `async fn store_info(&self) -> Result<StoreInfo, UnikoError>` | What this instance's store was built with. |
+| `inspect_store` | `async fn inspect_store(path: impl AsRef<Path>, config: &UnikoConfig) -> Result<StoreReport, UnikoError>` | What a store on disk was built with, and whether `config` can open it — without opening it. |
+| `migrate_store` | `async fn migrate_store(path, config: UnikoConfig, migration: Migration, progress: impl FnMut(&MigrationProgress) + Send) -> Result<MigrationReport, UnikoError>` | Bring a closed store in line with `config` in place; a rerun resumes. |
+| `add_team_member` / `add_org_member` / `add_team_to_org` | `async fn(&self, member_id: &str, group_id: &str) -> Result<bool, UnikoError>` | Record a membership `team:` / `org:` visibility resolves through (`remove_*` undoes it). `false` when already recorded. |
 | `backfill_search_text` | `async fn backfill_search_text(&self) -> Result<usize, UnikoError>` | Fill `Chunk.search_text` for chunks written before it existed, so lexical recall and `Sources::search` see them. Idempotent; returns how many it filled. |
 | `purge` | `async fn purge(&self) -> Result<DeletionReport, UnikoError>` | Wipe all data (dev/test). |
 | `shutdown` | `async fn shutdown(self) -> Result<(), UnikoError>` | Drain workers and close. Needs sole ownership — drop agents/sessions first. |
@@ -65,9 +72,15 @@ and `shutdown` when done.
 · `.llm(LlmSpec)` (enables `answer()`) · `.raw_config(UnikoConfig)` (full override) ·
 `.streaming(bool)` (enables `submit`/`flush`) · `.scope_to_agent()` / `.scope(RecallScope)`
 (read visibility) · `.extractor(Arc<dyn ModalityExtractor>)` (pluggable modality) ·
-`.model_extractor(ModelExtractor)` (OCR, captions, documents, transcription by alias) · `.build()`.
+`.model_extractor(ModelExtractor)` (OCR, captions, documents, transcription by alias) ·
+`.reranker(RerankerConfig)` · `.nlp(NlpConfig)` · `.answer_alias(alias)` ·
+`.runtime(SharedRuntime)` (share loaded models across instances; see `build_runtime()`) ·
+`.prefetch(PrefetchPolicy)` (`Eager` default, `Lazy`, `Background`) ·
+`.require(iter of Requirement)` · `.readiness_timeout(Duration)` · `.verify_remote(bool)` ·
+`.build()`.
 
-**`LlmSpec`** constructors: `openai(alias, model_id, base_url: Option<&str>)` (reads
+**`LlmSpec`** constructors: `new(alias, provider_id, model_id)` (with `.option(k, v)` /
+`.api_key_env(var)`) · `openai(alias, model_id, base_url: Option<&str>)` (reads
 `OPENAI_API_KEY`) · `openai_with_key_env(alias, model_id, base_url, key_env)` ·
 `llamacpp(alias, model_id, base_url)` / `llamacpp_with_key_env(alias, model_id, base_url, key_env)`
 (a llama.cpp `llama-server`).
@@ -89,7 +102,9 @@ let answer = agent.answer("when is the deadline?").await?;   // needs .llm(...)
 | `recall` | `async fn recall(&self, query: &str) -> Result<ContextBundle, UnikoError>` | Ranked, prompt-ready context. |
 | `recall_in` | `async fn recall_in(&self, query: &str, scope: Scope) -> Result<ContextBundle, UnikoError>` | Recall confined to a session/participant/time scope. |
 | `answer` | `async fn answer(&self, question: &str) -> Result<Answer, UnikoError>` | Recall + the configured LLM. |
+| `recall_with` | `async fn recall_with(&self, query: &str, scope: Scope, overrides: &RecallOverrides) -> Result<ContextBundle, UnikoError>` | Scoped recall with per-call knob overrides. |
 | `answer_in` | `async fn answer_in(&self, question: &str, scope: Scope) -> Result<Answer, UnikoError>` | Scoped `answer`. |
+| `consolidate` | `async fn consolidate(&self) -> Result<ConsolidationReport, UnikoError>` | One consolidation cycle, then procedure promotion and topic detection. `consolidate_with(ConsolidateOptions)` picks the triple source. |
 | `query` | `async fn query(&self, cypher: &str) -> Result<Vec<Record>, UnikoError>` | Read-only Cypher against the graph. |
 | `query_in` | `async fn query_in(&self, cypher: &str, scope: &Scope) -> Result<Vec<Record>, UnikoError>` | Binds the scope's allow-set as `$allow`. |
 | `session` | `fn session(&self, session_id: impl Into<String>) -> Session` | Open a conversation thread. |
@@ -97,12 +112,21 @@ let answer = agent.answer("when is the deadline?").await?;   // needs .llm(...)
 | `sources` | `fn sources(&self) -> Sources<'_>` | Deterministic search, outline and read — see [Sources](#sources-reading-around-a-hit). |
 | `goals` | `fn goals(&self) -> Goals<'_>` | Goal/task lifecycle — see [Goals](#goals-tasks). |
 | `delete_session` | `async fn delete_session(&self, session_id: &str) -> Result<DeletionReport, UnikoError>` | Delete a whole conversation. |
+| `finalize_session` | `async fn finalize_session(&self, session_id: &str) -> Result<FinalizeReport, UnikoError>` | Build the session-level chunks; `unfinalized_session_ids()` lists sessions still without them. |
+| `retire_source` / `restore_source` | `async fn retire_source(&self, source_id: &str) -> Result<bool, UnikoError>` | Stamp (or clear) `Source.retired_at`. |
 | `forget_participant` | `async fn forget_participant(&self, participant_id: &str) -> Result<DeletionReport, UnikoError>` | GDPR erasure of a person's data. |
 | `agent_id` | `fn agent_id(&self) -> &str` | The bound participant id. |
 
 **Logic surface:** `define_rule(name, source)` → `NodeId` · `run_rule(name, &cols, params)` →
 `Vec<Record>` · `assume(block) -> AssumeBuilder` (what-if, rolled back) ·
-`abduce(program, params) -> AbductionResult`. See [Reasoning with Locy](../guides/reasoning-with-locy.md).
+`abduce(program, params) -> AbductionResult` · `list_rules()` / `explain_rule(name)` →
+`RuleView` · `delete_rule(name)` · `match_procedures(&state)` / `record_procedure_use(id, succeeded)`.
+See [Reasoning with Locy](../guides/reasoning-with-locy.md).
+
+**Recording surface:** `register(AgentRegistration)` · `assert_fact` / `invalidate_fact` ·
+`record_action` · `record_episode` · `add_observation` · `set_visibility(node_id, Visibility)` —
+the methods behind the [recording primitives](#recording-primitives-low-level), with the agent's
+Participant created on demand.
 
 ---
 
@@ -127,27 +151,32 @@ session.ingest(IngestSource::path("handbook.md")).await?;   // standalone docume
 | `submit_source` | `async fn submit_source(&self, source: IngestSource) -> Result<(), UnikoError>` | Streaming blob. |
 | `flush` | `async fn flush(&self) -> Result<(), UnikoError>` | Barrier: drain the streaming pipeline. |
 | `ingest` | `async fn ingest(&self, source: IngestSource) -> Result<IngestOutcome, UnikoError>` | Load a standalone document. |
-| `summarize` | `async fn summarize(&self) -> Result<Option<NodeId>, UnikoError>` | Build/refresh the session Summary. |
+| `summarize` | `async fn summarize(&self) -> Result<SummarizeReport, UnikoError>` | Build/refresh the session Summary (`summary: Option<NodeId>`), finalizing the session first (`finalize`, `finalize_error`). |
+| `finalize` | `async fn finalize(&self) -> Result<FinalizeReport, UnikoError>` | Build or refresh the session-level chunks. |
+| `unit` / `commit_unit` | `fn unit(&mut self) -> TurnUnit<'_>` · `async fn commit_unit(&mut self, turns: Vec<Turn>) -> Result<UnitResult, UnikoError>` | Commit several turns atomically; nothing persists on error. |
+| `record_action` | `async fn record_action(&self, params: RecordActionParams) -> Result<RecordActionResult, UnikoError>` | Record an Action in this session. |
 | `forget_turn` | `async fn forget_turn(&self, message_id: &str) -> Result<DeletionReport, UnikoError>` | Soft-redact (hidden from recall, lineage kept). |
 | `delete_turn` | `async fn delete_turn(&self, message_id: &str) -> Result<DeletionReport, UnikoError>` | Hard-delete + cascade. |
 | `delete_document` | `async fn delete_document(&self, artifact_id: &str) -> Result<DeletionReport, UnikoError>` | Delete an ingested document. |
 
 **`Turn`** (builder): `Turn::new(sender, content)` · `.id(message_id)` (idempotency) ·
 `.content_type(s)` · `.at(DateTime<Utc>)` · `.addressed_to(Vec<String>)` ·
-`.metadata(k, serde_json::Value)` · `.attach(IngestSource)` · `.attachments(iter)` ·
+`.metadata(k, serde_json::Value)` · `.category(s)` · `.source(id)` · `.revision(id)` ·
+`.visibility(Visibility)` · `.attach(IngestSource)` · `.attachments(iter)` ·
 `.tool_call(ToolCall)`.
 
 **`ToolCall`** (builder): `ToolCall::new(tool_name)` · `.call_id(id)` (becomes the Action's
-`action_id`; derived from the call when omitted) · `.arguments(serde_json::Value)` ·
+`action_id`; derived from the call when omitted) · `.performer(participant_id)` ·
+`.arguments(serde_json::Value)` ·
 `.json_output(Value)` · `.text_output(s)` · `.output(ToolOutput)` · `.status(s)` · `.error(s)` ·
 `.started_at(t)` · `.ended_at(t)` · `.triggered_by(message_id)` · `.after(call_id)` ·
 `.visibility(Visibility)` · `.category(s)` · `.source(id)` · `.revision(id)`. **`ToolOutput`**
 `Json(Value)` · `Text(String)` · `Bytes { bytes, mime }`.
 
 **`ObserveResult`** `{ message: AtomicIngestResult, attachments: Vec<IngestOutcome>,
-tool_calls: Vec<ToolCallResult> }` — each attachment's `IngestOutcome::Artifact(_).artifact_id` is
+tool_calls: Vec<ToolCallResult>, diagnostics }` — each attachment's `IngestOutcome::Artifact(_).artifact_id` is
 the handle for later retrieval. **`ToolCallResult`** `{ call_id, action_node, artifact_id,
-artifact_node, was_replay }`.
+artifact_node, was_replay, diagnostics }`.
 
 ---
 
@@ -165,16 +194,17 @@ for item in &bundle.items {
 
 | Type | Shape | Description |
 | --- | --- | --- |
-| `ContextBundle` | `{ items: Vec<RecallItem>, total_tokens, coverage, phase1_only, phase2_only }` | Ranked result set + accounting. |
-| `RecallItem` | `{ node_id: NodeId, kind: RecallKind, score: f64, content: String, sources: Vec<RecallSource>, category, source_id, revision_id, token_count: usize, context: Option<String>, address: Option<String> }` | One recalled node. `primary_source()` returns the first. `token_count` is its real size; `context` and `address` are set on a structured chunk (see [Tool Output](../guides/tool-output.md)). |
+| `ContextBundle` | `{ items: Vec<RecallItem>, total_tokens, coverage, phase1_only, phase2_only, diagnostics: Vec<Diagnostic> }` | Ranked result set + accounting; `diagnostics` lists each stage that ran, fell back or failed. |
+| `RecallItem` | `{ node_id: NodeId, kind: RecallKind, score: f64, content: String, sources: Vec<RecallSource>, category, source_id, revision_id, token_count: usize, context: Option<String>, address: Option<String>, position: Option<MediaPosition> }` | One recalled node. `primary_source()` returns the first. `token_count` is its real size; `context` and `address` are set on a structured chunk (see [Tool Output](../guides/tool-output.md)); `position` locates a chunk from an image, recording or video. |
 | `RecallKind` | `Chunk · Observation · Fact · Procedure · Topic · Episode · Message · Other` | What it is. `is_derived()` ⇒ true for Fact/Procedure/Topic/Observation; `tier()` ⇒ its `RecallTier`. |
 | `RecallSource` | `Message { message_id, chunk_id? }` · `Attachment { message_id, artifact_id, chunk_id? }` · `Document { artifact_id, chunk_id? }` · `Session { session_id, chunk_id? }` · `Tool { call_id, tool_name?, artifact_id, chunk_id? }` | Lineage — 1 for a chunk, many for a Fact. `Session` is a chunk of a session transcript; `Tool` a chunk of a tool call's result. |
 | `RecallTier` | `Semantic · Procedural · Episodic · KnowledgeBase · Provenance` | Scoring weight band. |
 
 **Scoping (`Scope`)** — chainable, passed to the `_in` variants: `.sessions([...])` ·
 `.participants([...])` · `.since(DateTime)` · `.until(DateTime)` · `.categories([...])` ·
-`.sources([...])` · `.as_viewer(Viewer)`.
-`Dimensions` holds the resolved filters; `ViewerScope` is `Unrestricted | As(Viewer)`.
+`.sources([...])` · `.include_superseded()` · `.as_viewer(Viewer)` · `.as_participant(id)`.
+`Dimensions` holds the resolved filters; `ViewerScope` is `Unrestricted | As(Viewer) |
+AsParticipant(String)`.
 
 **Typed provenance.** `Turn::category(..)` / `Turn::source(..)` and
 `IngestSource::with_category(..)` / `.with_source(..)` record a record class and a
@@ -258,6 +288,7 @@ let msg = agent.data().message("m-12").await?;              // Option<MessageVie
 | `message` | `async fn message(&self, message_id: &str) -> Result<Option<MessageView>, UnikoError>` | A turn: sender, content, session, recipients, attachments. |
 | `artifact` | `async fn artifact(&self, artifact_id: &str) -> Result<Option<ArtifactView>, UnikoError>` | Metadata + reassembled text + the message it was attached to. |
 | `artifact_bytes` | `async fn artifact_bytes(&self, artifact_id: &str) -> Result<Option<Vec<u8>>, UnikoError>` | The original blob. |
+| `media_sources` | `async fn media_sources(&self, artifact_id: &str) -> Result<Vec<MediaSourceView>, UnikoError>` | The media an artifact was derived from (`MediaSourceView`: id, modality, MIME, hash, size, duration, `derivation_kind`, `bytes_retained`, …). |
 
 Each returns `None` for forgotten content and, on an agent scoped to a viewer, for content that
 viewer may not read — the same policy as recall. `artifact_bytes` is also `None` when any of the
@@ -295,7 +326,7 @@ tool_name }` with `.limit(n)` · `.session(id)` · `.tool(name)` · **`ReadRange
 pointer such as `/data/items[3-9]`, or `rows a-b`, `lines a-b`, `records a-b`) · `Bytes(start, end)` ·
 `Lines(first, last)` · `Chunks(first, last)`.
 
-**`SearchHit`** `{ source, chunk_id, chunk_index, address, start, end, text, context, score,
+**`SearchHit`** `{ source, chunk_id, chunk_index, address, position, start, end, text, context, score,
 session_id, call_id, tool_name }` · **`Outline`** `{ source, format, total_bytes, total_lines,
 entries: Vec<OutlineEntry>, truncated }` · **`OutlineEntry`** `{ address, kind, summary, start, end,
 depth }` · **`ReadResult`** `{ source, text, start, end, first_line, last_line, truncated, next }` ·
@@ -344,7 +375,8 @@ A single blob type drives both `Turn::attach` and `Session::ingest`.
 | Constructor | Description |
 | --- | --- |
 | `IngestSource::text(s)` / `::bytes(b)` / `::path(p)` | Build from text, bytes, or a file. |
-| `.with_mime(m)` / `.with_id(id)` / `.with_path(p)` | Override MIME, set the artifact id, set a display path. |
+| `.with_mime(m)` / `.with_id(id)` / `.with_path(p)` / `.with_kind(k)` | Override MIME, set the artifact id, set a display path, set the artifact kind. |
+| `.with_category(c)` / `.with_source(id)` / `.with_revision(id)` | Typed provenance — see [Recall results](#recall-results). |
 
 `IngestOutcome` is `Artifact(ArtifactIngestResult)` · `Pdf(PdfIngestResult)`; the
 result types carry `artifact_id` + node ids. Unsupported modalities return `Err(UnikoError::Unsupported(...))`. MIME is resolved explicit → magic-bytes → extension →
@@ -374,7 +406,8 @@ See [Agent Tools](../guides/agent-tools.md) for the parameter structs and edge w
 
 ## Access-control policy
 
-Facts/Observations carry a `visibility` (`public` / `private:{id}` / `team:{id}` / `org:{id}`).
+Facts, Observations, Messages and their Chunks carry a `visibility` (`null` or `public` /
+`private:{id}` / `team:{id}` / `org:{id}`).
 Scoped reads filter automatically; you can also apply it directly.
 
 | Symbol | Signature | Description |

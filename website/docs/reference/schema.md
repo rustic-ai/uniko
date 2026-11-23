@@ -28,6 +28,7 @@ application-computed `embedding` vector for similarity recall.
 
 | Node | Memory family | Purpose |
 |---|---|---|
+| `Source` | Foundation | The stable logical origin of a record — a web page, dataset, uploaded file, or upstream system (`source_id`, `name`, `uri`, `first_seen`, `last_seen`, `retired_at`). It outlives any single revision of its bytes; retiring it stops every revision grounding a current answer without deleting anything. |
 | `Participant` | Foundation | A human, agent, or service. Humans and agents are the same type — uniform actors that send messages and perform actions. |
 | `Goal` | Working | A long-running objective that context is assembled around. |
 | `Task` | Working | A unit of work toward a `Goal`. |
@@ -52,7 +53,7 @@ application-computed `embedding` vector for similarity recall.
 | `DeadLetter` | Meta-memory | A failed pipeline task held for retry. |
 | `Organization` | Organization | A grouping that participants belong to. |
 | `Team` | Organization | A sub-grouping within an organization. |
-| `KnowledgeBaseStats` | KB metadata | Singleton node holding modality-presence cache and persisted blob-storage config. |
+| `KnowledgeBaseStats` | KB metadata | Singleton node holding the modality-presence cache, the persisted blob-storage config and embedding identity (so a mismatched reopen hard-errors), and the state of any unfinished in-place migration. |
 
 !!! tip "Working memory computes on demand"
     There is no stored `WorkingMemory` node. Working memory is a live view assembled from a
@@ -79,6 +80,8 @@ name: `Fact.valid_at` gates contradiction detection and bitemporal recall,
     | `observation_count` | Int64 | How many observations support it. |
     | `valid_at` | **Btic** | Temporal validity as a half-open interval `[lo, hi)` with per-bound certainty and granularity. |
     | `source_rule` | String | Which `Rule` derived this fact. |
+    | `invalidation_reason`, `invalidated_at` | String, DateTime | Node-level audit set when `valid_at` is closed (contradiction, evidence removal, subject erasure); `null` if never invalidated. |
+    | `category`, `source_id`, `revision_id` | String | Typed provenance: the caller's record class and the `Source` / revision it came from, denormalised so a recall scope filters on a property rather than a traversal. |
     | `visibility` | String | Access scope — `null`/`""`/`"public"` visible to all; `"private:{participant_id}"`, `"team:{team_id}"`, `"org:{org_id}"` restrict the audience. |
 
     `valid_at` is a single BTIC property, not a pair of DateTime columns. An
@@ -167,6 +170,7 @@ from five different node types into `Entity`). Those are noted inline.
 | `ATTACHED_TO` | `Artifact` → `Session`, `Message` | Where a file was dropped into a conversation, when no producing action exists (carries `attached_at`). |
 | `CONTAINS` | `Page` → `Block` | Attaches a page to one of its blocks (carries `reading_order`). |
 | `NEXT_IN_READING_ORDER` | `Block` → `Block` | Chains blocks in page reading order. |
+| `FROM_SOURCE` | `Message`, `Artifact` → `Source` | The logical source a record came from. `Message`, `Artifact`, `Chunk`, `Observation`, and `Fact` also carry a denormalised `source_id` (and `revision_id`) so recall can scope by source with a property predicate. |
 
 ### Semantic
 
@@ -191,7 +195,7 @@ from five different node types into `Entity`). Those are noted inline.
 |---|---|---|
 | `OPERATES_ON` | `Procedure` → `Entity` | The entity a procedure acts on. |
 | `USED_IN` | `Procedure` → `Task` | Tasks where the procedure was applied. |
-| `SUPERSEDES` | `Rule` → `Rule` | A newer rule replaces an older one. |
+| `SUPERSEDES` | `Rule`, `Artifact` → `Rule`, `Artifact` | A newer rule replaces an older one, or a newer revision of the same `Source` replaces an older `Artifact` revision. |
 | `COVERS` | `Rule` → `Episode` | Episodes a rule applies to (carries `correct`). |
 
 ### Meta-memory and organization
@@ -212,7 +216,7 @@ from five different node types into `Entity`). Those are noted inline.
 !!! note "DeadLetter has no edges"
     `DeadLetter` is a standalone node, not wired into the graph by an edge type. It records a
     failed streaming item:
-    - `dead_letter_id`, `step`, `error`, `error_kind`, `retriable`;
+    - `dead_letter_id`, `step`, `error`, `error_kind`, `retriable`, `node_ref`;
     - `status`, `retry_count`, `max_retries`, `next_retry_at`;
     - `ingest_type`, `agent_id`, the replayable `payload`;
     - `created_at`, `updated_at`, `resolved_at`, `resolution`.
@@ -231,12 +235,18 @@ is `Chunk.chunk_id`, which is unindexed because chunks are reached through
 - **BTree** — range columns like `Message.timestamp`, `Session.started_at`,
   `Fact.confidence`, `Observation.temporal_anchor`, `Artifact.page_count`.
 - **FullText** — BM25 columns like `Message.content`, `Chunk.text`,
-  `Observation.content`, `Summary.text`, `Fact.subject`.
+  `Observation.content`, `Summary.text`, `Fact.subject`, `Fact.object`.
+  `Chunk.search_text` carries its own analyzer (whitespace tokens,
+  lower-cased and ASCII-folded, no stemming or stop words) for exact
+  matching of identifiers and figures.
 
 Most embedding-bearing nodes also carry a **Vector** index. `Message`, `Chunk`,
 `Observation`, and `Summary` auto-embed from their text property (uni-db
-computes the vector on write); `Entity`, `Fact`, `Episode`, `Goal`, `Task`,
-`Session`, `Topic`, and `Procedure` use application-computed embeddings.
+computes the vector on write; a `Chunk` embeds its `context` header together
+with its `text`); `Entity`, `Fact`, `Episode`, `Action`, `Goal`, `Task`,
+`Session`, `Topic`, and `Procedure` use application-computed embeddings, as do
+the five per-modality embedding columns on `Artifact` (`text_`, `image_`,
+`audio_`, `video_`, `multimodal_embedding`).
 
 ### Conditional hybrid columns
 
