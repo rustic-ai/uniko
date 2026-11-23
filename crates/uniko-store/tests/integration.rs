@@ -58,6 +58,8 @@ mod unidb_schema_reapply_repro;
 #[path = "unidb_tx_snapshot_lag_repro.rs"]
 mod unidb_tx_snapshot_lag_repro;
 
+#[path = "unidb_azure_hybrid_repro.rs"]
+mod unidb_azure_hybrid_repro;
 #[path = "unidb_object_store_repro.rs"]
 mod unidb_object_store_repro;
 

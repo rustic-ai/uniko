@@ -264,7 +264,7 @@ impl Uniko {
     ///
     /// Returns [`UnikoError::Config`] when the store is open, inspected or
     /// migrated in this process (use [`store_info`](Self::store_info) on an
-    /// open instance), [`UnikoError::Unsupported`] for a URI other than `s3://` or `gs://`, and
+    /// open instance), [`UnikoError::Unsupported`] for a URI other than `s3://`, `gs://` or `az://`, and
     /// [`UnikoError`] when the store can't be read.
     pub async fn inspect_store(
         path: impl AsRef<Path>,

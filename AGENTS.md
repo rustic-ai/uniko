@@ -66,6 +66,16 @@ and Lance's S3 client there verifies against the keychain, ignoring
 `SSL_CERT_FILE`, so the lifecycle test skips itself. Stop a service with
 `docker rm -f uniko-s3-localstack` (or `uniko-s3-aws-emulator`, or `podman`).
 
+The same `cloud_e2e` tests and `test_cloud_storage.py` also run against Azure
+Blob Storage when `UNIKO_AZURE_ACCOUNT`, `UNIKO_AZURE_CONTAINER`,
+`UNIKO_AZURE_KEY` (Rust opens the stores with the account key) and
+`UNIKO_AZURE_SAS` (a container SAS with `racwdl` rights: the Rust tests read
+the container with it, and Python opens its store with it) are set. There is
+no Azure emulator in CI; run them against a throwaway storage account. Each
+test keeps its stores under a fresh prefix in the container. Against a
+distant region a whole-store operation can exceed uni-db's 30 s query
+timeout; `UNIKO_QUERY_TIMEOUT_SECS` raises it.
+
 ### One integration-test binary per crate
 
 Every test binary links the whole stack (uni-db, Lance, DataFusion, ONNX

@@ -40,7 +40,7 @@ What inspecting does and doesn't touch:
   differences. It isn't touched at all: nothing is created there.
 - A store in an object store is inspected and migrated like a local one: through its local
   directory with [`remote_storage`](configuration.md#remote-storage) set (hybrid), or by its
-  `s3://` or `gs://` URL (remote-only). Any other URI is refused with an `Unsupported` error.
+  `s3://`, `gs://` or `az://` URL (remote-only). Any other URI is refused with an `Unsupported` error.
 - A store that is open, or being inspected or migrated, in this process or another, is refused
   with a `Config` error. Ask the open instance instead: `memory.store_info()` reports its own store.
   `store_info().hybrid_backfill_pending` counts the rows a hybrid backfill still has to fill.

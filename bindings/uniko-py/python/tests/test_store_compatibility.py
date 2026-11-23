@@ -296,11 +296,12 @@ def test_migrate_refuses_a_schema_path(tmp_path: Path) -> None:
 
 
 def test_an_unsupported_uri_is_refused() -> None:
+    uri = "abfss://container@acct.dfs.core.windows.net/kb"
     with pytest.raises(uniko.UnsupportedError):
-        uniko.Uniko.inspect_store_sync("az://container/kb")
+        uniko.Uniko.inspect_store_sync(uri)
     with pytest.raises(uniko.UnsupportedError):
         uniko.Uniko.migrate_store_sync(
-            "az://container/kb", "rebuild_vector_indexes", {"vector_metric": "Dot"}
+            uri, "rebuild_vector_indexes", {"vector_metric": "Dot"}
         )
 
 

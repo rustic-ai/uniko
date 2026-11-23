@@ -221,7 +221,7 @@ fn refuse_remote_in_memory(config: &UnikoConfig) -> Result<()> {
 /// - A local path alone is a local store.
 /// - A local path with `config.remote_storage` is a hybrid store: data in
 ///   the bucket, the write-ahead log and id allocator in the directory.
-/// - An `s3://` or `gs://` path is a remote-only store, kept wholly in the
+/// - An `s3://`, `gs://` or `az://` path is a remote-only store, kept wholly in the
 ///   bucket. `remote_storage`, when set, must name the same URL, and gives
 ///   its endpoint and credentials; unset, they come from the environment.
 pub(crate) fn uni_builder(
@@ -251,12 +251,15 @@ pub(crate) fn uni_builder(
     } else if at.contains("://") && file_url_path(&at).is_none() {
         return Err(UnikoError::Config(format!(
             "with remote_storage set, the store path ({at}) is a local directory (hybrid) or \
-             the store's s3:// or gs:// URL (remote-only)"
+             the store's s3://, gs:// or az:// URL (remote-only)"
         )));
     } else {
         builder.hybrid(&resolved.url)
     };
-    let mut builder = builder.cloud_storage(resolved.cloud);
+    let mut builder = match resolved.cloud {
+        Some(cloud) => builder.cloud_storage(cloud),
+        None => builder,
+    };
     if remote.set_aside_stale_wal {
         builder = builder.set_aside_stale_wal();
     }
@@ -1492,7 +1495,7 @@ mod open_path_tests {
             .expect("in-memory refuses remote_storage");
         assert!(err.to_string().contains("in-memory"), "{err}");
         let err = with("https://bucket/kb").validate().unwrap_err();
-        assert!(err.to_string().contains("s3:// or gs://"), "{err}");
+        assert!(err.to_string().contains("s3://, gs:// or az://"), "{err}");
         drop(
             uni_builder(Path::new("s3://bucket/kb/"), &with("s3://bucket/kb"), false)
                 .expect("a remote-only store: the path is remote_storage's URL"),
@@ -1501,7 +1504,7 @@ mod open_path_tests {
             .err()
             .expect("a URI path naming another store");
         assert!(err.to_string().contains("different stores"), "{err}");
-        let err = uni_builder(Path::new("az://acct/kb"), &with("s3://bucket"), false)
+        let err = uni_builder(Path::new("https://acct/kb"), &with("s3://bucket"), false)
             .err()
             .expect("a URI that isn't an object store uniko supports");
         assert!(
