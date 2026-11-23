@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`UNIKO_QUERY_TIMEOUT_SECS`** raises uni-db's 30-second query timeout, for a
+  store far from its bucket.
+
 ## [0.6.0] - 2026-11-22
 
 ### Breaking

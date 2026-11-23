@@ -25,13 +25,16 @@ use uni_db::{ModelAliasSpec, ModelTask, Uni, UniConfig, WarmupPolicy};
 /// Diagnostic perf-knob override read from env vars. Set
 /// `UNIKO_WAL_DISABLED=1` to disable WAL, or
 /// `UNIKO_AUTOFLUSH_THRESHOLD=N` to override the L0 auto-flush
-/// threshold. Returns Some(cfg) only if at least one knob is set, so
-/// the default UniConfig isn't perturbed in normal use.
+/// threshold, or `UNIKO_QUERY_TIMEOUT_SECS=N` to raise uni-db's
+/// per-query timeout (30 s), which a store in a distant bucket can
+/// exceed. Returns Some(cfg) only if at least one knob is set, so the
+/// default UniConfig isn't perturbed in normal use.
 fn apply_perf_knobs_from_env() -> Option<UniConfig> {
     let wal = std::env::var("UNIKO_WAL_DISABLED").ok();
     let flush = std::env::var("UNIKO_AUTOFLUSH_THRESHOLD").ok();
     let flush_interval_off = std::env::var("UNIKO_AUTOFLUSH_INTERVAL_OFF").ok();
-    if wal.is_none() && flush.is_none() && flush_interval_off.is_none() {
+    let query_timeout = std::env::var("UNIKO_QUERY_TIMEOUT_SECS").ok();
+    if wal.is_none() && flush.is_none() && flush_interval_off.is_none() && query_timeout.is_none() {
         return None;
     }
     let mut cfg = UniConfig::default();
@@ -48,6 +51,13 @@ fn apply_perf_knobs_from_env() -> Option<UniConfig> {
     if matches!(flush_interval_off.as_deref(), Some("1") | Some("true")) {
         cfg.auto_flush_interval = None;
         tracing::warn!("UNIKO_AUTOFLUSH_INTERVAL_OFF=1 — disabling time-based flush");
+    }
+    if let Some(s) = query_timeout
+        && let Ok(n) = s.parse::<u64>()
+        && n > 0
+    {
+        cfg.query_timeout = std::time::Duration::from_secs(n);
+        tracing::warn!(secs = n, "UNIKO_QUERY_TIMEOUT_SECS set");
     }
     Some(cfg)
 }
