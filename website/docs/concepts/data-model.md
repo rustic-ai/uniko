@@ -140,7 +140,7 @@ a `Fact`, which knows the `Rule` that derived it and the `Fact` it replaced.
 
 ## Node types
 
-A representative subset of the 25 registered node types. Each is registered by a module under
+A representative subset of the 26 registered node types. Each is registered by a module under
 `crates/uniko-store/src/schema/`.
 
 | Node | Layer | What it represents | Key properties |
@@ -166,9 +166,9 @@ A representative subset of the 25 registered node types. Each is registered by a
 | `Organization` / `Team` | Organization | Participant grouping | `org_id` / `team_id`, `name` |
 | `KnowledgeBaseStats` | KB metadata | Singleton KB-level metadata (modality presence, blob backend) | `stats_id`, `modality_presence` |
 
-!!! note "Five more nodes round out the 25"
+!!! note "Five more nodes round out the 26"
     Beyond the table, the schema also registers `DeadLetter` (failed-pipeline-task tracking),
-    `KnowledgeBaseStats`, `Page` (a single PDF page in the document-IR model), `Block`
+    `Source` (the stable logical origin of a `Message` or `Artifact`, reached by `FROM_SOURCE`), `Page` (a single PDF page in the document-IR model), `Block`
     (an atomic content block within a `Page`), and `Pattern` (a recurring episode pattern
     surfaced by the `episode_pattern_detector` stdlib rule). The full
     property and index list for every node type is in the
@@ -176,7 +176,7 @@ A representative subset of the 25 registered node types. Each is registered by a
 
 ## Edge types
 
-A representative subset of the 54 registered edge types. The full list, with source/target
+A representative subset of the 55 registered edge types. The full list, with source/target
 labels and edge properties, is in the [Schema reference](../reference/schema.md).
 
 | Edge | From → To | Meaning |
@@ -197,7 +197,7 @@ labels and edge properties, is in the [Schema reference](../reference/schema.md)
 | `DERIVED_BY` | `Fact → Rule` | Which rule produced the fact |
 | `INVALIDATES` | `Fact → Fact` | Newer fact supersedes an older one |
 | `FOLLOWED_BY` | `Episode → Episode` | Temporal chain of experiences |
-| `SUPERSEDES` | `Rule → Rule` | A newer rule replaces an older one |
+| `SUPERSEDES` | `Rule`, `Artifact → Rule`, `Artifact` | A newer rule (or artifact version) replaces an older one |
 | `SUMMARIZES` | `Summary → Session`/`Task`/`Goal`/`Artifact`/`Entity`/`Topic`… | What a summary covers |
 
 ## Working memory is a view, not a node

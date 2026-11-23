@@ -703,7 +703,10 @@ async fn lock_child_opens_the_parents_store() {
     let err = open(Path::new(&store), UnikoConfig::default())
         .await
         .expect_err("a second process is refused");
-    assert!(err.to_string().contains("another process"), "{err}");
+    assert!(
+        matches!(&err, UnikoError::Config(m) if m.contains("open for writing elsewhere")),
+        "{err}"
+    );
 }
 
 fn lock_child_test_name() -> String {
@@ -715,8 +718,8 @@ fn lock_child_test_name() -> String {
     }
 }
 
-/// A store open in one process can't be opened by another: the OS lock on
-/// its `.uniko.lock` refuses the second, and the first's close frees it.
+/// A store open in one process can't be opened by another: uni-db's OS lock
+/// on its `writer.lock` refuses the second, and the first's close frees it.
 #[tokio::test]
 async fn a_second_process_cannot_open_an_open_store() {
     let dir = tempfile::tempdir().unwrap();
@@ -764,7 +767,7 @@ async fn a_shared_runtime_open_is_explained_too() {
 }
 
 #[tokio::test]
-async fn migrate_refuses_schema_path_and_remote_uris() {
+async fn migrate_refuses_schema_path_and_unsupported_uris() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kb");
     create(&path, UnikoConfig::default()).await;
@@ -785,11 +788,11 @@ async fn migrate_refuses_schema_path_and_remote_uris() {
         "{err}"
     );
     for result in [
-        KnowledgeBase::inspect("s3://bucket/kb", &UnikoConfig::default())
+        KnowledgeBase::inspect("az://container/kb", &UnikoConfig::default())
             .await
             .err(),
         KnowledgeBase::migrate(
-            "s3://bucket/kb",
+            "az://container/kb",
             UnikoConfig::default(),
             Migration::RebuildVectorIndexes,
             &mut no_progress(),

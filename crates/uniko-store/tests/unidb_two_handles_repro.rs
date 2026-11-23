@@ -1,25 +1,16 @@
-//! Isolated uni-db repro: two `Uni` handles on one store directory.
+//! Plain uni-db, no uniko code: a second writer on an open store is
+//! refused.
 //!
-//! Plain uni-db, no uniko code. uni-db takes no lock on a store directory,
-//! so a second `Uni::open` of a directory another handle has open succeeds
-//! (once the store has a snapshot manifest), and the two handles are two
-//! independent writers on the same files: neither sees the other's commits.
-//!
-//! The test asserts what a locked directory would give, a refused second
-//! open, so it is ignored until uni-db locks it. Run it to see today's
-//! behavior:
-//!
-//! ```sh
-//! cargo nextest run -p uniko-store --test integration unidb_two_handles_repro:: \
-//!   --run-ignored all --no-capture
-//! ```
-//!
-//! uniko guards against this itself (`OpenPath` in `storage/mod.rs`: one
-//! claim per path in the process, and an OS lock on `.uniko.lock`).
+//! uni-db once took no lock on a store directory, so a second `Uni::open`
+//! of a directory another handle had open succeeded, and the two handles
+//! were two writers that didn't see each other's commits
+//! (rustic-ai/uni-db#348). uni-db now holds a local store by an OS lock on
+//! `writer.lock`. uniko relies on that across processes; within one it
+//! refuses the second open itself (`OpenPath` in `storage/mod.rs`).
 
 use std::collections::HashMap;
 
-use uni_db::{DataType, Uni, Value};
+use uni_db::{DataType, Uni, UniConfig, UniError, Value};
 
 async fn count(db: &Uni) -> i64 {
     db.session()
@@ -42,7 +33,6 @@ async fn insert(db: &Uni, n: i64) {
     tx.commit().await.unwrap();
 }
 
-#[ignore = "uni-db takes no lock on a store directory: a second handle opens and writes alongside the first"]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_second_handle_on_an_open_store_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -58,25 +48,25 @@ async fn a_second_handle_on_an_open_store_is_refused() {
     insert(&a, 1).await;
     a.flush().await.unwrap();
 
-    let b = Uni::open(path.to_string_lossy()).build().await;
-    let Ok(b) = b else {
-        println!("second open refused: {}", b.err().unwrap());
-        return;
-    };
-    insert(&b, 2).await;
-    insert(&a, 3).await;
-    println!(
-        "second open succeeded; a sees {} docs, b sees {} (3 were written in all)",
-        count(&a).await,
-        count(&b).await
+    let mut quick = UniConfig::default();
+    quick.writer_lease.acquire_grace = std::time::Duration::from_millis(100);
+    let b = Uni::open(path.to_string_lossy())
+        .config(quick)
+        .build()
+        .await;
+    assert!(
+        matches!(b, Err(UniError::StoreLocked { .. })),
+        "a second writer is refused: {:?}",
+        b.err()
     );
-    a.flush().await.unwrap();
-    b.flush().await.unwrap();
-    drop((a, b));
+    insert(&a, 2).await;
+    a.shutdown().await.unwrap();
+
     let reopened = Uni::open(path.to_string_lossy()).build().await.unwrap();
-    println!(
-        "after both flush and the store reopens: {} docs",
-        count(&reopened).await
+    assert_eq!(
+        count(&reopened).await,
+        2,
+        "the one writer's commits are all there"
     );
-    panic!("a second handle opened a store another handle had open");
+    reopened.shutdown().await.unwrap();
 }

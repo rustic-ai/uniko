@@ -24,6 +24,9 @@ agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 - A recent C toolchain (for native ML dependencies such as `ort`/ONNX Runtime).
 
+- **`protoc`** (`protobuf-compiler`), which Lance (uni-db's storage layer)
+  needs at build time. CI installs `protobuf-compiler mold`.
+
 - **`mold`**, on Linux — this one is required, not a nicety. `.cargo/config.toml`
   forces it as the link backend for all Linux builds, so a machine without it
   fails at link time rather than falling back:
@@ -45,8 +48,8 @@ cd uniko
 cargo build
 ```
 
-`cargo build` pulls **uni-db** (`^3` — the latest 3.x) and **uni-xervo**
-(`0.17.0`) straight from crates.io. **No access token, private repository, or
+`cargo build` pulls **uni-db** (`^6.0` — the latest 6.x) and **uni-xervo**
+(`0.20.0`) straight from crates.io. **No access token, private repository, or
 special credentials are required** — a plain `cargo build` works out of the box.
 
 > First builds compile inference-heavy dependencies (ONNX Runtime,
@@ -68,6 +71,10 @@ uniko is a Cargo workspace. The product crates are:
 
 Plus `uniko-bench` (benchmark harness, `publish = false`) and
 `bindings/uniko-py` (async-first PyO3 Python SDK, alpha, `publish = false`).
+The GPU wheel variants `bindings/uniko-cuda` and `bindings/uniko-metal` are
+workspace members too, but not default members: `uniko-cuda` needs the CUDA
+toolkit and `uniko-metal` builds only on macOS, so every `--workspace` command
+below excludes them, as CI does.
 
 ### Python bindings (optional)
 
@@ -98,18 +105,22 @@ means passing in CI:
 cargo fmt --all --check
 
 # 2. Lint (warnings are errors)
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --exclude uniko-cuda --exclude uniko-metal -- -D warnings
 
 # 3. Compile the whole workspace
-cargo check --workspace
+cargo check --workspace --exclude uniko-cuda --exclude uniko-metal
 
 # 4. Tests (see §3)
-cargo nextest run --workspace
+cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal
 
 # 5. Dependency policy (licenses + advisories)
 cargo deny check
 
-# 6. uni-db seal (see §4)
+# 6. Release guards: crates.io publish order, and version sync
+python3 scripts/ci/check_publish_list.py
+python3 scripts/ci/check_version_sync.py
+
+# 7. uni-db seal (see §4)
 ```
 
 To auto-fix formatting before committing, drop the `--check`:
@@ -132,17 +143,18 @@ cargo install cargo-nextest --locked
 Run the full suite:
 
 ```sh
-cargo nextest run --workspace
+cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal
 ```
 
 Run a single crate or filter by test name:
 
 ```sh
 cargo nextest run -p uniko-memory
-cargo nextest run -E 'test(recall_cascade)'
+cargo nextest run -E 'test(recall_temporal)'
 ```
 
-CI runs `cargo nextest run --workspace`, so that is the command of record. Add
+CI runs `cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal`, so that is the command of
+record. Add
 or update tests alongside any behavioral change.
 
 ### macOS: put `TMPDIR` on a RAM disk before running tests
@@ -182,11 +194,14 @@ Every pull request must pass the checks in `.github/workflows/ci.yml`. They are:
 | Gate | Command |
 | --- | --- |
 | Format | `cargo fmt --all --check` |
-| Lint | `cargo clippy --workspace -- -D warnings` |
-| Compile | `cargo check --workspace` |
-| Tests | `cargo nextest run --workspace` |
+| Lint | `cargo clippy --workspace --exclude uniko-cuda --exclude uniko-metal -- -D warnings` |
+| Compile | `cargo check --workspace --exclude uniko-cuda --exclude uniko-metal` |
+| Tests | `cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal` |
+| Publish order | `python3 scripts/ci/check_publish_list.py` |
+| Version sync | `python3 scripts/ci/check_version_sync.py` |
 | Dependency policy | `cargo deny check` |
 | uni-db seal | see below |
+| Python binding | in `bindings/uniko-py`: `uv run maturin develop`, `uv run pytest -n 4`, `uv run python -m mypy.stubtest uniko._uniko`, `uv run ruff check python`, `uv run ruff format --check python`, `uv run ty check` |
 
 ### Dependency policy (cargo-deny)
 

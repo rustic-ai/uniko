@@ -8,11 +8,11 @@
   "Dummy PDF file".
 - **Why this file:** smallest publicly-served PDF with normal text that
   validates the real `pdf-extract` → `PdfExtractCrate::extract` round
-  trip in `tests/ingest_pdf_e2e.rs` and the extractor unit tests.
+  trip in `tests/extract_tests/ingest_pdf_e2e.rs` and the extractor unit tests.
 
 ## `scanned.pdf`
 
-- **Source:** generated for this repository with Pillow: five lines of
+- **Source:** generated for this repository with Pillow: four lines of
   Arial 44 pt rendered to a 1275×1650 grayscale image (US letter at
   150 dpi) and saved as a single-page PDF.
 - **Content:** an image only, with no text layer. The rendered text reads
@@ -20,14 +20,14 @@
   "Inspector Mira Okafor signed off the repair." and "Next inspection is due
   in September."
 - **Why this file:** a page with no extractable text forces the tiered
-  extractor onto its OCR tier, so `ingest_pdf_tiered_test.rs` checks OCR
+  extractor onto its OCR tier, so `tests/extract_tests/ingest_pdf_tiered_test.rs` checks OCR
   recognition, page/block provenance and recall, not just the native tier.
 
 ## `scanned-page.jpg`
 
 - **Source:** the page image embedded in `scanned.pdf` (its `DCTDecode`
   stream, written out unchanged): 1275×1650 grayscale JPEG.
-- **Content:** the same five lines as `scanned.pdf`.
+- **Content:** the same four lines as `scanned.pdf`.
 - **Why this file:** an image ingested on its own, so the model-backed OCR
   extractor (`ModelExtractor::image().ocr(..)`, issue #61) is tested on the
   same text the PDF OCR tier reads.

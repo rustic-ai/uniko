@@ -196,7 +196,8 @@ Some details:
 
 - **No transcription provider yet.** uni-xervo's only transcriber is `local/whisper-cpp`, and
   uni-db builds the store's model runtime without registering it, so an alias on it can't load.
-  `build()` refuses one with `Unsupported` (`WHISPER_CPP_PROVIDER`, `model_extractor.rs:55`).
+  `build()` refuses one with `Unsupported`, citing rustic-ai/uni-db#351 (`WHISPER_CPP_PROVIDER`,
+  `model_extractor.rs:55`, refused at `model_extractor.rs:415`).
   Until uni-db registers it, transcribe with your own function and return
   `transcript` segments through `TextExtractor::structured`, as shown above.
 
@@ -248,7 +249,7 @@ ffmpeg -i in.mp4 -vn -ar 16000 -ac 1 -c:a pcm_s16le audio.wav
 
 `build()` checks every model extractor against the catalog before the store opens
 (`ModelExtractor::validate`, `model_extractor.rs:328`, called from
-`crates/uniko-memory/src/facade/uniko.rs:758`):
+`crates/uniko-memory/src/facade/uniko.rs:759`):
 
 | Configuration | Error |
 |---|---|

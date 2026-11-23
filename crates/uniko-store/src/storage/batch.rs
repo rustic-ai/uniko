@@ -34,7 +34,6 @@ impl KnowledgeBase {
             return Ok(Vec::new());
         }
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
         let node_ids = self.batch_create_nodes_in_tx(&tx, label, items).await?;
         tx.commit().await?;
@@ -194,7 +193,6 @@ impl KnowledgeBase {
             return Ok(Vec::new());
         }
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
         let edge_ids = self
             .batch_create_edges_inner_in_tx(&tx, edge_type, src_label, dst_label, edges, return_ids)

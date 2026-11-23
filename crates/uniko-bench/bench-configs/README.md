@@ -49,6 +49,9 @@ winning arm judged. **Arms A–C need a fresh ingest** (dense dim 384→1024 +
 new sparse/colbert columns); KBs are reusable within an arm, never across
 the bge-small→bge-m3 boundary.
 
+The LoCoMo arms are in this directory; their LongMemEval twins (`lme-*`) are
+in `crates/uniko-bench/configs/`.
+
 | File (LoCoMo / LME twin) | Embedder | Sparse | Reranker | Isolates |
 |---|---|---|---|---|
 | `locomo-arm0-bge-small-baseline` / `lme-arm0-bge-small-baseline` | bge-small | off | cross-encoder | current main |

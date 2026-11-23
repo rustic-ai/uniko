@@ -416,8 +416,8 @@ impl ModelExtractor {
                 return Err(UnikoError::Unsupported(format!(
                     "{name} extractor: transcribe alias '{}' uses {WHISPER_CPP_PROVIDER}, which \
                      the store's model runtime does not register (uni-db builds it without the \
-                     whisper.cpp provider); transcribe with your own function through \
-                     TextExtractor::structured instead",
+                     whisper.cpp provider, rustic-ai/uni-db#351); transcribe with your own \
+                     function through TextExtractor::structured instead",
                     t.alias
                 )));
             }

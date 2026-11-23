@@ -19,7 +19,7 @@ cargo build
 
 - **Rust:** stable channel (pinned in `rust-toolchain.toml`), **edition 2024**,
   **MSRV `1.95`** (`rust-version` in the workspace `Cargo.toml`).
-- `cargo build` pulls `uni-db` (`^5.3` — the latest 5.x) and `uni-xervo` (`0.20.0`)
+- `cargo build` pulls `uni-db` (`^6.0` — the latest 6.x) and `uni-xervo` (`0.20.0`)
   straight from crates.io — **no token, private repo, or credentials required.**
   Those are the requirements in the workspace `Cargo.toml`; `Cargo.lock` has the
   exact resolved versions.
@@ -34,9 +34,9 @@ cargo build
 Use **`cargo nextest`**, never `cargo test` — nextest is the runner of record in CI.
 
 ```sh
-cargo nextest run --workspace            # full suite
+cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal   # full suite
 cargo nextest run -p uniko-memory        # one crate
-cargo nextest run -E 'test(recall_cascade)'   # filter by name
+cargo nextest run -E 'test(recall_temporal)'  # filter by name
 cargo nextest run -p uniko-store --test integration store_tests::   # one suite
 ```
 
@@ -45,19 +45,26 @@ unless `EXPENSIVE_TESTS=1`. CI runs them, Rust and Python, nightly on `main`
 and on demand (`.github/workflows/expensive.yml`); locally, set it with
 `UNI_CACHE_DIR=$PWD/.uni_cache` so every test shares one model cache.
 
-### Object-store lease tests (AWS Emulator)
+### Cloud storage tests (LocalStack, AWS Emulator)
 
-The lease tests in `crates/uniko-store/src/storage/lease.rs` (`emulator_*`)
-run against the [AWS Emulator](https://github.com/aws/aws-emulator), a local
-S3 with conditional writes, and return early unless `UNIKO_S3_EMULATOR_*` is
-set. The nightly workflow starts it; locally (docker or podman):
+Tests of a store kept in S3 return early unless `UNIKO_S3_ENDPOINT` is set:
+the store's whole lifecycle through `remote_storage`, hybrid and
+remote-only, including uni-db's writer lease (`crates/uniko-memory/tests/cloud_e2e.rs`),
+the plain uni-db checks in `crates/uniko-store/tests/unidb_object_store_repro.rs`,
+and the Python `test_cloud_storage.py`. `scripts/s3/start.sh` starts LocalStack or the AWS
+Emulator with docker or podman and prints the environment they read. The
+`cloud.yml` workflow runs them against both after each merge to `main`.
 
 ```sh
-set -a; eval "$(scripts/aws-emulator/start.sh)"; set +a
-cargo nextest run -p uniko-store --lib -E 'test(emulator)'
+set -a; eval "$(scripts/s3/start.sh localstack)"; set +a
+cargo nextest run -p uniko-store --test integration -E 'test(unidb_object_store_repro::)'
+cargo nextest run -p uniko-memory --test integration -E 'test(cloud_e2e::)'
 ```
 
-Stop it with `docker rm -f uniko-aws-emulator` (or `podman`).
+On macOS, use LocalStack: the AWS Emulator serves HTTPS with its own CA,
+and Lance's S3 client there verifies against the keychain, ignoring
+`SSL_CERT_FILE`, so the lifecycle test skips itself. Stop a service with
+`docker rm -f uniko-s3-localstack` (or `uniko-s3-aws-emulator`, or `podman`).
 
 ### One integration-test binary per crate
 
@@ -143,11 +150,14 @@ CI says nothing about whether your local run will hang. Eject with
 ## The check loop (mirrors CI exactly — run before declaring work done)
 
 ```sh
-cargo fmt --all --check                  # format (use without --check to fix)
-cargo clippy --workspace -- -D warnings  # lint — warnings are errors
-cargo check --workspace                  # compile
-cargo nextest run --workspace            # tests
-cargo deny check                         # license + advisory policy (deny.toml)
+X='--exclude uniko-cuda --exclude uniko-metal'   # GPU wheel variants, built only in release.yml
+cargo fmt --all --check                       # format (use without --check to fix)
+cargo clippy --workspace $X -- -D warnings    # lint — warnings are errors
+cargo check --workspace $X                    # compile
+cargo nextest run --workspace $X              # tests
+cargo deny check                              # license + advisory policy (deny.toml)
+python3 scripts/ci/check_publish_list.py      # release.yml's crates.io publish order
+python3 scripts/ci/check_version_sync.py      # every version derives from the workspace's
 # + the uni-db seal (below)
 ```
 
@@ -198,7 +208,7 @@ Plus `uniko-bench` (`publish = false`) and `bindings/uniko-py`.
 
 ### 3. uni-db is a SEPARATE project — never edit it
 
-uni-db is consumed from crates.io (`uni-db = "5.3"`). A local checkout may exist
+uni-db is consumed from crates.io (`uni-db = "6.0.0"`). A local checkout may exist
 at `../uni/` or `../uni-db/` for reference only — **never edit it directly**, and
 never leave a `[patch.crates-io]` pointing at it in a commit. When you hit a
 uni-db bug: build a *minimal isolated repro* (see
@@ -219,7 +229,8 @@ uv run maturin develop   # compile the extension into the uv venv
 uv run pytest            # run the Python test suite
 ```
 
-Needs `protoc` + a C/C++ toolchain on `PATH`. No prebuilt wheels yet.
+Needs `protoc` + a C/C++ toolchain on `PATH`. Users install the prebuilt
+wheels from PyPI (`uniko`, `uniko-cuda`, `uniko-metal`, built by `release.yml`).
 
 ## Documentation site (`website/`)
 

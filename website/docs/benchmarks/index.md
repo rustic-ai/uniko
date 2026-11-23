@@ -72,7 +72,7 @@ comparability.
 | Retrieval hit | **0.8555** |
 | F1 | **0.321** |
 | Total LLM cost (answer + judge) | **$3.55** |
-| Ingest wall time | **7.5 min** for 5,882 turns (~62 ms/turn) |
+| Ingest wall time | **7.5 min** for 5,882 turns (~76 ms/turn) |
 | Ingest API cost | **$0** |
 | Mean Q&A latency | **4.04s** (2.84s recall + 1.20s generation) |
 
@@ -80,9 +80,9 @@ Published competitor judge scores on LoCoMo: Mem0 91.6%, Graphiti 75–84%, Lett
 58.1%.
 
 !!! note "Two source-faithful ingest rates"
-    Both numbers describe the same 7.5 min / 5,882-turn run: **~76 ms/turn** is the wall-clock rate
-    reported in the KTH comparison; **~62 ms/turn** is the steady-state post-warmup rate from
-    `perf-journey.md`.
+    **~76 ms/turn** is the 7.5 min / 5,882-turn full-corpus run (7.5 min ÷ 5,882 turns), as
+    reported in the KTH comparison. **~62 ms/turn** is the rate from the perf journey for one
+    369-turn conversation (~22–28 s) — a different, smaller workload. Don't conflate them.
 
 *Source: `data/locomo_gemini31_merged.json`, baseline dated 2026-05-26.*
 
@@ -147,7 +147,7 @@ The same-size LoCoMo conversation that took **2h 7m to ingest on 2026-04-21** no
 
 ```mermaid
 graph LR
-    A["2026-04-21<br/>2h 7m / 369 turns"] -->|uni-db fixes<br/>bulk APIs<br/>mimalloc| B["2026-06-14<br/>7.5 min / 5,882 turns<br/>~62 ms/turn"]
+    A["2026-04-21<br/>2h 7m / 369 turns"] -->|uni-db fixes<br/>bulk APIs<br/>mimalloc| B["~22–28s / 369 turns<br/>~62 ms/turn"]
 ```
 
 The April pathology was not a slow uniko algorithm — it was two uni-db bugs (a 600 ms retry-storm
@@ -181,6 +181,6 @@ distribution of LoCoMo conv-26 ingestion (419 turns, 19 sessions), median over 5
 | Benchmark | Metric | Value | Date |
 |---|---|---|---|
 | LoCoMo10 (1,986q) | judge / hit / F1 / cost | **0.8117 / 0.8555 / 0.321 / $3.55** | 2026-05-26 |
-| LoCoMo10 | ingest | **7.5 min / 5,882 turns / $0** (~62 ms/turn) | 2026-06-14 |
+| LoCoMo10 | ingest | **7.5 min / 5,882 turns / $0** (~76 ms/turn) | 2026-06-14 |
 | LME 11q slice | contains / R@5 | **0.727 / 0.909** (retrieval-only) | 2026-05-17 |
 | Bulk vs UNWIND | edges / nodes | **524× / 49.6×** | — |

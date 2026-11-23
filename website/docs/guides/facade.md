@@ -316,9 +316,9 @@ retries pending, retriable letters once their backoff has elapsed:
 
 The schedule is stored on the letters, so it carries across restarts. `flush` waits for a retry
 the task has already started, but not for one that isn't due yet. The task stops when the
-instance shuts down or is dropped. A store directory opens in one handle at a time, in one
-process (see [Changing the Embedding Model](model-migration.md)), so only one instance ever retries
-a store's dead letters.
+instance shuts down or is dropped. A store opens in one handle at a time, within a process and
+across processes (see [Changing the Embedding Model](model-migration.md#migrate-in-place)), so only
+one instance ever retries a store's dead letters.
 
 Binary payloads are stored as JSON, about three to four times their size, until they're resolved.
 
@@ -512,7 +512,7 @@ for item in &bundle.items {
         item.kind,                                       // Chunk / Fact / Observation / …
         if item.kind.is_derived() { " derived" } else { "" },
         item.content);
-    for src in &item.sources { /* Message | Attachment | Document — the lineage */ }
+    for src in &item.sources { /* Message | Attachment | Document | Session | Tool — the lineage */ }
 }
 ```
 
@@ -784,7 +784,7 @@ async fn main() -> anyhow::Result<()> {
 | Identity | `memory.agent(id)` / `agent.session(id)` | `Agent` / `Session` |
 | Write | `session.observe(Turn)` / `session.ingest(IngestSource)` | `ObserveResult` / `IngestOutcome` |
 | Finalize | `session.finalize()` / `agent.finalize_session(id)` | `FinalizeReport` |
-| Compile | `agent.consolidate()` | `CycleStats` |
+| Compile | `agent.consolidate()` / `consolidate_with(options)` | `ConsolidationReport` (`cycle`, `procedures`, `topics`) |
 | Read | `agent.recall` / `answer` / `query` (+ `_in`) | `ContextBundle` / `Answer` / `Vec<Record>` |
 | Retrieve | `agent.data().message` / `artifact` / `artifact_bytes` / `media_sources` | `Option<…View>` / `Option<Vec<u8>>` / `Vec<MediaSourceView>` |
 | Plan | `agent.goals()` (create / transition / read) | `GoalView` / `TaskView` / `GoalContext` |

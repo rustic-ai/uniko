@@ -52,7 +52,7 @@ The lowest layer. It wraps uni-db to provide typed graph storage, search (vector
 The central type is [`KnowledgeBase`](../reference/api.md), the typed handle every higher crate uses. Its modules cover storage (`operations` for writes, `repository` for decoded reads), `search`, `schema`, `locy`, `model` (model-runtime access), `blob_store`, `locks`, and `id` generation.
 
 !!! tip "Clean API boundary"
-    uni-db is an implementation detail. The product crates — `uniko-{memory,extract,cortex,pipes}` — reach the graph through `uniko-store`'s typed API, and a CI grep gate enforces it by forbidding `use uni_db` in their `src/`. The few uni-db value types higher crates need (`Value`, `Transaction`, `temporal::Btic`, `xervo::{GenerationOptions, Message}`) are re-exported from `uniko-store`, so callers write `use uniko_store::Value;`. The payoff: the rest of the system is insulated from database internals.
+    uni-db is an implementation detail. The product crates — `uniko-{memory,extract,cortex,pipes}` — reach the graph through `uniko-store`'s typed API, and a CI grep gate enforces it by forbidding `use uni_db` in their `src/`. The few uni-db value types higher crates need (`Value`, `Transaction`, `RetryOptions`, `temporal::Btic`, `xervo::{GenerationOptions, Message}`) are re-exported from `uniko-store`, so callers write `use uniko_store::Value;`. The payoff: the rest of the system is insulated from database internals.
 
 A second re-export, `ModelRuntime` (from `uni-xervo`), backs `SharedRuntime`, which lets multi-KnowledgeBase workflows share one ONNX session via `SharedRuntime::build` and `KnowledgeBase::open_shared`.
 
@@ -65,7 +65,7 @@ Layer 2, depending on `uniko-store` only. This crate is *generic* pipeline machi
 - `DeadLetterQueue` — keeps failed streaming items, with their payload, to inspect, retry and resolve.
 - `ShutdownCoordinator` — cooperative cancellation across workers.
 - `health` and `metrics` — per-worker status and Prometheus-exportable counters.
-- Task and result types: `IngestTask`, `IngestMessage`, `IngestArtifact`, `IngestPdf`, `ConsolidationTask`, `ObservationsReady`, `ItemResult`, `StepOutcome`, `StepErrorPolicy`, `PipelineConfig`.
+- Task and result types: `IngestTask`, `IngestMessage`, `IngestArtifact`, `IngestPdf`, `IngestSource`, `ConsolidationTask`, `ObservationsReady`, `ItemResult`, `StepOutcome`, `StepErrorPolicy`, `PipelineConfig`.
 
 The actual content-processing steps live one layer up, in `uniko-extract`.
 
@@ -106,7 +106,7 @@ It depends on `uniko-store` only. The consolidation worker in `uniko-memory` cal
 
 ### uniko-api — public facade
 
-The agent-facing surface, containing **no logic** — only re-exports. The `Uniko` facade (`Uniko`, `Agent`, `Session`, `Turn`, `Data`, `Goals`, and the recall/answer types) is the single public entry point. Its `tools` module deliberately does **not** re-export the subjective-state free functions (`record_episode`, `assert_fact`, `add_observation`, `create_goal`, `create_task`, `record_action`, `generate_session_summary`) — a `compile_fail` guard pins this. Those operations are surfaced as `Agent` / `Session` methods instead, so the public surface never exposes a raw `&KnowledgeBase`. Among lower-level items, `tools` re-exports only `nl_to_cypher::is_safe_read_only` and `policy::{Viewer, visibility_admits}`, alongside the facade and intent types. The free functions remain available at the `uniko-memory` crate root. Downstream consumers depend on this crate rather than reaching into the cognitive stack directly.
+The agent-facing surface, containing **no logic** — only re-exports. The `Uniko` facade (`Uniko`, `Agent`, `Session`, `Turn`, `Data`, `Goals`, and the recall/answer types) is the single public entry point. Its `tools` module deliberately does **not** re-export the subjective-state free functions (`record_episode`, `assert_fact`, `add_observation`, `create_goal`, `create_task`, `record_action`, `generate_session_summary`) — a `compile_fail` guard on `create_goal` pins this. Those operations are surfaced as `Agent` / `Session` methods instead, so the public surface never exposes a raw `&KnowledgeBase`. Among lower-level items, `tools` re-exports only a handful of free functions — `ingest_source`, `resolve_mime`, `fact_id_for` / `fact_id_for_scoped`, `temporal_epoch_millis`, `nl_to_cypher::is_safe_read_only`, and `policy::visibility_admits` — alongside the facade, intent, and parameter types. The free functions remain available at the `uniko-memory` crate root. Downstream consumers depend on this crate rather than reaching into the cognitive stack directly.
 
 ### uniko-bench — benchmarks
 
@@ -119,21 +119,23 @@ The architecture's other axis is *latency*. uniko keeps the LLM out of the write
 ```mermaid
 sequenceDiagram
     participant Agent
+    participant IU as ingest_turns_atomic
     participant IA as ingest_message_atomic
     participant PS as PipelineSystem
     participant IW as Ingest worker
 
-    Agent->>IA: session.observe(turn) — direct call
-    Note over IA: atomic ingest — single tx<br/>Message + edges + chunks +<br/>Entities + MENTIONS +<br/>Observations + OBSERVED_IN + ABOUT
-    IA-->>Agent: persisted (all-or-nothing)
+    Agent->>IU: session.observe(turn) — direct call (a one-turn unit)
+    Note over IU: atomic ingest — single tx<br/>Message + edges + chunks +<br/>Entities + MENTIONS +<br/>Observations + OBSERVED_IN + ABOUT<br/>+ attachments and tool calls
+    IU-->>Agent: persisted (all-or-nothing)
 
     Agent->>PS: session.submit(turn) — only with streaming(true)
     PS->>IW: bounded channel
-    IW->>IA: IngestStep → same atomic ingest
+    IW->>IA: IngestStep → per-message atomic ingest
 ```
 
 !!! warning "The default path does not go through `PipelineSystem`"
-    `session.observe()` calls `ingest_message_atomic` directly and commits before
+    `session.observe()` commits the turn as a one-turn unit through
+    `ingest_turns_atomic` (the same path as `session.unit()`) and commits before
     returning. `PipelineSystem` is constructed **only** when the instance was built with
     `.streaming(true)`, and is reachable only via `submit()` / `submit_source()`.
 
@@ -162,8 +164,9 @@ Slower, accumulation-dependent work is designed to run in background workers own
   failures are logged and dropped.
 
 !!! tip "Two ways consolidation runs"
-    **Explicitly** — `agent.consolidate()` runs one cycle on the calling task and returns
-    `CycleStats`. Always available, no streaming required. This is the path to use when you
+    **Explicitly** — `agent.consolidate()` runs one cycle on the calling task, then procedure
+    promotion and topic detection, and returns a `ConsolidationReport` (`cycle: CycleStats`,
+    `procedures`, `topics`). Always available, no streaming required. This is the path to use when you
     want to decide the moment (end of a conversation, before a report, in a batch job).
 
     **Automatically** — an instance built with `.streaming(true)` owns a consolidation

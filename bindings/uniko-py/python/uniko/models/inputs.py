@@ -347,6 +347,7 @@ __all__ = [
     "ScopeSpec",
     "IngestSourceSpec",
     "TurnSpec",
+    "ToolCallSpec",
     "LlmSpecModel",
     "LlmSpecAdapter",
     "llm_to_native",

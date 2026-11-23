@@ -1392,24 +1392,24 @@ class Uniko:
     @staticmethod
     def inspect_store(
         path: str,
-        config: dict[str, Any] | None = None,
+        config: Mapping[str, Any] | UnikoConfigModel | None = None,
         *,
-        embedding: str | dict[str, Any] | None = None,
+        embedding: str | Mapping[str, Any] | None = None,
     ) -> Awaitable[StoreReport]: ...
     @staticmethod
     def inspect_store_sync(
         path: str,
-        config: dict[str, Any] | None = None,
+        config: Mapping[str, Any] | UnikoConfigModel | None = None,
         *,
-        embedding: str | dict[str, Any] | None = None,
+        embedding: str | Mapping[str, Any] | None = None,
     ) -> StoreReport: ...
     @staticmethod
     def migrate_store(
         path: str,
         migration: MigrationName,
-        config: dict[str, Any] | None = None,
+        config: Mapping[str, Any] | UnikoConfigModel | None = None,
         *,
-        embedding: str | dict[str, Any] | None = None,
+        embedding: str | Mapping[str, Any] | None = None,
         progress: Callable[[MigrationProgressEvent], object] | None = None,
     ) -> Awaitable[MigrationReport]:
         """Migrate the store at ``path`` in place.
@@ -1425,9 +1425,9 @@ class Uniko:
     def migrate_store_sync(
         path: str,
         migration: MigrationName,
-        config: dict[str, Any] | None = None,
+        config: Mapping[str, Any] | UnikoConfigModel | None = None,
         *,
-        embedding: str | dict[str, Any] | None = None,
+        embedding: str | Mapping[str, Any] | None = None,
         progress: Callable[[MigrationProgressEvent], object] | None = None,
     ) -> MigrationReport:
         """Blocking variant of ``migrate_store``.

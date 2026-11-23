@@ -152,6 +152,18 @@ impl From<uni_db::UniError> for UnikoError {
         // instead of flattening every variant to an opaque Storage(String).
         // `UniError` is `#[non_exhaustive]`, so we delegate to its classifier
         // rather than enumerating variants here.
+        //
+        // A store held by another writer, a writer fenced off from its
+        // store, and a stale hybrid WAL are configuration problems for the
+        // caller to resolve, not storage faults.
+        if matches!(
+            err,
+            uni_db::UniError::StoreLocked { .. }
+                | uni_db::UniError::WriterFenced { .. }
+                | uni_db::UniError::StaleWal { .. }
+        ) {
+            return UnikoError::Config(err.to_string());
+        }
         if err.is_retriable() {
             UnikoError::Conflict(err.to_string())
         } else {

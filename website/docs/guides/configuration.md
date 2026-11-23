@@ -300,6 +300,13 @@ the query. Coverage gates and the Phase 1 strategy live here:
 | `phase2_coverage_threshold`    | `0.65`    | Coverage threshold for Phase 2 (Expand) early exit. |
 | `phase1_strategy`              | `"boost"` | Phase 1 contribution strategy: `merge`, `boost`, or `off`. |
 | `phase1_boost_alpha`           | `0.6`     | Multiplicative weight for Fact scores in the session-chunk boost under `phase1_strategy = "boost"`. |
+| `phase2_mmr_lambda`            | `0.7`     | MMR relevance-vs-diversity for Phase 2 dedup (`1.0` = pure relevance, `0.0` = pure diversity). |
+| `phase2_mmr_duplicate_threshold` | `0.85`  | Token-overlap threshold above which a Phase 2 candidate is dropped as a hard duplicate. |
+| `phase2_temporal_enabled`      | `true`    | Temporal-interval channel; fires only when the query has a parsed temporal phrase. |
+| `phase2_graph_enabled`         | `true`    | Graph spreading-activation channel; fires only when the query has a resolvable entity seed. |
+| `phase2_graph_damping`         | `0.85`    | PPR damping factor for the graph channel. |
+| `phase2_graph_max_iter`        | `30`      | PPR power-iteration cap for the graph channel. |
+| `phase2_graph_edge_weights`    | `{}`      | Per-edge-type weight multipliers for graph propagation; empty map uses the built-in `default_phase2_graph_edge_weights`. |
 
 !!! important "`boost` needs finalized sessions"
     The `boost` strategy scores **session-level chunks**, which are built by
@@ -308,13 +315,6 @@ the query. Coverage gates and the Phase 1 strategy live here:
     nothing under the default strategy. Call `finalize()` at the end of a
     conversation, or use `Agent::finalize_session` / `unfinalized_session_ids`
     to backfill an existing knowledge base.
-| `phase2_mmr_lambda`            | `0.7`     | MMR relevance-vs-diversity for Phase 2 dedup (`1.0` = pure relevance, `0.0` = pure diversity). |
-| `phase2_mmr_duplicate_threshold` | `0.85`  | Token-overlap threshold above which a Phase 2 candidate is dropped as a hard duplicate. |
-| `phase2_temporal_enabled`      | `true`    | Temporal-interval channel; fires only when the query has a parsed temporal phrase. |
-| `phase2_graph_enabled`         | `true`    | Graph spreading-activation channel; fires only when the query has a resolvable entity seed. |
-| `phase2_graph_damping`         | `0.85`    | PPR damping factor for the graph channel. |
-| `phase2_graph_max_iter`        | `30`      | PPR power-iteration cap for the graph channel. |
-| `phase2_graph_edge_weights`    | `{}`      | Per-edge-type weight multipliers for graph propagation; empty map uses the built-in `default_phase2_graph_edge_weights`. |
 
 !!! note
     `phase2_coverage_threshold` must be
@@ -348,17 +348,19 @@ embeddings:
 
 ### Memory decay
 
-Importance decays exponentially and low-importance nodes are pruned:
+Episode importance decays exponentially, and Episodes whose decayed
+importance falls to the threshold are pruned (the `relevance_decay` sweep,
+run on the cortex cadence):
 
 ```rust
 config.half_life_days = 30.0; // importance * exp(-ln(2)/half_life * age_days)
-config.prune_below   = 0.05;  // prune nodes below this importance
+config.prune_below   = 0.05;  // prune Episodes at or below this importance
 ```
 
 | Field            | Default | Meaning |
 |------------------|---------|---------|
 | `half_life_days` | `30.0`  | Half-life (days) for importance decay. Must be positive. |
-| `prune_below`    | `0.05`  | Importance threshold below which nodes are pruned. Must be in `[0.0, 1.0)`. |
+| `prune_below`    | `0.05`  | Decayed-importance threshold at or below which Episodes are pruned. Must be in `[0.0, 1.0)`. |
 
 ### Chunking and sessions
 
@@ -430,6 +432,68 @@ maximum backoff.
 | `schema_path`             | `None`         | Load the schema from a JSON file instead of registering it programmatically. Skips the open-time store compatibility check (a changed model or dimensions is still refused, with `Config`), and `migrate_store` refuses a config that sets it. |
 | `observation_rules_path`  | `None`         | Load observation-extraction patterns from a YAML file instead of the bundled `english.yml`. |
 
+### Remote storage
+
+`remote_storage` keeps a store's data in an object store: its graph tables, indexes and schema.
+It is `None` by default, which keeps everything under the path. The path given to `open` picks
+how the store is split:
+
+- **Hybrid**: the path is a local directory. It holds the store's write-ahead log and id
+  allocator, and commits reach the bucket at each flush. Writes are as fast as a local store's.
+- **Remote-only**: the path is the store's own URL, the same as `remote_storage.url`. Everything,
+  the write-ahead log included, is in the bucket, so any host can open the store with nothing
+  local. Each commit waits on the bucket.
+
+```rust
+let config = UnikoConfig {
+    remote_storage: Some(
+        RemoteStorage::s3("s3://my-bucket/kb")
+            .with_endpoint("http://localhost:4566") // an S3-compatible service; omit for AWS
+            .with_region("us-east-1"),
+    ),
+    ..UnikoConfig::default()
+};
+// Hybrid:
+let memory = Uniko::builder().path("./kb-local").raw_config(config.clone()).build().await?;
+// Or remote-only:
+let memory = Uniko::builder().path("s3://my-bucket/kb").raw_config(config).build().await?;
+```
+
+In Python, pass it as a mapping: `.config({"remote_storage": {"url": "s3://my-bucket/kb", ...}})`.
+
+A remote-only store can also be opened by its URL with no `remote_storage` at all, taking every
+setting from the environment variables below.
+
+| Field                  | Meaning |
+|------------------------|---------|
+| `url`                  | `s3://bucket[/prefix]` (S3 and S3-compatible services: MinIO, LocalStack, R2) or `gs://bucket[/prefix]`. |
+| `region`               | S3 region. Falls back to `AWS_REGION`, then `AWS_DEFAULT_REGION`. |
+| `endpoint`             | A custom S3 endpoint. Falls back to `AWS_ENDPOINT_URL`. An `http://` endpoint is allowed. |
+| `access_key_id`, `secret_access_key`, `session_token` | S3 credentials. Fall back to `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`. |
+| `virtual_hosted_style` | Address the bucket as `bucket.host`. Off by default, which S3-compatible services need. |
+| `service_account_path`, `service_account_key` | GCS credentials. The path falls back to `GOOGLE_APPLICATION_CREDENTIALS`. |
+| `set_aside_stale_wal`  | Hybrid only. See *Moving a hybrid store* below. Off by default. |
+
+An unknown key is refused. `Debug` output, and `Uniko.config()` in Python, hide the secrets.
+
+- **Stores can share a bucket.** Everything a store writes stays under its URL's prefix, so
+  `s3://bucket/a` and `s3://bucket/b` are separate stores.
+- **One writer at a time**, across hosts: uni-db holds a lease in the bucket for as long as the
+  store is open, and a second open is refused with a `Config` error naming the holder; see
+  [Model migration](model-migration.md#migrate-in-place). Inspecting and migrating work the
+  same way as on a local store.
+- **Moving a hybrid store.** Opening it from a new, empty directory (another host, a container
+  without its volume) works: the data comes from the bucket, and new writes don't reuse its ids.
+  Shut a store down before moving it, so its last writes leave the local write-ahead log. A host
+  that crashed with commits still in its log, and comes back after another host opened the store,
+  is refused with a `Config` error rather than replaying them over newer data. Set
+  `set_aside_stale_wal` to move that log to `wal_set_aside/` in the directory and open the store
+  as the bucket has it; nothing is deleted.
+- An in-memory store refuses `remote_storage`.
+
+Tested end to end against LocalStack and the AWS Emulator; not yet against AWS S3 or GCS
+themselves.
+
 !!! warning "`schema_path` and the tracked snapshot"
     `config/schema.json` in the repo is a **snapshot** produced by
     `cargo run --bin export-schema`. Pointing `schema_path` at a snapshot
@@ -486,7 +550,8 @@ write and query sides need different capabilities:
 | Alias | Task | Registered when | Serves |
 |---|---|---|---|
 | `embed/default` | `Embed` | always | dense columns on lone-dense labels (Message, Summary, …) |
-| `embed/hybrid` | `EmbedHybrid` | `sparse_dimensions` **or** `multivector_dimensions` set | the dense + ColBERT columns on `:Chunk` / `:Observation`, written in one forward pass |
+| `embed/hybrid` | `EmbedHybrid` | `sparse_dimensions` **or** `multivector_dimensions` set | the dense, sparse and ColBERT columns on `:Chunk` / `:Observation`, written in one forward pass |
+
 `embed/hybrid` serves **both sides**: the document pass that writes the columns,
 and the query-side vector for `uni.sparse.query` and ColBERT MaxSim.
 
@@ -519,8 +584,9 @@ tables resolve the bare repo id for each head.
     went from ~10 s/question without the column to ~46 s/question with it
     present but unused. Declare it only when you intend to use ColBERT.
 
-    Neither channel is reachable from the Python builder today; configure them
-    from Rust.
+    From Python, pick the embedder with `.embedding("bge-m3")` and turn the
+    channels on through `.config({"recall_sparse_enabled": True,
+    "reranker": {"style": "colbert"}})`.
 
 ### What they measure on LoCoMo
 
@@ -556,7 +622,7 @@ Read with care:
 ### Verifying a channel is actually live
 
 Both channels fail **silently** if misconfigured. `run_sparse_source` logs a
-failed `uni.sparse.query` at `debug` and returns an empty hit list, and
+failed `uni.sparse.query` at `warn` and returns an empty hit list, and
 `colbert_rerank` logs at `warn` and keeps the RRF order. In both cases recall
 still returns results, so an enabled-but-broken channel looks exactly like one
 that simply did not change the ranking — while still costing a query per
@@ -569,11 +635,11 @@ merely un-reranked.
 Check, rather than assume:
 
 ```sh
-# The channel prints one line per query on the success path only.
-RUST_LOG=uniko_memory=debug <your binary> 2>&1 | grep -E "sparse_source|sparse query failed"
+# The success line is at debug; a failure is at warn.
+RUST_LOG=uniko_memory=debug <your binary> 2>&1 | grep -E "recall sparse source|sparse query failed"
 ```
 
-- `RECALL_PROF sparse_source label=Chunk rows=N` — the channel ran and returned
+- `recall sparse source label="Chunk" rows=N` — the channel ran and returned
   `N` hits.
 - `sparse query failed …` — it errored; the channel is contributing nothing.
 - Neither line — `recall_sparse_enabled` never took effect.

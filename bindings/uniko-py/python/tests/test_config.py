@@ -206,3 +206,17 @@ def test_reopen_with_a_different_embedding_raises(tmp_path) -> None:
     builder = uniko.Uniko.builder().path(store).embedding({"model_id": "SomethingElse"})
     with pytest.raises(uniko.ConfigError, match="incompatible store"):
         builder.build_sync()
+
+
+def test_remote_storage_is_taken_whole_and_checked() -> None:
+    remote = {"url": "s3://bucket/kb", "endpoint": "http://127.0.0.1:4566"}
+    model = UnikoConfigModel(remote_storage=remote)
+    assert model.remote_storage == remote
+    with pytest.raises(uniko.ConfigError, match="endpoint_url"):
+        uniko.Uniko.builder().path("/tmp/never-opened").config(
+            {"remote_storage": {"url": "s3://bucket", "endpoint_url": "http://x"}}
+        ).build_sync()
+    with pytest.raises(uniko.ConfigError, match="in-memory"):
+        uniko.Uniko.builder().in_memory().config(
+            {"remote_storage": remote}
+        ).build_sync()

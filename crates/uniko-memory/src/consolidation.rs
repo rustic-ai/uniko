@@ -3,7 +3,7 @@
 //! A consolidation cycle:
 //! 1. Queries unprocessed Observations carrying a structured triple
 //!    (`subject` and `predicate` non-null).
-//! 2. Groups by `(subject, predicate)`; picks a canonical object per
+//! 2. Groups by `(subject, predicate)` within each visibility scope; picks a canonical object per
 //!    group (cosine-clustered mode, tie-broken by recency).
 //! 3. Upserts a Fact per group via
 //!    [`KnowledgeBase::upsert_fact_by_triple`]; first observation in a
@@ -11,7 +11,8 @@
 //! 4. Wires `SUPPORTED_BY` edges from every contributing Observation
 //!    to its Fact.
 //! 5. Writes a `ConsolidationCycle` audit node with `PROCESSED`,
-//!    `CREATED`, and `INVOLVED` edges — the `PROCESSED` edges are the
+//!    `CREATED`, `REINFORCED`, `INVALIDATED` and `APPLIED_RULE` edges —
+//!    the `PROCESSED` edges are the
 //!    idempotency anchor so future cycles skip the same Observations.
 //!
 //! Object surface forms within a group are clustered by cosine
@@ -29,8 +30,8 @@
 //! don't trigger spurious invalidations.
 //!
 //! F39 entity drift: each invalidation records against the subject
-//! Entity's `invalidation_count`; once cumulative invalidations exceed
-//! [`DRIFT_THRESHOLD`], `Entity.unstable = true` so the recall cascade
+//! Entity's `invalidation_count`; once more than [`DRIFT_THRESHOLD`]
+//! invalidations fall within the last 30 days, `Entity.unstable = true` so the recall cascade
 //! can force Phase 2+ for queries that reference it.
 
 use std::collections::{HashMap, HashSet};
@@ -81,10 +82,9 @@ pub struct CycleStats {
 /// of any prior open-BTIC Facts for the same pair.  Spec §5 F38.
 const CONTRADICTION_THRESHOLD: f64 = 0.40;
 
-/// Cumulative invalidation count at or above which an Entity is flagged
-/// `unstable = true` (F39).  Spec calls for "> 4 invalidations within
-/// 30 days" — the windowing belongs in the store helper, this constant
-/// captures only the count.
+/// An Entity is flagged `unstable = true` (F39) once strictly more than
+/// this many invalidations fall within the last 30 days.  The 30-day
+/// window lives in the store helper; this constant is only the count.
 const DRIFT_THRESHOLD: i64 = 4;
 
 /// Maximum observations to process in a single cycle.

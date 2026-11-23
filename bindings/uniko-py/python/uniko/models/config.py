@@ -127,6 +127,11 @@ class UnikoConfigModel(BaseModel):
     vector_algorithm: dict[str, Any] = Field(default_factory=_default_vector_algorithm)
     vector_metric: str = "Cosine"
     blob_storage: dict[str, Any] = Field(default_factory=_default_blob_storage)
+    # Keep the store's data in an object store: ``{"url": "s3://bucket",
+    # "endpoint": ..., "region": ..., ...}``; unset settings come from the
+    # AWS_* / GOOGLE_APPLICATION_CREDENTIALS environment. The store path
+    # then holds only its write-ahead log and ids.
+    remote_storage: Optional[dict[str, Any]] = None
 
     # Streaming pipeline.
     ingest_queue_capacity: int = 200

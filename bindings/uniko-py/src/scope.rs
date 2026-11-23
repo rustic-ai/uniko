@@ -139,7 +139,7 @@ impl PyScope {
     ///
     /// Worth using deliberately: an unscoped read is **fail-open**
     /// (`ViewerScope::Unrestricted`), so without this Python callers get no
-    /// Fact/Observation visibility filtering unless the instance was built
+    /// visibility filtering of Facts, Observations, Messages and Chunks unless the instance was built
     /// with `scope_to_agent()`.
     fn as_participant<'py>(slf: PyRef<'py, Self>, participant_id: String) -> PyRef<'py, Self> {
         slf.map(|s| s.as_participant(participant_id));

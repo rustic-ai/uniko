@@ -38,8 +38,9 @@ What inspecting does and doesn't touch:
 - A local path that isn't a uni-db store (neither `catalog/schema.json` nor a root
   `schema.json`), such as a missing or empty directory, reports `exists: false` with no
   differences. It isn't touched at all: nothing is created there.
-- A remote URI (any path containing `://`) is refused with an `Unsupported` error. Inspecting and
-  migrating need a local store directory.
+- A store in an object store is inspected and migrated like a local one: through its local
+  directory with [`remote_storage`](configuration.md#remote-storage) set (hybrid), or by its
+  `s3://` or `gs://` URL (remote-only). Any other URI is refused with an `Unsupported` error.
 - A store that is open, or being inspected or migrated, in this process or another, is refused
   with a `Config` error. Ask the open instance instead: `memory.store_info()` reports its own store.
   `store_info().hybrid_backfill_pending` counts the rows a hybrid backfill still has to fill.
@@ -161,38 +162,26 @@ log after a migration.
 The report's `completed` is true when the store needs nothing further for this config.
 `rows_backfilled` counts the rows filled and `rows_unfilled` the rows passed over.
 
-A store directory takes one claim at a time: one open handle, or one inspection or migration.
-uni-db takes no lock on a store, and two handles on one directory are two writers that don't see
-each other's writes, so uniko enforces this itself:
+A store takes one writer at a time: one open handle, or one inspection or migration.
 
-- within the process, a registry of claimed paths refuses a second open, and refuses inspecting
-  or migrating an open store, with a `Config` error. Share one instance instead: its clones (and
-  every `Agent` and `Session` from it) use the same store;
-- across processes, the claim holds an OS lock on a `.uniko.lock` file in the store directory, so
-  another process opening, inspecting or migrating the store is refused with a `Config` error.
-  The lock is released when the handle closes, or when its process exits. Inspecting a directory
-  that isn't a store yet takes no lock and creates no file there.
+- Within the process, a registry of claimed paths refuses a second open, and refuses inspecting
+  or migrating an open store, at once with a `Config` error. Share one instance instead: its
+  clones (and every `Agent` and `Session` from it) use the same store.
+- Across processes, uni-db holds the store for its writer: an OS lock on `writer.lock` in a local
+  store's directory, or, for a store in an object store
+  ([`remote_storage`](configuration.md#remote-storage)), a lease at `catalog/writer_lease.json`
+  under the store's prefix. Another process opening, inspecting or migrating the store waits a
+  few seconds for it, then is refused with a `Config` error naming the holder. The lock goes when
+  the handle closes or its process exits; the lease is released at shutdown, and one a crashed
+  holder left lapses 30 seconds after its last renewal.
+- A writer whose lease was taken over (it stalled past the lease, a paused VM) is fenced: uni-db
+  refuses its commits from then on, with a `Config` error. Shut that instance down.
+- Inspecting a directory that isn't a store opens nothing and creates nothing there.
 
-A store in an object store (`s3://`, `gs://`, any URI with `://` other than `file://`) has no
-directory to lock, so it holds a lease instead: a `.uniko.lease` object under the store's prefix.
-
-- Opening writes it with a create-only put. A live lease refuses the open with a `Config` error
-  naming its holder. An expired one, whose holder crashed, is taken over with a put conditional on
-  its ETag, so of two openers racing for it only one wins.
-- The holder renews it every 10 seconds for a 30-second lease, each renewal conditional on the
-  version it last wrote. If another process has taken it over, the renewal finds out, and the
-  store refuses every write from then on with a `Config` error: shut that instance down.
-- Shutting down deletes the lease, so the next open needn't wait for it to expire.
-- The bucket is reached as uni-db reaches it, with the same credentials.
-
-What a lease can't do is stop a holder that stalls past its 30 seconds (a paused VM, a long pause)
-and then completes a write it had already started: only uni-db can refuse that, by checking the
-lease on its own commits. Clocks are compared across hosts, so the lease length is also the
-margin for clock skew. A `file://` URI is a local directory and takes the file lock.
-
-The lease is tested against the [AWS Emulator](https://github.com/aws/aws-emulator), a local S3
-that honors conditional writes, including six openers racing for one expired lease. It hasn't been
-tested against AWS S3 or GCS themselves.
+The lease is tested against two local S3 implementations that honor conditional writes,
+[LocalStack](https://github.com/localstack/localstack) and the
+[AWS Emulator](https://github.com/aws/aws-emulator). It hasn't been tested against AWS S3 or GCS
+themselves.
 
 On a network file system that doesn't support file locks, the cross-process check may not hold.
 

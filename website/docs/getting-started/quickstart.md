@@ -41,7 +41,7 @@ it, and the sources each item traces back to.
 ## A complete example
 
 ```rust
-use uniko_memory::{LlmSpec, Turn, Uniko};
+use uniko_api::tools::{LlmSpec, Turn, Uniko};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

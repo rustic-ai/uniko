@@ -37,19 +37,25 @@ for item in &bundle.items {
             RecallSource::Message { message_id, .. }            => println!("   ← {message_id}"),
             RecallSource::Attachment { artifact_id, message_id, .. } => println!("   ← {artifact_id} (in {message_id})"),
             RecallSource::Document { artifact_id, .. }          => println!("   ← {artifact_id}"),
+            RecallSource::Session { session_id, .. }            => println!("   ← session {session_id}"),
+            RecallSource::Tool { call_id, artifact_id, .. }     => println!("   ← {artifact_id} (tool call {call_id})"),
         }
     }
 }
 ```
 
-- **`kind`** — `Chunk` / `Observation` / `Fact` / `Procedure` / `Topic` / `Episode` / `Message`.
+- **`kind`** — `Chunk` / `Observation` / `Fact` / `Procedure` / `Topic` / `Episode` / `Message` /
+  `Other`.
   `kind.is_derived()` distinguishes synthesized memory (Fact/Procedure/Topic/Observation) from raw
   input (Chunk/Message) — *"the system concluded X"* vs *"alice literally said X."*
 - **`sources`** — the lineage. A chunk has one source; a derived `Fact` lists the messages/attachments
-  its supporting observations came from. `item.primary_source()` returns the first.
+  its supporting observations came from; Topics and Procedures carry none. A chunk built by
+  `Session::finalize()` traces to its `Session`, and a tool call's result to its `Tool` call.
+  `item.primary_source()` returns the first.
 
 !!! note "Provenance is captured, not inferred"
-    Sources are the graph's own edges (`HAS_CHUNK`, `ATTACHED_TO`, `OBSERVED_IN`, `SUPPORTED_BY`)
+    Sources are the graph's own edges (`HAS_CHUNK`, `ATTACHED_TO`, `OBSERVED_IN`, `SUPPORTED_BY`,
+    `PRODUCED`)
     projected onto the result — so a chunk from a shared document reports the `Attachment` it came
     from, and the message that shared it.
 
@@ -85,8 +91,9 @@ let art = agent.data().artifact("spec.pdf").await?;     // Option<ArtifactView>
 let bytes = agent.data().artifact_bytes("spec.pdf").await?;  // Option<Vec<u8>>
 ```
 
-`MessageView` gives `{ sender_id, content, timestamp, session_id, addressed_to, attachments }`;
-`ArtifactView` gives `{ kind, mime, path, text, attached_to_message }`. Unknown ids return `Ok(None)`.
+`MessageView` gives `{ message_id, sender_id, content, content_type, timestamp, session_id,
+addressed_to, attachments, category, visibility }`; `ArtifactView` gives `{ artifact_id, kind, mime,
+path, text, attached_to_message }`. Unknown ids return `Ok(None)`.
 
 The id is the one `observe`/`ingest` handed you:
 

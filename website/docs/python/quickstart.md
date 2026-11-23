@@ -26,8 +26,9 @@ runtime is linked statically into the wheel, so there is nothing else to install
 inference path.
 
 !!! tip "If a GPU wheel is too large for PyPI"
-    `uniko-cuda` and `uniko-metal` bundle GPU runtimes and may exceed PyPI's per-file limit. The
-    project publishes a PEP 503 index serving the same artifacts from GitHub Release assets:
+    `uniko-cuda` and `uniko-metal` are large (they also compile candle's GPU kernels for local LLM
+    inference) and may exceed PyPI's per-file limit. The project publishes a PEP 503 index serving
+    the same artifacts from GitHub Release assets:
 
     ```bash
     pip install uniko-cuda --extra-index-url https://rustic-ai.github.io/uniko/packages/
@@ -223,15 +224,13 @@ Every agent has a `goals` surface for structured planning. Reads are scoped to t
 goals and assigned tasks; transitions return `bool` (`False` when the id doesn't resolve); creation
 methods return the new node id.
 
-!!! note "The agent must exist first"
-    Goals attach to the agent's `Participant`, which is created on first sight. Send one turn before
-    creating goals.
+!!! note "No setup turn needed"
+    Goals attach to the agent's `Participant`. Creating a goal or task creates it first when it
+    doesn't exist yet, so a fresh store needs no prior turn.
 
 === "Async"
 
     ```python
-    await agent.session("setup").observe(uniko.Turn("assistant", "kicking off"))
-
     goals = agent.goals
     gid = await goals.create(
         "Ship the Python SDK",
@@ -253,8 +252,6 @@ methods return the new node id.
 === "Sync"
 
     ```python
-    agent.session("setup").observe_sync(uniko.Turn("assistant", "kicking off"))
-
     goals = agent.goals
     gid = goals.create_sync(
         "Ship the Python SDK",
@@ -380,8 +377,10 @@ Any use of a `Uniko` handle after `shutdown` raises `ConfigError`.
 
 `uniko` raises a small, predictable exception hierarchy. The base is `UnikoError`, and **every**
 instance carries a `.kind` string. Subclasses include `ConfigError` (`"config"`), `LlmError`
-(`"llm"`), `UnikoTimeoutError` (`"timeout"`), `UnsupportedError` (`"unsupported"`, no extractor for the
-modality), and `ConflictError` (`"conflict"`). Storage-domain failures fold into the base
+(`"llm"`), `UnikoTimeoutError` (`"timeout"`), `UnsupportedError` (`"unsupported"`, e.g. no
+extractor for the modality), `ConflictError` (`"conflict"`), `IdConflictError` (`"id_conflict"`, an
+id reused for different content), `ReadinessError` (`"not_ready"`), `DegradedError` (`"degraded"`)
+and `IncompatibleStoreError` (`"incompatible_store"`, a `ConfigError` subclass). Storage-domain failures fold into the base
 `UnikoError` but still carry distinct `.kind` values (`"storage"`, `"search"`, `"schema"`,
 `"pipeline"`, `"locy"`, `"embedding"`, `"internal"`) — branch on `e.kind` for those.
 

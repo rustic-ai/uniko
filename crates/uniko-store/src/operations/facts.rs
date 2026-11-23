@@ -1,8 +1,9 @@
 //! Fact node CRUD for P4 Consolidation.
 //!
 //! Provides upsert-by-triple semantics for derived Facts plus the
-//! supporting edges (`SUPPORTED_BY`, `CREATED`, `INVOLVED`) and the
-//! `ConsolidationCycle` audit node.  Embeddings are computed by Layer 2
+//! supporting edges (`SUPPORTED_BY`) and the `ConsolidationCycle` audit
+//! node with its `PROCESSED`, `CREATED`, `REINFORCED`, `INVALIDATED` and
+//! `APPLIED_RULE` edges.  Embeddings are computed by Layer 2
 //! and supplied as an opaque vector — this module never calls Xervo.
 
 use std::collections::HashMap;
@@ -600,14 +601,10 @@ impl KnowledgeBase {
     /// - `PROCESSED` to every observation visited in the cycle
     ///   (idempotency anchor for future cycles)
     /// - `CREATED` to every newly-created Fact
-    /// - `INVOLVED` to every reinforced Fact (existing Fact whose
+    /// - `REINFORCED` to every reinforced Fact (existing Fact whose
     ///   `observation_count` was incremented)
+    /// - `INVALIDATED` to every Fact the cycle invalidated
     /// - `APPLIED_RULE` to every Locy rule executed in the cycle
-    ///
-    /// `INVOLVED` is reused for "reinforced Fact" rather than "Episode"
-    /// because the spec's audit edge for "Fact touched by this cycle
-    /// but not created" maps to the same semantic; Episodes get their
-    /// own edge type when the procedural-memory pipeline ships.
     ///
     /// # Errors
     ///
