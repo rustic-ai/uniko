@@ -8,6 +8,9 @@
 // Shared helpers, used by the suites as `crate::common`.
 mod common;
 
+#[path = "cloud_e2e.rs"]
+mod cloud_e2e;
+
 #[path = "finalize_idempotence_repro.rs"]
 mod finalize_idempotence_repro;
 

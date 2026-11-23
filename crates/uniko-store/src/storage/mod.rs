@@ -12,10 +12,10 @@ pub mod deletion;
 pub mod edges;
 pub mod filter;
 pub mod kb_stats;
-pub(crate) mod lease;
 pub mod migrate_store;
 pub mod migrations;
 pub mod nodes;
+pub(crate) mod remote;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -125,19 +125,16 @@ pub struct KnowledgeBase {
     pub(crate) open_path: Option<Arc<OpenPath>>,
 }
 
-/// Stores in use in this process, by canonical path. uni-db takes no lock
-/// on a store directory, and two handles on one are two writers that don't
-/// see each other's writes. So a path takes one claim at a time: one open
-/// store, or one inspection or migration. Across processes the claim is
-/// backed by an OS lock on [`LOCK_FILE`] in the store directory.
+/// Stores in use in this process, by canonical path. uni-db holds one
+/// writer per store across processes (an OS lock on a local store's
+/// `writer.lock`, a lease in an object store), but a second open in the same
+/// process would only wait out its grace period before failing. This
+/// registry refuses it at once, with an error that says which handle holds
+/// the store, and keeps [`inspect`](KnowledgeBase::inspect) and
+/// [`migrate`](KnowledgeBase::migrate) off a store this process has open.
 static OPEN_PATHS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Claim>>,
 > = std::sync::LazyLock::new(Default::default);
-
-/// The file in a store directory that an open store, inspection or
-/// migration holds an exclusive OS lock on, so a second process can't open
-/// the store under it. The lock goes with the handle, or with the process.
-pub const LOCK_FILE: &str = ".uniko.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Claim {
@@ -147,47 +144,16 @@ enum Claim {
     Exclusive,
 }
 
-/// A claim on a store path, released when dropped.
+/// A claim on a store path in this process, released when dropped.
 #[derive(Debug)]
 pub(crate) struct OpenPath {
     key: std::path::PathBuf,
     exclusive: bool,
-    /// The OS lock on the store's [`LOCK_FILE`], held for the claim's life.
-    _lock: Option<std::fs::File>,
-    /// For a store in an object store: the lease that stands in for the OS
-    /// lock (see [`lease`]).
-    lease: Option<lease::RemoteLease>,
 }
 
 impl OpenPath {
-    /// Claim `path` for an open store, with a lease when it is an object
-    /// store URI. Refused while the store is open, or being inspected or
-    /// migrated, in this process or another.
-    async fn claim_open(path: &Path) -> Result<Arc<Self>> {
-        let mut claim = Self::claim(path)?;
-        let uri = path.to_string_lossy();
-        if uri.contains("://") && file_url_path(&uri).is_none() {
-            // The registry entry is already in place, so a second open in
-            // this process is refused while the lease is taken.
-            claim.lease = Some(lease::RemoteLease::acquire_for_uri(&uri).await?);
-        }
-        Ok(Arc::new(claim))
-    }
-
-    /// Whether this claim's lease was taken over by another process.
-    fn lease_lost(&self) -> bool {
-        self.lease.as_ref().is_some_and(lease::RemoteLease::is_lost)
-    }
-
-    /// Release the lease, if any, so the next open needn't wait for it.
-    async fn release_lease(&self) {
-        if let Some(l) = &self.lease {
-            l.release().await;
-        }
-    }
-
-    /// Claim `path` for an open store: the in-process registry and, for a
-    /// local store, the OS lock.
+    /// Claim `path` for an open store: refused while the store is open, or
+    /// being inspected or migrated, in this process.
     fn claim(path: &Path) -> Result<Self> {
         let key = canonical(path);
         let mut open = OPEN_PATHS.lock().expect("open-path registry poisoned");
@@ -196,20 +162,15 @@ impl OpenPath {
             Some(Claim::Open) => return Err(already_open(path)),
             None => {}
         }
-        let lock = os_lock(path, true)?;
         open.insert(key.clone(), Claim::Open);
         Ok(Self {
             key,
             exclusive: false,
-            _lock: lock,
-            lease: None,
         })
     }
 
     /// Claim `path` exclusively, to inspect or migrate it: refused while
-    /// the store is open, inspected or migrated, in this process or another.
-    /// A directory that isn't a store yet gets no lock file: inspecting it
-    /// leaves it untouched.
+    /// the store is open, inspected or migrated in this process.
     pub(crate) fn claim_exclusive(path: &Path) -> Result<Self> {
         let key = canonical(path);
         let mut open = OPEN_PATHS.lock().expect("open-path registry poisoned");
@@ -223,73 +184,73 @@ impl OpenPath {
             Some(Claim::Exclusive) => return Err(busy(path)),
             None => {}
         }
-        let lock = if is_store_dir(path) {
-            os_lock(path, false)?
-        } else {
-            None
-        };
         open.insert(key.clone(), Claim::Exclusive);
         Ok(Self {
             key,
             exclusive: true,
-            _lock: lock,
-            lease: None,
         })
     }
 }
 
-/// Whether `path` already holds a uni-db store.
-fn is_store_dir(path: &Path) -> bool {
-    path.join("catalog").join("schema.json").is_file() || path.join("schema.json").is_file()
+/// An in-memory store has nowhere to put `remote_storage`: refuse it rather
+/// than keep the data in memory while the config says S3.
+fn refuse_remote_in_memory(config: &UnikoConfig) -> Result<()> {
+    if config.remote_storage.is_some() {
+        return Err(UnikoError::Config(
+            "remote_storage needs a store path: a local directory (hybrid) or the store's own \
+             URL (remote-only); an in-memory store can't use it"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
-/// Take the OS lock on `path`'s [`LOCK_FILE`], creating the directory when
-/// `create` is set. `None` for a remote store URI, which has no local
-/// directory to lock.
-fn os_lock(path: &Path, create: bool) -> Result<Option<std::fs::File>> {
-    let uri = path.to_string_lossy();
-    // A `file://` URI is a local directory: lock it like a path. Any other
-    // URI is an object store, which has no directory and holds a lease
-    // instead (`OpenPath::claim_open`).
-    let local;
-    let path = if uri.contains("://") {
-        match file_url_path(&uri) {
-            Some(p) => {
-                local = p;
-                local.as_path()
-            }
-            None => return Ok(None),
-        }
+/// A uni-db builder for the store at `path`. `existing` refuses to create
+/// one.
+///
+/// - A local path alone is a local store.
+/// - A local path with `config.remote_storage` is a hybrid store: data in
+///   the bucket, the write-ahead log and id allocator in the directory.
+/// - An `s3://` or `gs://` path is a remote-only store, kept wholly in the
+///   bucket. `remote_storage`, when set, must name the same URL, and gives
+///   its endpoint and credentials; unset, they come from the environment.
+pub(crate) fn uni_builder(
+    path: &Path,
+    config: &UnikoConfig,
+    existing: bool,
+) -> Result<uni_db::UniBuilder> {
+    let at = path.to_string_lossy();
+    let builder = if existing {
+        Uni::open_existing(at.clone())
     } else {
-        path
+        Uni::open(at.clone())
     };
-    if !path.is_dir() {
-        if !create || path.exists() {
-            return Ok(None);
+    let Some(remote) = &config.remote_storage else {
+        return Ok(builder);
+    };
+    let resolved = remote::ResolvedRemote::resolve(remote)?;
+    let builder = if remote::is_object_store_uri(&at) {
+        if !remote::same_store(&at, &resolved.url) {
+            return Err(UnikoError::Config(format!(
+                "the store path {at} and remote_storage.url {} name different stores; a \
+                 remote-only store's path is its URL, and a hybrid store's is a local directory",
+                resolved.url
+            )));
         }
-        std::fs::create_dir_all(path)
-            .map_err(|e| UnikoError::Storage(format!("create {}: {e}", path.display())))?;
+        builder
+    } else if at.contains("://") && file_url_path(&at).is_none() {
+        return Err(UnikoError::Config(format!(
+            "with remote_storage set, the store path ({at}) is a local directory (hybrid) or \
+             the store's s3:// or gs:// URL (remote-only)"
+        )));
+    } else {
+        builder.hybrid(&resolved.url)
+    };
+    let mut builder = builder.cloud_storage(resolved.cloud);
+    if remote.set_aside_stale_wal {
+        builder = builder.set_aside_stale_wal();
     }
-    let lock_path = path.join(LOCK_FILE);
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|e| UnikoError::Storage(format!("open {}: {e}", lock_path.display())))?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Err(UnikoError::Config(format!(
-            "the store at {} is open in another process; a store directory takes one open \
-             handle at a time",
-            path.display()
-        ))),
-        Err(std::fs::TryLockError::Error(e)) => Err(UnikoError::Storage(format!(
-            "lock {}: {e}",
-            lock_path.display()
-        ))),
-    }
+    Ok(builder)
 }
 
 /// The local directory a `file://` URI names, or `None` for any other URI.
@@ -397,6 +358,7 @@ impl KnowledgeBase {
         prefetch: PrefetchPolicy,
     ) -> Result<Self> {
         config.validate()?;
+        refuse_remote_in_memory(&config)?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
         let db = Uni::in_memory().xervo_catalog(catalog).build().await?;
@@ -474,8 +436,8 @@ impl KnowledgeBase {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
-        let open_path = OpenPath::claim_open(path.as_ref()).await?;
-        let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_catalog(catalog);
+        let open_path = Arc::new(OpenPath::claim(path.as_ref())?);
+        let mut builder = uni_builder(path.as_ref(), &config, false)?.xervo_catalog(catalog);
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
         }
@@ -518,6 +480,7 @@ impl KnowledgeBase {
     /// cannot be created.
     pub async fn in_memory_shared(config: UnikoConfig, runtime: &SharedRuntime) -> Result<Self> {
         config.validate()?;
+        refuse_remote_in_memory(&config)?;
         runtime.check_serves(&config)?;
         let db = Uni::in_memory()
             .xervo_runtime(runtime.runtime.clone())
@@ -544,9 +507,9 @@ impl KnowledgeBase {
     ) -> Result<Self> {
         config.validate()?;
         runtime.check_serves(&config)?;
-        let open_path = OpenPath::claim_open(path.as_ref()).await?;
+        let open_path = Arc::new(OpenPath::claim(path.as_ref())?);
         let mut builder =
-            Uni::open(path.as_ref().to_string_lossy()).xervo_runtime(runtime.runtime.clone());
+            uni_builder(path.as_ref(), &config, false)?.xervo_runtime(runtime.runtime.clone());
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
         }
@@ -613,8 +576,8 @@ impl KnowledgeBase {
         runtime: Arc<uni_xervo::runtime::ModelRuntime>,
     ) -> Result<Self> {
         config.validate()?;
-        let open_path = OpenPath::claim_open(path.as_ref()).await?;
-        let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_runtime(runtime);
+        let open_path = Arc::new(OpenPath::claim(path.as_ref())?);
+        let mut builder = uni_builder(path.as_ref(), &config, false)?.xervo_runtime(runtime);
         // Apply the same env-driven storage perf knobs (WAL / autoflush) the
         // catalog-open path applies — otherwise opening via a shared runtime
         // silently ignores them.
@@ -679,20 +642,6 @@ impl KnowledgeBase {
         &self.db
     }
 
-    /// Refuse a write once this store's lease (an object-store store's
-    /// stand-in for a directory lock) was taken over by another process.
-    /// Every transaction the store opens checks it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UnikoError::Config`] once the lease is lost.
-    pub fn ensure_writable(&self) -> Result<()> {
-        match &self.open_path {
-            Some(claim) if claim.lease_lost() => Err(lease::RemoteLease::lost_error()),
-            _ => Ok(()),
-        }
-    }
-
     /// Open a fresh read-write [`Transaction`](uni_db::Transaction).
     ///
     /// The sanctioned way for higher crates to run a multi-statement write
@@ -705,10 +654,9 @@ impl KnowledgeBase {
     /// # Errors
     ///
     /// Returns [`UnikoError::Storage`] (or [`UnikoError::Conflict`]) if the
-    /// transaction cannot be opened, or [`UnikoError::Config`] once the
-    /// store's lease is lost.
+    /// transaction cannot be opened, or [`UnikoError::Config`] once another
+    /// handle took the store over.
     pub async fn begin_tx(&self) -> Result<uni_db::Transaction> {
-        self.ensure_writable()?;
         Ok(self.db.session().tx().await?)
     }
 
@@ -757,7 +705,6 @@ impl KnowledgeBase {
     {
         let mut attempt: u32 = 1;
         loop {
-            self.ensure_writable()?;
             let tx = self.db.session().tx().await?;
             let (tx, result) = f(tx).await;
             match result {
@@ -942,10 +889,6 @@ impl KnowledgeBase {
             UnikoError::Internal("cannot shutdown: outstanding references exist".into())
         })?;
         db.shutdown().await?;
-        // The store is closed: free its lease for the next opener.
-        if let Some(claim) = &self.open_path {
-            claim.release_lease().await;
-        }
         Ok(())
     }
 }
@@ -1464,17 +1407,15 @@ mod catalog_tests {
 #[cfg(test)]
 mod open_path_tests {
     use super::*;
-    use std::collections::HashMap;
-    use uni_db::Value;
 
     #[test]
     fn a_path_takes_one_claim_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
+        // Claimed before the directory exists: the key stays the same once
+        // uni-db creates it.
         let path = dir.path().join("kb");
-        // Claimed before the directory exists, which the claim creates for
-        // its lock file: same key either way.
         let open = OpenPath::claim(&path).unwrap();
-        assert!(path.join(LOCK_FILE).exists());
+        std::fs::create_dir(&path).unwrap();
         let err = OpenPath::claim_exclusive(&path).unwrap_err();
         assert!(err.to_string().contains("open in this process"), "{err}");
         let err = OpenPath::claim(&path).unwrap_err();
@@ -1490,118 +1431,76 @@ mod open_path_tests {
         drop(OpenPath::claim_exclusive(&path).unwrap());
     }
 
-    /// The OS lock refuses a second holder of the lock file, as another
-    /// process would be: here, a second file handle taking it directly.
-    #[test]
-    fn the_os_lock_refuses_another_holder() {
+    /// A second process is kept out by uni-db's writer lock, which a
+    /// second handle in this process meets the same way once uniko's own
+    /// registry is out of the way.
+    #[tokio::test]
+    async fn uni_db_refuses_a_second_writer() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("kb");
-        let open = OpenPath::claim(&path).unwrap();
-        let other = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path.join(LOCK_FILE))
-            .unwrap();
-        assert!(matches!(
-            other.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
-        ));
-        drop(open);
-        other.try_lock().expect("released with the claim");
-        drop(other);
-        let err = os_lock_held_elsewhere(&path);
-        assert!(err.contains("another process"), "{err}");
-    }
-
-    /// The error a claim gives while another handle holds the OS lock.
-    fn os_lock_held_elsewhere(path: &Path) -> String {
-        let holder = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path.join(LOCK_FILE))
-            .unwrap();
-        holder.try_lock().unwrap();
-        let err = OpenPath::claim(path).unwrap_err().to_string();
-        drop(holder);
-        err
-    }
-
-    /// A store whose lease another process took over refuses every write:
-    /// the lease is lost on its next renewal, and each transaction checks.
-    #[tokio::test]
-    async fn a_lost_lease_refuses_writes() {
-        use object_store::ObjectStore;
-        use object_store::memory::InMemory;
-        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let prefix = object_store::path::Path::from("bucket/kb");
-        let held = lease::RemoteLease::acquire(
-            Arc::clone(&objects),
-            &prefix,
-            std::time::Duration::from_millis(50),
-            std::time::Duration::from_millis(200),
-        )
-        .await
-        .unwrap();
-        let Ok(mut kb) = KnowledgeBase::in_memory(crate::config::UnikoConfig::default()).await
-        else {
-            return eprintln!("skipping: store unavailable");
-        };
-        kb.open_path = Some(Arc::new(OpenPath {
-            key: std::path::PathBuf::from("lease-test"),
-            exclusive: false,
-            _lock: None,
-            lease: Some(held),
-        }));
-        let props = HashMap::from([
-            ("topic_id".to_string(), Value::String("t1".into())),
-            ("name".to_string(), Value::String("t1".into())),
-        ]);
-        kb.create_node("Topic", &props)
+        let config = UnikoConfig::default();
+        let first = uni_builder(&path, &config, false)
+            .unwrap()
+            .build()
             .await
-            .expect("writes go through while the lease is held");
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let taker = lease::RemoteLease::acquire(
-            Arc::clone(&objects),
-            &prefix,
-            lease::LEASE_TTL,
-            lease::RENEW_EVERY,
-        )
-        .await
-        .expect("an expired lease is taken over");
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        let props = HashMap::from([
-            ("topic_id".to_string(), Value::String("t2".into())),
-            ("name".to_string(), Value::String("t2".into())),
-        ]);
-        let err = kb.create_node("Topic", &props).await.unwrap_err();
-        assert!(err.to_string().contains("lease was taken over"), "{err}");
-        assert!(kb.begin_tx().await.is_err());
-        taker.release().await;
-    }
-
-    #[test]
-    fn a_file_url_locks_its_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let url = url::Url::from_directory_path(dir.path().join("kb")).unwrap();
-        let lock = os_lock(Path::new(url.as_str()), true).unwrap();
-        assert!(lock.is_some(), "a file:// URI is a local directory");
-        assert!(dir.path().join("kb").join(LOCK_FILE).exists());
+            .unwrap();
+        let mut uni_cfg = UniConfig::default();
+        uni_cfg.writer_lease.acquire_grace = std::time::Duration::from_millis(100);
+        let err = uni_builder(&path, &config, true)
+            .unwrap()
+            .config(uni_cfg)
+            .build()
+            .await
+            .err()
+            .expect("a second writer is refused");
+        let err = UnikoError::from(err);
         assert!(
-            os_lock(Path::new("s3://bucket/kb"), true)
-                .unwrap()
-                .is_none()
+            matches!(&err, UnikoError::Config(m) if m.contains("open for writing elsewhere")),
+            "{err}"
         );
+        first.shutdown().await.unwrap();
+        uni_builder(&path, &config, true)
+            .unwrap()
+            .build()
+            .await
+            .expect("free once the first writer closed")
+            .shutdown()
+            .await
+            .unwrap();
     }
 
-    /// Inspecting a directory that isn't a store leaves it untouched.
-    #[test]
-    fn an_exclusive_claim_on_a_non_store_dir_writes_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        drop(OpenPath::claim_exclusive(dir.path()).unwrap());
-        assert!(!dir.path().join(LOCK_FILE).exists());
-        let missing = dir.path().join("nothing-here");
-        drop(OpenPath::claim_exclusive(&missing).unwrap());
-        assert!(!missing.exists());
+    #[tokio::test]
+    async fn remote_storage_is_checked_before_anything_opens() {
+        use crate::config::RemoteStorage;
+        let with = |url: &str| UnikoConfig {
+            remote_storage: Some(RemoteStorage::s3(url)),
+            ..UnikoConfig::default()
+        };
+        let err = KnowledgeBase::in_memory(with("s3://bucket"))
+            .await
+            .err()
+            .expect("in-memory refuses remote_storage");
+        assert!(err.to_string().contains("in-memory"), "{err}");
+        let err = with("https://bucket/kb").validate().unwrap_err();
+        assert!(err.to_string().contains("s3:// or gs://"), "{err}");
+        drop(
+            uni_builder(Path::new("s3://bucket/kb/"), &with("s3://bucket/kb"), false)
+                .expect("a remote-only store: the path is remote_storage's URL"),
+        );
+        let err = uni_builder(Path::new("s3://bucket/a"), &with("s3://bucket/b"), false)
+            .err()
+            .expect("a URI path naming another store");
+        assert!(err.to_string().contains("different stores"), "{err}");
+        let err = uni_builder(Path::new("az://acct/kb"), &with("s3://bucket"), false)
+            .err()
+            .expect("a URI that isn't an object store uniko supports");
+        assert!(
+            err.to_string().contains("local directory (hybrid)"),
+            "{err}"
+        );
+        let typo = serde_json::from_value::<RemoteStorage>(
+            serde_json::json!({"url": "s3://b", "endpoint_url": "http://x"}),
+        );
+        assert!(typo.is_err(), "an unknown key is refused, not dropped");
     }
 }

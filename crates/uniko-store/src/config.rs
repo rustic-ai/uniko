@@ -460,7 +460,7 @@ fn default_nlp_max_batch_size() -> usize {
 ///
 /// When `enabled`, recall fuses RRF candidates and then re-scores the
 /// top `top_n` items with a cross-encoder via uni-db's `local/onnx`
-/// provider.  Disabled by default to keep CPU-only CI cheap.
+/// provider.  Enabled by default; set `enabled: false` to skip it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RerankerConfig {
     /// Whether to register and invoke the reranker.
@@ -721,6 +721,113 @@ impl VectorMetricChoice {
     }
 }
 
+// ── Remote storage ────────────────────────────────────────────────
+
+/// An object store holding a store's data: its graph tables, indexes and
+/// schema.
+///
+/// Opened with a local store path, the store is *hybrid*: its data in the
+/// bucket, its write-ahead log and id allocator in that directory. Opened
+/// with the URL itself as the path, it is *remote-only*: everything in the
+/// bucket, so any host can open it with nothing local. Either way one
+/// writer holds the store at a time (uni-db's lease in the bucket).
+///
+/// The URL's scheme picks the provider: `s3://bucket[/prefix]` for S3 and
+/// S3-compatible services (MinIO, LocalStack, R2), `gs://bucket[/prefix]`
+/// for Google Cloud Storage. A setting left `None` is read from the
+/// provider's usual environment variables when the store opens: for S3
+/// `AWS_REGION` (or `AWS_DEFAULT_REGION`), `AWS_ENDPOINT_URL`,
+/// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`;
+/// for GCS `GOOGLE_APPLICATION_CREDENTIALS`. An `http://` endpoint is
+/// allowed, for local services.
+///
+/// `Debug` hides the secrets.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteStorage {
+    /// `s3://bucket[/prefix]` or `gs://bucket[/prefix]`.
+    pub url: String,
+    /// S3: the region.
+    pub region: Option<String>,
+    /// S3: a custom endpoint, for an S3-compatible service.
+    pub endpoint: Option<String>,
+    /// S3: the access key id.
+    pub access_key_id: Option<String>,
+    /// S3: the secret access key.
+    pub secret_access_key: Option<String>,
+    /// S3: a session token, for temporary credentials.
+    pub session_token: Option<String>,
+    /// S3: address the bucket as `bucket.host` instead of `host/bucket`.
+    /// Off by default, which S3-compatible services need.
+    pub virtual_hosted_style: bool,
+    /// GCS: a service-account key file.
+    pub service_account_path: Option<String>,
+    /// GCS: a service-account key, as JSON.
+    pub service_account_key: Option<String>,
+    /// Hybrid only: when this host's local write-ahead log is stale (it
+    /// holds commits from before another host opened the store), move it
+    /// aside to `wal_set_aside/` in the local directory and open the store
+    /// as the bucket has it. Off by default: the open fails instead, so the
+    /// unflushed commits aren't dropped unnoticed. Nothing is deleted.
+    pub set_aside_stale_wal: bool,
+}
+
+impl std::fmt::Debug for RemoteStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hide = |v: &Option<String>| v.as_ref().map(|_| "<hidden>");
+        f.debug_struct("RemoteStorage")
+            .field("url", &self.url)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &hide(&self.secret_access_key))
+            .field("session_token", &hide(&self.session_token))
+            .field("virtual_hosted_style", &self.virtual_hosted_style)
+            .field("service_account_path", &self.service_account_path)
+            .field("service_account_key", &hide(&self.service_account_key))
+            .field("set_aside_stale_wal", &self.set_aside_stale_wal)
+            .finish()
+    }
+}
+
+impl RemoteStorage {
+    /// An S3 (or S3-compatible) store at `url`, settings from the
+    /// environment.
+    #[must_use]
+    pub fn s3(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Point at an S3-compatible service.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Set the region.
+    #[must_use]
+    pub fn with_region(mut self, region: impl Into<String>) -> Self {
+        self.region = Some(region.into());
+        self
+    }
+
+    /// Set static credentials.
+    #[must_use]
+    pub fn with_credentials(
+        mut self,
+        access_key_id: impl Into<String>,
+        secret_access_key: impl Into<String>,
+    ) -> Self {
+        self.access_key_id = Some(access_key_id.into());
+        self.secret_access_key = Some(secret_access_key.into());
+        self
+    }
+}
+
 // ── Main config ───────────────────────────────────────────────────
 
 /// Configuration for all uniko runtime parameters.
@@ -748,7 +855,7 @@ pub struct UnikoConfig {
     // Embedding + vector index
     /// Embedding model selection (controls dimensions and model ID).
     pub embedding: EmbeddingConfig,
-    /// Cross-encoder reranker selection (disabled by default).
+    /// Cross-encoder reranker selection (enabled by default).
     #[serde(default)]
     pub reranker: RerankerConfig,
     /// NLP cascade selection (model id + ONNX artifact).
@@ -768,6 +875,12 @@ pub struct UnikoConfig {
     /// migration). Default [`BlobStorage::Lance`].
     #[serde(default)]
     pub blob_storage: BlobStorage,
+
+    /// Keep the store's data in an object store instead of under the local
+    /// path. The path given to `open` then holds only the store's write-ahead
+    /// log and id allocator. `None` (the default) keeps everything local.
+    #[serde(default)]
+    pub remote_storage: Option<RemoteStorage>,
 
     // Pipeline capacities
     /// Bounded channel capacity for the ingest worker.
@@ -990,6 +1103,7 @@ impl Default for UnikoConfig {
             },
             vector_metric: VectorMetricChoice::Cosine,
             blob_storage: BlobStorage::default(),
+            remote_storage: None,
             ingest_queue_capacity: 200,
             consolidation_queue_capacity: 32,
             consolidation_threshold: 20,
@@ -1070,6 +1184,10 @@ impl UnikoConfig {
                     self.ocr.image_width,
                 )));
             }
+        }
+
+        if let Some(remote) = &self.remote_storage {
+            crate::storage::remote::parse(&remote.url)?;
         }
 
         if self.embedding.dimensions == 0 {

@@ -64,7 +64,6 @@ impl KnowledgeBase {
         };
 
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
 
         let mut qb = tx.query_with(&cypher);
@@ -123,7 +122,6 @@ impl KnowledgeBase {
             return Ok(Vec::new());
         }
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
         let edge_ids = self.create_edges_in_tx(&tx, edges).await?;
         tx.commit().await?;
@@ -371,7 +369,6 @@ impl KnowledgeBase {
     /// Returns [`UnikoError::Storage`] on database failure.
     pub async fn delete_edge(&self, edge_id: EdgeId) -> Result<bool> {
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
         let result = tx
             .execute_with("MATCH ()-[r]->() WHERE id(r) = $eid DELETE r")
@@ -400,7 +397,6 @@ impl KnowledgeBase {
         let cypher =
             format!("MATCH (a)-[r:{edge_type}]->(b) WHERE id(a) = $src AND id(b) = $dst DELETE r");
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
         let result = tx
             .execute_with(&cypher)
@@ -429,7 +425,6 @@ impl KnowledgeBase {
         let cypher = format!("MATCH ()-[r]->() WHERE id(r) = $eid {set_clause}");
 
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
 
         let mut qb = tx.execute_with(&cypher);

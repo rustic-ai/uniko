@@ -141,7 +141,6 @@ impl KnowledgeBase {
     /// Record the embedding identity on a row that predates it.
     async fn write_embedding_identity(&self) -> Result<()> {
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
         tx.query_with(
             "MATCH (s:KnowledgeBaseStats {stats_id: $sid}) \
@@ -160,7 +159,6 @@ impl KnowledgeBase {
     /// when no persisted row exists.
     async fn write_kb_stats_first_open(&self) -> Result<()> {
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
         let cypher = "
             CREATE (s:KnowledgeBaseStats {
@@ -245,7 +243,6 @@ impl KnowledgeBase {
         // so the lock cost is negligible.
         let _guard = self.kb_stats_lock.lock().await;
         let session = self.db.session();
-        self.ensure_writable()?;
         let tx = session.tx().await?;
 
         // MERGE the singleton, then SET the flag. Two separate

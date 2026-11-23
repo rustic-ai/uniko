@@ -31,7 +31,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -44,24 +44,26 @@ categories = ["database", "text-processing"]
 
 [workspace.dependencies]
 # Internal crates (version required so `cargo publish` accepts the path deps)
-uniko-store = { path = "crates/uniko-store", version = "0.5.1" }
-uniko-pipes = { path = "crates/uniko-pipes", version = "0.5.1" }
-uniko-extract = { path = "crates/uniko-extract", version = "0.5.1" }
-uniko-memory = { path = "crates/uniko-memory", version = "0.5.1" }
-uniko-cortex = { path = "crates/uniko-cortex", version = "0.5.1" }
-uniko-api = { path = "crates/uniko-api", version = "0.5.1" }
-uniko-bench = { path = "crates/uniko-bench", version = "0.5.1" }
+uniko-store = { path = "crates/uniko-store", version = "0.6.0" }
+uniko-pipes = { path = "crates/uniko-pipes", version = "0.6.0" }
+uniko-extract = { path = "crates/uniko-extract", version = "0.6.0" }
+uniko-memory = { path = "crates/uniko-memory", version = "0.6.0" }
+uniko-cortex = { path = "crates/uniko-cortex", version = "0.6.0" }
+uniko-api = { path = "crates/uniko-api", version = "0.6.0" }
+uniko-bench = { path = "crates/uniko-bench", version = "0.6.0" }
 
 # Database — uni-db default features already include lance-backend,
 # provider-onnx (embeddings + NLP + reranker), and every remote provider.
 # GPU accelerators (gpu-cuda / gpu-metal) are opt-in via uniko-store /
 # uniko-bench passthrough features.
-# Tracks the latest 5.x release (^5.3.0 = >=5.3.0, <6.0.0); `cargo update -p uni-db`
+# Tracks the latest 6.x release (^6.0.0 = >=6.0.0, <7.0.0); `cargo update -p uni-db`
 # refreshes the lockfile to the newest compatible version. The floor is
-# required, not cosmetic: 5.3 applies a search filter to unflushed rows in
-# multi-vector search (uni-db#343) and lets sparse search take a filter
-# (uni-db#344), which scoped hybrid recall relies on. It also keeps 5.2.1's fix
-# for the first store write failing on Windows (uni-db#338).
+# required, not cosmetic: 6.0 holds one writer per store across processes and
+# fences a writer whose lease was taken over (uni-db#348), keeps an object
+# store under its URL's prefix (uni-db#349) and lets a remote-only store take
+# its endpoint and credentials (uni-db#350), which store locking and
+# `remote_storage` rely on. It also keeps 5.3's filtered multi-vector and
+# sparse search (uni-db#343, #344) and 5.2.1's Windows write fix (uni-db#338).
 #
 # NOTE (2026-06-28): default-features disabled to drop `provider-candle`.
 # It pulls candle-cuda kernels that nvcc (CUDA 13) cannot compile against this
@@ -78,7 +80,7 @@ uniko-bench = { path = "crates/uniko-bench", version = "0.5.1" }
 # unconditionally rather than behind a uniko passthrough feature because it
 # costs nothing to compile: uni-xervo gates it on `reqwest` + `base64`, which
 # every other remote provider here already pulls in.
-uni-db = { version = "5.3.0", default-features = false, features = [
+uni-db = { version = "6.0.0", default-features = false, features = [
     "mimalloc",
     "lance-backend",
     "apoc-core",

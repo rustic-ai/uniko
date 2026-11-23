@@ -9900,9 +9900,7 @@ checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "uni-algo"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e377754932a6a8981e62e308d4dae5477af5c641f8e5df971f30650d7e684097"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -9922,9 +9920,7 @@ dependencies = [
 
 [[package]]
 name = "uni-btic"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb1e97d4ef86ab0d4862ca7469e743136896fc56bae9f8b6a9bba7bf6576f172"
+version = "6.0.0"
 dependencies = [
  "chrono",
  "serde",
@@ -9933,9 +9929,7 @@ dependencies = [
 
 [[package]]
 name = "uni-bulk"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04badda904ff5bbb125b629e475be1eb1332d20934972b8cf180f7a6493c96b8"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -9957,9 +9951,7 @@ dependencies = [
 
 [[package]]
 name = "uni-common"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9c1cce43a246c0ebb6cf1c7161ddbc56538a18c4e8e0855b82f918e287c5367"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-schema",
@@ -9982,9 +9974,7 @@ dependencies = [
 
 [[package]]
 name = "uni-crdt"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "812f9bc650576bb351a963f1eb43dab7db815d49dc84afc6889792d1bd2ee452"
+version = "6.0.0"
 dependencies = [
  "rmp-serde",
  "rustc-hash",
@@ -9998,9 +9988,7 @@ dependencies = [
 
 [[package]]
 name = "uni-cypher"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b54ebf8563c4635b844216b6f233d99736337f83a837e1738bd8e484d863d3ad"
+version = "6.0.0"
 dependencies = [
  "pest",
  "pest_derive",
@@ -10012,9 +10000,7 @@ dependencies = [
 
 [[package]]
 name = "uni-db"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05869dfd746fd1a6f8b152c8205fd666af8b274db81702bcf39eb36a78c1faf6"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10070,9 +10056,7 @@ dependencies = [
 
 [[package]]
 name = "uni-fork"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be4f6bff1db9c5a500f5e3ad5a098d9efb279b3342c53bce53f2adb4f75199d9"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10088,9 +10072,7 @@ dependencies = [
 
 [[package]]
 name = "uni-locy"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbb322b81387ab411fbac16f2681b5fcb0810349de22318591b2251ceb4672e8"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10105,9 +10087,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baa5ecccc9d69d0cea7051b279c52f3862780d48c4d95eda3bc857c3a9cd3fdc"
+version = "6.0.0"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -10140,9 +10120,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-apoc-core"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49cfba624617fa23b2f14d8f65eeee6554ab648fa35d9579d78526d3876141e7"
+version = "6.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10162,9 +10140,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-builtin"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "452c6251d68a1ffedb68e2bf5b0a6994fcd4fa65aac86da6503b55a55169b957"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10191,9 +10167,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-custom"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "984dc7abe2fb768e84ba902ee881003718e2f456fc9e38fd6e88905b7cbe30e8"
+version = "6.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10214,9 +10188,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-host"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "367cd554078475b895811f2aaf73b1a2f778c8771950245aa5b01d0a2b92f9a2"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10252,9 +10224,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-rhai"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df08fbad74594dc961b9703713d948e75b36875f4919a6f0803a5056885d577"
+version = "6.0.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10278,9 +10248,7 @@ dependencies = [
 
 [[package]]
 name = "uni-query"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "984377a31bfe70cbaa5751ccda52f4f46e33ebd34a198ead1a7381fa0512aba1"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10324,13 +10292,12 @@ dependencies = [
  "uni-sparse-vector",
  "uni-store",
  "uni-xervo",
+ "url",
 ]
 
 [[package]]
 name = "uni-query-functions"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17495274692a2bec52bc7cbefc2325211f27cc2ba2dae757f905bf230e94690a"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10365,9 +10332,7 @@ dependencies = [
 
 [[package]]
 name = "uni-sidecar"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e167d84b6c0d0f15fe970ae8728dbe136f828e0e5fa4e80847475b568ac2a439"
+version = "6.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -10376,9 +10341,7 @@ dependencies = [
 
 [[package]]
 name = "uni-sparse-vector"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8755feab9e1e59ac2a6768906bf5a84414527e8f6f33f175eb8d1126afa80120"
+version = "6.0.0"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -10386,9 +10349,7 @@ dependencies = [
 
 [[package]]
 name = "uni-store"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877576575078371d349aea2f225f22c45837b569c51030a5fc1ebba879424e1b"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -10396,6 +10357,10 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-types",
  "base64 0.22.1",
  "blake3",
  "bytes",
@@ -10416,6 +10381,7 @@ dependencies = [
  "serde_json",
  "sha3",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
@@ -10535,7 +10501,7 @@ checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 
 [[package]]
 name = "uniko-api"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "uniko-cortex",
  "uniko-memory",
@@ -10543,7 +10509,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-bench"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10569,7 +10535,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-cortex"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "serde",
@@ -10583,7 +10549,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-cuda"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -10596,7 +10562,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-extract"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10633,7 +10599,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-memory"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10656,7 +10622,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-metal"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -10669,7 +10635,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-pipes"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10689,7 +10655,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-py"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -10702,7 +10668,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-store"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",

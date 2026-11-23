@@ -73,8 +73,9 @@ impl KnowledgeBase {
     ///
     /// [`UnikoError::Config`] when a store at `path` is open, inspected or
     /// migrated in this process (inspect an open store through its handle's
-    /// [`store_info`](Self::store_info) instead);
-    /// [`UnikoError::Unsupported`] for a remote URI; or
+    /// [`store_info`](Self::store_info) instead), or open for writing in
+    /// another process; [`UnikoError::Unsupported`] for a URI other than
+    /// `s3://` or `gs://`; or
     /// [`UnikoError::Storage`] when the store can't be read.
     pub async fn inspect(
         path: impl AsRef<Path>,
@@ -82,7 +83,7 @@ impl KnowledgeBase {
     ) -> Result<(StoreInfo, Compatibility)> {
         let path = path.as_ref();
         reject_remote(path)?;
-        if !is_store(path) {
+        if !store_exists(path, config).await? {
             return Ok((StoreInfo::default(), Compatibility::default()));
         }
         let _claim = super::OpenPath::claim_exclusive(path)?;
@@ -119,8 +120,10 @@ impl KnowledgeBase {
     /// new config; [`StoreInfo::hybrid_backfill_pending`] says how much is
     /// left. `progress` is called after each phase and backfill batch.
     ///
-    /// No other handle may have the store open, in this process (refused)
-    /// or another one (not detectable: uni-db takes no lock).
+    /// No other handle may have the store open: one in this process is
+    /// refused at once, and one elsewhere holds uni-db's writer lock (a
+    /// local store) or lease (an object store), so the migration's open
+    /// fails.
     ///
     /// # Errors
     ///
@@ -146,55 +149,57 @@ impl KnowledgeBase {
                     .into(),
             ));
         }
-        if !is_store(path) {
+        if !store_exists(path, &config).await? {
             return Err(UnikoError::Config(format!(
                 "no store to migrate at {}",
                 path.display()
             )));
         }
         let _claim = super::OpenPath::claim_exclusive(path)?;
-        let catalog = inspection_catalog(&config, load_catalog(&config, &[])?);
-        let db = open_raw(path, catalog).await?;
-        let outcome = migrate_db(&db, &config, migration, progress).await;
-        let closed = db.shutdown().await;
-        let Backfill {
-            filled: rows_backfilled,
-            unfilled: rows_unfilled,
-        } = outcome?;
-        closed?;
-        // The migration itself succeeded; if the store can't be re-read to
-        // confirm it, report it as not known to be complete rather than
-        // failing a run that did its work.
-        let (completed, migration_in_progress) = match inspect_unclaimed(path, &config).await {
-            Ok((info, verdict)) => (
-                // Rows left unfilled were tried and can't be filled: they
-                // don't keep the migration from being complete.
-                verdict.is_compatible()
-                    && info.hybrid_backfill_pending.unwrap_or(0) <= rows_unfilled
-                    && info.migration_in_progress.is_none(),
-                info.migration_in_progress,
-            ),
-            Err(e) => {
-                tracing::warn!(error = %e, "could not re-read the store after migrating");
-                (false, None)
-            }
-        };
-        let rows = rows_backfilled + rows_unfilled;
-        progress(&MigrationProgress {
-            migration,
-            phase: "done".into(),
-            label: None,
-            done: rows,
-            total: rows,
-        });
-        Ok(MigrationReport {
-            migration,
-            rows_backfilled,
-            rows_unfilled,
-            completed,
-            migration_in_progress,
-            elapsed: started.elapsed(),
-        })
+        {
+            let catalog = inspection_catalog(&config, load_catalog(&config, &[])?);
+            let db = open_raw(path, &config, catalog).await?;
+            let outcome = migrate_db(&db, &config, migration, progress).await;
+            let closed = db.shutdown().await;
+            let Backfill {
+                filled: rows_backfilled,
+                unfilled: rows_unfilled,
+            } = outcome?;
+            closed?;
+            // The migration itself succeeded; if the store can't be re-read to
+            // confirm it, report it as not known to be complete rather than
+            // failing a run that did its work.
+            let (completed, migration_in_progress) = match inspect_unclaimed(path, &config).await {
+                Ok((info, verdict)) => (
+                    // Rows left unfilled were tried and can't be filled: they
+                    // don't keep the migration from being complete.
+                    verdict.is_compatible()
+                        && info.hybrid_backfill_pending.unwrap_or(0) <= rows_unfilled
+                        && info.migration_in_progress.is_none(),
+                    info.migration_in_progress,
+                ),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not re-read the store after migrating");
+                    (false, None)
+                }
+            };
+            let rows = rows_backfilled + rows_unfilled;
+            progress(&MigrationProgress {
+                migration,
+                phase: "done".into(),
+                label: None,
+                done: rows,
+                total: rows,
+            });
+            Ok(MigrationReport {
+                migration,
+                rows_backfilled,
+                rows_unfilled,
+                completed,
+                migration_in_progress,
+                elapsed: started.elapsed(),
+            })
+        }
     }
 }
 
@@ -245,10 +250,10 @@ pub(crate) async fn inspect_unclaimed(
     path: &Path,
     config: &UnikoConfig,
 ) -> Result<(StoreInfo, Compatibility)> {
-    if !is_store(path) {
+    if !store_exists(path, config).await? {
         return Ok((StoreInfo::default(), Compatibility::default()));
     }
-    let db = open_raw(path, inspection_catalog(config, Vec::new())).await?;
+    let db = open_raw(path, config, inspection_catalog(config, Vec::new())).await?;
     let info = compatibility::inspect_db(&db, true).await;
     db.shutdown().await?;
     let info = info?;
@@ -256,12 +261,14 @@ pub(crate) async fn inspect_unclaimed(
     Ok((info, verdict))
 }
 
-/// Inspecting and migrating need a local store directory.
+/// Inspecting and migrating take a local store directory, or a
+/// remote-only store's `s3://` or `gs://` URL.
 fn reject_remote(path: &Path) -> Result<()> {
-    if path.to_string_lossy().contains("://") {
+    let at = path.to_string_lossy();
+    if at.contains("://") && !super::remote::is_object_store_uri(&at) {
         return Err(UnikoError::Unsupported(format!(
-            "inspecting or migrating a remote store ({}) isn't supported; use a local path",
-            path.display()
+            "inspecting or migrating a store at {at} isn't supported; use a local path or an \
+             s3:// or gs:// URL"
         )));
     }
     Ok(())
@@ -273,10 +280,36 @@ fn is_store(path: &Path) -> bool {
     path.join("catalog").join("schema.json").is_file() || path.join("schema.json").is_file()
 }
 
+/// Whether the store exists: its schema catalog is in the local directory,
+/// or under the store's prefix in its bucket (`remote_storage`, or a
+/// remote-only store's URL). Opening anything else would create one.
+async fn store_exists(path: &Path, config: &UnikoConfig) -> Result<bool> {
+    let Some(remote) = super::remote::for_path(path, config)? else {
+        return Ok(is_store(path));
+    };
+    use object_store::ObjectStoreExt as _;
+    let store = remote.object_store()?;
+    // `schema.json` at the prefix is a store written flat by uni-db 5.3.0
+    // or earlier, which uni-db still opens.
+    for at in ["catalog/schema.json", "schema.json"] {
+        let key = object_store::path::Path::from(if remote.prefix.as_ref().is_empty() {
+            at.to_string()
+        } else {
+            format!("{}/{at}", remote.prefix)
+        });
+        match store.head(&key).await {
+            Ok(_) => return Ok(true),
+            Err(object_store::Error::NotFound { .. }) => {}
+            Err(e) => return Err(UnikoError::Storage(format!("{}: {e}", remote.url))),
+        }
+    }
+    Ok(false)
+}
+
 /// Open the store at `path` as uni-db alone: no schema applied, and models
 /// only from `catalog`, which loads them lazily.
-async fn open_raw(path: &Path, catalog: Vec<ModelAliasSpec>) -> Result<Uni> {
-    let mut builder = Uni::open_existing(path.to_string_lossy());
+async fn open_raw(path: &Path, config: &UnikoConfig, catalog: Vec<ModelAliasSpec>) -> Result<Uni> {
+    let mut builder = super::uni_builder(path, config, true)?;
     if !catalog.is_empty() {
         builder = builder.xervo_catalog(catalog);
     }

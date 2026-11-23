@@ -27,7 +27,7 @@ const REDACTED: &str = "<redacted>";
 /// Sections whose value is a tagged enum, so a new variant brings keys the
 /// default lacks (`{"kind": "fs", "root": ...}` over `{"kind": "lance"}`).
 /// The input replaces these whole instead of being merged key by key.
-const REPLACED_WHOLE: &[&str] = &["blob_storage", "vector_algorithm"];
+const REPLACED_WHOLE: &[&str] = &["blob_storage", "remote_storage", "vector_algorithm"];
 
 /// Reranker presets accepted by `UnikoBuilder.reranker(name)`.
 const RERANKER_PRESETS: &[&str] = &["bge-base", "minilm"];
@@ -304,8 +304,11 @@ pub fn reranker_from_py(obj: &Bound<'_, PyAny>) -> PyResult<RerankerConfig> {
     merged(&RerankerConfig::default(), input, "reranker")
 }
 
+/// Secrets in `remote_storage`, redacted by `Uniko.config()`.
+const REMOTE_SECRETS: &[&str] = &["secret_access_key", "session_token", "service_account_key"];
+
 /// `Uniko.config()`: the full configuration as nested dicts, with
-/// `embedding.provider_options` redacted.
+/// `embedding.provider_options` and the `remote_storage` secrets redacted.
 pub fn config_to_py(py: Python<'_>, config: &UnikoConfig) -> PyResult<Py<PyAny>> {
     let mut json = serde_json::to_value(config)
         .map_err(|e| config_error(format!("serializing the config: {e}")))?;
@@ -315,6 +318,15 @@ pub fn config_to_py(py: Python<'_>, config: &UnikoConfig) -> PyResult<Py<PyAny>>
         && !options.is_null()
     {
         *options = Json::String(REDACTED.to_string());
+    }
+    if let Some(Json::Object(remote)) = json.get_mut("remote_storage") {
+        for key in REMOTE_SECRETS {
+            if let Some(v) = remote.get_mut(*key)
+                && !v.is_null()
+            {
+                *v = Json::String(REDACTED.to_string());
+            }
+        }
     }
     json_to_py(py, &json)
 }
