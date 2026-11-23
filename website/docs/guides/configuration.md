@@ -468,10 +468,10 @@ setting from the environment variables below.
 |------------------------|---------|
 | `url`                  | `s3://bucket[/prefix]` (S3 and S3-compatible services: MinIO, LocalStack, R2) or `gs://bucket[/prefix]`. |
 | `region`               | S3 region. Falls back to `AWS_REGION`, then `AWS_DEFAULT_REGION`. |
-| `endpoint`             | A custom S3 endpoint. Falls back to `AWS_ENDPOINT_URL`. An `http://` endpoint is allowed. |
-| `access_key_id`, `secret_access_key`, `session_token` | S3 credentials. Fall back to `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`. |
-| `virtual_hosted_style` | Address the bucket as `bucket.host`. Off by default, which S3-compatible services need. |
-| `service_account_path`, `service_account_key` | GCS credentials. The path falls back to `GOOGLE_APPLICATION_CREDENTIALS`. |
+| `endpoint`             | A custom S3 endpoint. Falls back to `AWS_ENDPOINT_URL_S3`, then `AWS_ENDPOINT_URL`. An `http://` endpoint is allowed. |
+| `access_key_id`, `secret_access_key`, `session_token` | S3 credentials. Fall back to `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, then to a named `AWS_PROFILE`. |
+| `virtual_hosted_style` | Address the bucket as `bucket.host`. Off by default, which S3-compatible services need; `AWS_VIRTUAL_HOSTED_STYLE_REQUEST=true` turns it on too. |
+| `service_account_path`, `service_account_key` | GCS credentials. Fall back to `GOOGLE_SERVICE_ACCOUNT` and `GOOGLE_SERVICE_ACCOUNT_KEY`, then to application-default credentials (`GOOGLE_APPLICATION_CREDENTIALS`). |
 | `set_aside_stale_wal`  | Hybrid only. See *Moving a hybrid store* below. Off by default. |
 
 An unknown key is refused. `Debug` output, and `Uniko.config()` in Python, hide the secrets.

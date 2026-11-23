@@ -60,7 +60,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path the store is hybrid: data in the bucket, write-ahead log and ids
   locally. With the store's own `s3://` or `gs://` URL as the path it is
   remote-only, with nothing local, so any host can open it. Settings fall
-  back to the usual `AWS_*` and `GOOGLE_APPLICATION_CREDENTIALS` variables.
+  back to the usual `AWS_*` and `GOOGLE_*` variables, resolved by uni-db in the
+  providers' own order (`AWS_ENDPOINT_URL_S3` before `AWS_ENDPOINT_URL`,
+  `AWS_PROFILE`, application-default credentials).
   Stores can share a bucket under different prefixes, and
   `set_aside_stale_wal` recovers a hybrid host that crashed and came back
   after another host opened the store. Tested against LocalStack and the

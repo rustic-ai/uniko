@@ -9,21 +9,19 @@
 use std::sync::Arc;
 
 use object_store::ObjectStore;
-use object_store::aws::AmazonS3Builder;
-use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path as ObjPath;
 use uni_db::common::CloudStorageConfig;
+use uni_db::common::config::ObjectStoreConfig;
+use uni_db::store::location::{LocationSpec, StoreLocation};
 
 use crate::config::RemoteStorage;
 use crate::error::{Result, UnikoError};
 
-/// [`RemoteStorage`] with its environment fallbacks applied.
+/// [`RemoteStorage`] parsed, in the form uni-db takes it.
 #[derive(Clone)]
 pub(crate) struct ResolvedRemote {
     /// The store URL as configured, for uni-db and error messages.
     pub(crate) url: String,
-    /// The key prefix under the bucket.
-    pub(crate) prefix: ObjPath,
     /// What uni-db needs to reach the bucket.
     pub(crate) cloud: CloudStorageConfig,
 }
@@ -34,10 +32,6 @@ impl std::fmt::Debug for ResolvedRemote {
             .field("url", &self.url)
             .finish_non_exhaustive()
     }
-}
-
-fn env(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 fn config_error(url: &str, why: impl std::fmt::Display) -> UnikoError {
@@ -89,93 +83,50 @@ pub(crate) fn for_path(
 }
 
 impl ResolvedRemote {
-    /// Resolve `remote`, filling unset settings from the environment.
+    /// Resolve `remote`: only the settings it gives explicitly go in
+    /// [`cloud`](Self::cloud). uni-db layers the environment under them
+    /// itself (`AWS_ENDPOINT_URL_S3` before `AWS_ENDPOINT_URL`,
+    /// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`, `AWS_PROFILE`, Google's
+    /// application-default credentials), so filling them from the
+    /// environment here would only turn an inherited variable into an
+    /// explicit setting that outranks the ones uni-db prefers.
     pub(crate) fn resolve(remote: &RemoteStorage) -> Result<Self> {
-        let (scheme, bucket, prefix) = parse(&remote.url)?;
-        let pick = |v: &Option<String>, names: &[&str]| {
-            v.clone().or_else(|| names.iter().find_map(|n| env(n)))
-        };
+        let (scheme, bucket, _) = parse(&remote.url)?;
         let cloud = match scheme.as_str() {
             "s3" => CloudStorageConfig::S3 {
                 bucket,
-                region: pick(&remote.region, &["AWS_REGION", "AWS_DEFAULT_REGION"]),
-                endpoint: pick(&remote.endpoint, &["AWS_ENDPOINT_URL"]),
-                access_key_id: pick(&remote.access_key_id, &["AWS_ACCESS_KEY_ID"]),
-                secret_access_key: pick(&remote.secret_access_key, &["AWS_SECRET_ACCESS_KEY"]),
-                session_token: pick(&remote.session_token, &["AWS_SESSION_TOKEN"]),
+                region: remote.region.clone(),
+                endpoint: remote.endpoint.clone(),
+                access_key_id: remote.access_key_id.clone(),
+                secret_access_key: remote.secret_access_key.clone(),
+                session_token: remote.session_token.clone(),
                 virtual_hosted_style: remote.virtual_hosted_style,
             },
             _ => CloudStorageConfig::Gcs {
                 bucket,
-                service_account_path: pick(
-                    &remote.service_account_path,
-                    &["GOOGLE_APPLICATION_CREDENTIALS"],
-                ),
+                service_account_path: remote.service_account_path.clone(),
                 service_account_key: remote.service_account_key.clone(),
             },
         };
         Ok(Self {
             url: remote.url.clone(),
-            prefix,
             cloud,
         })
     }
 
-    /// A client for the bucket, built as uni-db builds its own from
-    /// [`cloud`](Self::cloud).
-    pub(crate) fn object_store(&self) -> Result<Arc<dyn ObjectStore>> {
-        let err = |e: object_store::Error| {
-            UnikoError::Config(format!("remote_storage {}: {e}", self.url))
+    /// A client rooted at the store's prefix, resolved by uni-db from
+    /// [`cloud`](Self::cloud) and the environment exactly as it resolves
+    /// the store it opens, so both reach the same bucket the same way.
+    pub(crate) async fn store_root(&self) -> Result<Arc<dyn ObjectStore>> {
+        let spec = LocationSpec {
+            uri: self.url.clone(),
+            cloud: Some(self.cloud.clone()),
+            options: Default::default(),
         };
-        match &self.cloud {
-            CloudStorageConfig::S3 {
-                bucket,
-                region,
-                endpoint,
-                access_key_id,
-                secret_access_key,
-                session_token,
-                virtual_hosted_style,
-            } => {
-                let mut b = AmazonS3Builder::new()
-                    .with_bucket_name(bucket)
-                    .with_virtual_hosted_style_request(*virtual_hosted_style);
-                if let Some(v) = region {
-                    b = b.with_region(v);
-                }
-                if let Some(v) = endpoint {
-                    b = b.with_endpoint(v).with_allow_http(v.starts_with("http://"));
-                }
-                if let Some(v) = access_key_id {
-                    b = b.with_access_key_id(v);
-                }
-                if let Some(v) = secret_access_key {
-                    b = b.with_secret_access_key(v);
-                }
-                if let Some(v) = session_token {
-                    b = b.with_token(v);
-                }
-                Ok(Arc::new(b.build().map_err(err)?))
-            }
-            CloudStorageConfig::Gcs {
-                bucket,
-                service_account_path,
-                service_account_key,
-            } => {
-                let mut b = GoogleCloudStorageBuilder::new().with_bucket_name(bucket);
-                if let Some(v) = service_account_path {
-                    b = b.with_service_account_path(v);
-                }
-                if let Some(v) = service_account_key {
-                    b = b.with_service_account_key(v);
-                }
-                Ok(Arc::new(b.build().map_err(err)?))
-            }
-            CloudStorageConfig::Azure { .. } => Err(UnikoError::Unsupported(format!(
-                "remote_storage {}: Azure isn't supported",
-                self.url
-            ))),
-        }
+        let location = StoreLocation::resolve_from_env(&spec, &ObjectStoreConfig::default())
+            .await
+            .map_err(|e| UnikoError::Config(format!("remote_storage {}: {e}", self.url)))?;
+        Ok(location.meta_store())
     }
 }
 
@@ -230,8 +181,45 @@ mod tests {
         assert_eq!(endpoint.as_deref(), Some("http://localhost:4566"));
         assert_eq!(access_key_id.as_deref(), Some("id"));
         assert_eq!(secret_access_key.as_deref(), Some("secret"));
-        assert_eq!(resolved.prefix.as_ref(), "kb");
-        resolved.object_store().expect("builds a client");
+    }
+
+    /// Settings left unset stay unset, for uni-db to fill from the
+    /// environment in its own order.
+    #[test]
+    fn unset_settings_are_left_to_uni_db() {
+        let resolved = ResolvedRemote::resolve(&RemoteStorage::s3("s3://b/kb")).unwrap();
+        let CloudStorageConfig::S3 {
+            region,
+            endpoint,
+            access_key_id,
+            virtual_hosted_style,
+            ..
+        } = &resolved.cloud
+        else {
+            panic!("an s3:// URL resolves to S3");
+        };
+        assert!(region.is_none() && endpoint.is_none() && access_key_id.is_none());
+        assert!(!virtual_hosted_style);
+        let resolved = ResolvedRemote::resolve(&RemoteStorage::s3("gs://b")).unwrap();
+        assert!(matches!(
+            &resolved.cloud,
+            CloudStorageConfig::Gcs {
+                service_account_path: None,
+                service_account_key: None,
+                ..
+            }
+        ));
+    }
+
+    /// uniko's own client is built by uni-db's location resolution.
+    #[tokio::test]
+    async fn the_client_is_resolved_by_uni_db() {
+        let remote = RemoteStorage::s3("s3://b/kb")
+            .with_endpoint("http://localhost:4566")
+            .with_region("us-east-1")
+            .with_credentials("id", "secret");
+        let resolved = ResolvedRemote::resolve(&remote).unwrap();
+        resolved.store_root().await.expect("builds a client");
     }
 
     #[test]

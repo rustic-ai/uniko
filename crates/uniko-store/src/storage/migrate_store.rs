@@ -293,15 +293,12 @@ async fn store_exists(path: &Path, config: &UnikoConfig) -> Result<bool> {
         return Ok(is_store(path));
     };
     use object_store::ObjectStoreExt as _;
-    let store = remote.object_store()?;
+    // uni-db's own client, rooted at the store's prefix.
+    let store = remote.store_root().await?;
     // `schema.json` at the prefix is a store written flat by uni-db 5.3.0
     // or earlier, which uni-db still opens.
     for at in ["catalog/schema.json", "schema.json"] {
-        let key = object_store::path::Path::from(if remote.prefix.as_ref().is_empty() {
-            at.to_string()
-        } else {
-            format!("{}/{at}", remote.prefix)
-        });
+        let key = object_store::path::Path::from(at);
         match store.head(&key).await {
             Ok(_) => return Ok(true),
             Err(object_store::Error::NotFound { .. }) => {}
