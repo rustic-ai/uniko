@@ -305,7 +305,13 @@ pub fn reranker_from_py(obj: &Bound<'_, PyAny>) -> PyResult<RerankerConfig> {
 }
 
 /// Secrets in `remote_storage`, redacted by `Uniko.config()`.
-const REMOTE_SECRETS: &[&str] = &["secret_access_key", "session_token", "service_account_key"];
+const REMOTE_SECRETS: &[&str] = &[
+    "secret_access_key",
+    "session_token",
+    "service_account_key",
+    "access_key",
+    "sas_token",
+];
 
 /// `Uniko.config()`: the full configuration as nested dicts, with
 /// `embedding.provider_options` and the `remote_storage` secrets redacted.

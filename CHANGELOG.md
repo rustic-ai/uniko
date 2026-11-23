@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Azure Blob Storage for `remote_storage`.** An `az://container[/prefix]` URL keeps a
+  store in an Azure container, hybrid or remote-only, like `s3://` and `gs://`.
+  `RemoteStorage::azure(url, account)` names the storage account, and
+  `with_access_key` or `with_sas_token` the credentials (in Python, the `account`,
+  `access_key` and `sas_token` keys). Unset settings come from the `AZURE_*`
+  environment. `Uniko.config()` redacts the key and token.
+
+### Fixed
+
+- **`shutdown` reports a flush that didn't reach the bucket.** uni-db's shutdown
+  only logs a failed flush, so a hybrid store whose flush timed out shut down
+  "successfully" with its last commits only in the local write-ahead log, and
+  another host opened it without them. A store with `remote_storage` is now
+  flushed first, and a failure is returned as a `Storage` error once the store
+  has closed. Reopening from the same directory still replays the commits.
+
+### Changed
+
+- **`UNIKO_QUERY_TIMEOUT_SECS`** raises uni-db's 30-second query timeout, for a
+  store far from its bucket.
+- **A `remote_storage` setting for another provider is refused** instead of being
+  ignored: an `access_key` on an `s3://` store, a `region` on an `az://` one.
+
 ## [0.6.0] - 2026-11-22
 
 ### Breaking

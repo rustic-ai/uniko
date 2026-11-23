@@ -459,22 +459,33 @@ let memory = Uniko::builder().path("./kb-local").raw_config(config.clone()).buil
 let memory = Uniko::builder().path("s3://my-bucket/kb").raw_config(config).build().await?;
 ```
 
-In Python, pass it as a mapping: `.config({"remote_storage": {"url": "s3://my-bucket/kb", ...}})`.
+For Azure Blob Storage, name the container in an `az://` URL and the storage account it is in:
+
+```rust
+let remote = RemoteStorage::azure("az://my-container/kb", "mystorageaccount")
+    .with_access_key(std::env::var("MY_ACCOUNT_KEY")?); // or .with_sas_token(...)
+```
+
+In Python, pass it as a mapping: `.config({"remote_storage": {"url": "s3://my-bucket/kb", ...}})`,
+or `{"url": "az://my-container/kb", "account": "mystorageaccount", "access_key": ...}`.
 
 A remote-only store can also be opened by its URL with no `remote_storage` at all, taking every
 setting from the environment variables below.
 
 | Field                  | Meaning |
 |------------------------|---------|
-| `url`                  | `s3://bucket[/prefix]` (S3 and S3-compatible services: MinIO, LocalStack, R2) or `gs://bucket[/prefix]`. |
+| `url`                  | `s3://bucket[/prefix]` (S3 and S3-compatible services: MinIO, LocalStack, R2), `gs://bucket[/prefix]` or `az://container[/prefix]` (Azure Blob Storage). |
 | `region`               | S3 region. Falls back to `AWS_REGION`, then `AWS_DEFAULT_REGION`. |
 | `endpoint`             | A custom S3 endpoint. Falls back to `AWS_ENDPOINT_URL_S3`, then `AWS_ENDPOINT_URL`. An `http://` endpoint is allowed. |
 | `access_key_id`, `secret_access_key`, `session_token` | S3 credentials. Fall back to `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, then to a named `AWS_PROFILE`. |
 | `virtual_hosted_style` | Address the bucket as `bucket.host`. Off by default, which S3-compatible services need; `AWS_VIRTUAL_HOSTED_STYLE_REQUEST=true` turns it on too. |
 | `service_account_path`, `service_account_key` | GCS credentials. Fall back to `GOOGLE_SERVICE_ACCOUNT` and `GOOGLE_SERVICE_ACCOUNT_KEY`, then to application-default credentials (`GOOGLE_APPLICATION_CREDENTIALS`). |
+| `account`              | Azure storage account the container is in. Falls back to `AZURE_STORAGE_ACCOUNT` (or `AZURE_STORAGE_ACCOUNT_NAME`). |
+| `access_key`, `sas_token` | Azure credentials: the account key, or a shared access signature. Fall back to `AZURE_STORAGE_ACCESS_KEY` (or `AZURE_STORAGE_ACCOUNT_KEY`) and `AZURE_STORAGE_SAS_KEY`. Either one needs the account. |
 | `set_aside_stale_wal`  | Hybrid only. See *Moving a hybrid store* below. Off by default. |
 
-An unknown key is refused. `Debug` output, and `Uniko.config()` in Python, hide the secrets.
+An unknown key is refused, and so is a setting for another provider than the URL's (an
+`access_key` on an `s3://` store, say). `Debug` output, and `Uniko.config()` in Python, hide the secrets.
 
 - **Stores can share a bucket.** Everything a store writes stays under its URL's prefix, so
   `s3://bucket/a` and `s3://bucket/b` are separate stores.
@@ -489,6 +500,16 @@ An unknown key is refused. `Debug` output, and `Uniko.config()` in Python, hide 
   is refused with a `Config` error rather than replaying them over newer data. Set
   `set_aside_stale_wal` to move that log to `wal_set_aside/` in the directory and open the store
   as the bucket has it; nothing is deleted.
+- **Shutting down reports a failed flush.** A hybrid store's last commits stay in the local
+  write-ahead log until a flush writes them to the bucket. If that flush fails, `shutdown` still
+  closes the store and releases its lease, then returns a `Storage` error saying the commits did
+  not reach the bucket. They aren't lost: reopening from the same directory replays them, and the
+  next clean shutdown writes them out.
+- **A distant bucket can need longer timeouts.** A flush writes every table that changed, each in
+  several round trips, and uni-db abandons one after 60 seconds. A store far from its bucket can
+  run past that (measured: uniko's full schema to Azure Blob Storage at about 85 ms round trip).
+  Raise it with `UNI_FLUSH_STREAM_TIMEOUT` (seconds), and the 30-second query timeout with
+  `UNIKO_QUERY_TIMEOUT_SECS`. Both are read when the store opens.
 - An in-memory store refuses `remote_storage`.
 
 Tested end to end against LocalStack and the AWS Emulator; not yet against AWS S3 or GCS

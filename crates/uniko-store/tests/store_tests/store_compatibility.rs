@@ -862,11 +862,14 @@ async fn migrate_refuses_schema_path_and_unsupported_uris() {
         "{err}"
     );
     for result in [
-        KnowledgeBase::inspect("az://container/kb", &UnikoConfig::default())
-            .await
-            .err(),
+        KnowledgeBase::inspect(
+            "abfss://container@acct.dfs.core.windows.net/kb",
+            &UnikoConfig::default(),
+        )
+        .await
+        .err(),
         KnowledgeBase::migrate(
-            "az://container/kb",
+            "abfss://container@acct.dfs.core.windows.net/kb",
             UnikoConfig::default(),
             Migration::RebuildVectorIndexes,
             &mut no_progress(),

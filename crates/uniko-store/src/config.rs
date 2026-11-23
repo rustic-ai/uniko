@@ -734,7 +734,9 @@ impl VectorMetricChoice {
 ///
 /// The URL's scheme picks the provider: `s3://bucket[/prefix]` for S3 and
 /// S3-compatible services (MinIO, LocalStack, R2), `gs://bucket[/prefix]`
-/// for Google Cloud Storage. A setting left `None` (or
+/// for Google Cloud Storage, `az://container[/prefix]` for Azure Blob
+/// Storage. A setting for another provider than the URL's is refused.
+/// A setting left `None` (or
 /// `virtual_hosted_style` left off) is filled by uni-db from the provider's
 /// usual environment variables when the store opens, in the order the
 /// provider's SDKs use: for S3 `AWS_REGION` (or `AWS_DEFAULT_REGION`),
@@ -742,15 +744,19 @@ impl VectorMetricChoice {
 /// `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
 /// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`, then a named `AWS_PROFILE`; for GCS
 /// `GOOGLE_SERVICE_ACCOUNT`, `GOOGLE_SERVICE_ACCOUNT_KEY` and
-/// application-default credentials (`GOOGLE_APPLICATION_CREDENTIALS`).
-/// A setting given here wins over all of them. An `http://` endpoint is
+/// application-default credentials (`GOOGLE_APPLICATION_CREDENTIALS`);
+/// for Azure `AZURE_STORAGE_ACCOUNT` (or `AZURE_STORAGE_ACCOUNT_NAME`),
+/// `AZURE_STORAGE_ACCESS_KEY` (or `AZURE_STORAGE_ACCOUNT_KEY`),
+/// `AZURE_STORAGE_SAS_KEY` and the other `AZURE_*` variables `object_store`
+/// reads. A setting given here wins over all of them. An `http://` endpoint is
 /// allowed, for local services.
 ///
 /// `Debug` hides the secrets.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct RemoteStorage {
-    /// `s3://bucket[/prefix]` or `gs://bucket[/prefix]`.
+    /// `s3://bucket[/prefix]`, `gs://bucket[/prefix]` or
+    /// `az://container[/prefix]`.
     pub url: String,
     /// S3: the region.
     pub region: Option<String>,
@@ -769,6 +775,12 @@ pub struct RemoteStorage {
     pub service_account_path: Option<String>,
     /// GCS: a service-account key, as JSON.
     pub service_account_key: Option<String>,
+    /// Azure: the storage account the container is in.
+    pub account: Option<String>,
+    /// Azure: the storage account's access key.
+    pub access_key: Option<String>,
+    /// Azure: a shared access signature (SAS) token, instead of a key.
+    pub sas_token: Option<String>,
     /// Hybrid only: when this host's local write-ahead log is stale (it
     /// holds commits from before another host opened the store), move it
     /// aside to `wal_set_aside/` in the local directory and open the store
@@ -790,20 +802,57 @@ impl std::fmt::Debug for RemoteStorage {
             .field("virtual_hosted_style", &self.virtual_hosted_style)
             .field("service_account_path", &self.service_account_path)
             .field("service_account_key", &hide(&self.service_account_key))
+            .field("account", &self.account)
+            .field("access_key", &hide(&self.access_key))
+            .field("sas_token", &hide(&self.sas_token))
             .field("set_aside_stale_wal", &self.set_aside_stale_wal)
             .finish()
     }
 }
 
 impl RemoteStorage {
-    /// An S3 (or S3-compatible) store at `url`, settings from the
+    /// A store at `url` (`s3://`, `gs://` or `az://`), settings from the
     /// environment.
     #[must_use]
-    pub fn s3(url: impl Into<String>) -> Self {
+    pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
             ..Self::default()
         }
+    }
+
+    /// An S3 (or S3-compatible) store at `url`, settings from the
+    /// environment. The same as [`new`](Self::new), which takes any
+    /// supported URL.
+    #[must_use]
+    pub fn s3(url: impl Into<String>) -> Self {
+        Self::new(url)
+    }
+
+    /// An Azure Blob Storage store at `az://container[/prefix]` in
+    /// `account`, credentials from the environment until
+    /// [`with_access_key`](Self::with_access_key) or
+    /// [`with_sas_token`](Self::with_sas_token) sets them.
+    #[must_use]
+    pub fn azure(url: impl Into<String>, account: impl Into<String>) -> Self {
+        Self {
+            account: Some(account.into()),
+            ..Self::new(url)
+        }
+    }
+
+    /// Azure: authenticate with the storage account's access key.
+    #[must_use]
+    pub fn with_access_key(mut self, access_key: impl Into<String>) -> Self {
+        self.access_key = Some(access_key.into());
+        self
+    }
+
+    /// Azure: authenticate with a shared access signature token.
+    #[must_use]
+    pub fn with_sas_token(mut self, sas_token: impl Into<String>) -> Self {
+        self.sas_token = Some(sas_token.into());
+        self
     }
 
     /// Point at an S3-compatible service.
@@ -1192,7 +1241,7 @@ impl UnikoConfig {
         }
 
         if let Some(remote) = &self.remote_storage {
-            crate::storage::remote::parse(&remote.url)?;
+            crate::storage::remote::ResolvedRemote::resolve(remote)?;
         }
 
         if self.embedding.dimensions == 0 {

@@ -1,8 +1,15 @@
-"""A store kept in S3 through ``remote_storage``, from Python.
+"""A store kept in an object store through ``remote_storage``, from Python.
 
-Skipped unless ``UNIKO_S3_ENDPOINT`` is set; start a local S3 with
-``scripts/s3/start.sh localstack`` (see ``crates/uniko-memory/tests/cloud_e2e.rs``
-for the full Rust lifecycle test).
+Runs once per configured provider, and is skipped when none is:
+
+- S3, when ``UNIKO_S3_ENDPOINT`` is set; start a local S3 with
+  ``scripts/s3/start.sh localstack``;
+- Azure Blob Storage, when ``UNIKO_AZURE_ACCOUNT``, ``UNIKO_AZURE_CONTAINER``
+  and ``UNIKO_AZURE_SAS`` are set. The store opens with the SAS token, which
+  needs read, add, create, write, delete and list rights on the container.
+
+See ``crates/uniko-memory/tests/cloud_e2e.rs`` for the full Rust lifecycle
+test.
 """
 
 from __future__ import annotations
@@ -17,10 +24,20 @@ import pytest
 import uniko
 
 ENDPOINT = os.environ.get("UNIKO_S3_ENDPOINT")
+AZURE_ACCOUNT = os.environ.get("UNIKO_AZURE_ACCOUNT")
+AZURE_CONTAINER = os.environ.get("UNIKO_AZURE_CONTAINER")
+AZURE_SAS = os.environ.get("UNIKO_AZURE_SAS")
+
+PROVIDERS = []
+if ENDPOINT and not os.environ.get("UNIKO_S3_CA"):
+    PROVIDERS.append("s3")
+if AZURE_ACCOUNT and AZURE_CONTAINER and AZURE_SAS:
+    PROVIDERS.append("azure")
 
 pytestmark = pytest.mark.skipif(
-    not ENDPOINT or bool(os.environ.get("UNIKO_S3_CA")),
-    reason="needs UNIKO_S3_ENDPOINT, over plain HTTP (scripts/s3/start.sh localstack)",
+    not PROVIDERS,
+    reason="needs UNIKO_S3_ENDPOINT over plain HTTP (scripts/s3/start.sh localstack), "
+    "or UNIKO_AZURE_ACCOUNT, UNIKO_AZURE_CONTAINER and UNIKO_AZURE_SAS",
 )
 
 
@@ -50,7 +67,7 @@ def _bucket() -> str:
     return name
 
 
-def _config(bucket: str) -> dict:
+def _s3_config(bucket: str) -> dict:
     return {
         "remote_storage": {
             "url": f"s3://{bucket}/kb",
@@ -62,17 +79,37 @@ def _config(bucket: str) -> dict:
     }
 
 
+def _azure_config() -> dict:
+    return {
+        "remote_storage": {
+            "url": f"az://{AZURE_CONTAINER}/uniko-py-{uuid.uuid4().hex[:12]}/kb",
+            "account": AZURE_ACCOUNT,
+            "sas_token": AZURE_SAS,
+        }
+    }
+
+
+@pytest.fixture(params=PROVIDERS or ["none"])
+def provider(request: pytest.FixtureRequest) -> tuple[dict, str]:
+    """The config for a fresh store, and the secret its read-back hides."""
+    if request.param == "s3":
+        return _s3_config(_bucket()), "secret_access_key"
+    return _azure_config(), "sas_token"
+
+
 def _open(path: Path, config: dict) -> uniko.Uniko:
     return uniko.Uniko.builder().path(str(path)).config(config).build_sync()
 
 
-def test_a_store_on_s3_survives_a_reopen_and_a_move(tmp_path: Path) -> None:
-    config = _config(_bucket())
+def test_a_store_in_a_bucket_survives_a_reopen_and_a_move(
+    tmp_path: Path, provider: tuple[dict, str]
+) -> None:
+    config, secret = provider
     memory = _open(tmp_path / "host-a", config)
 
     shown = memory.config()["remote_storage"]
-    assert shown["secret_access_key"] == "<redacted>"
-    assert shown["access_key_id"] == config["remote_storage"]["access_key_id"]
+    assert shown[secret] == "<redacted>"
+    assert shown["url"] == config["remote_storage"]["url"]
 
     with pytest.raises(uniko.ConfigError, match="open for writing elsewhere"):
         _open(tmp_path / "host-b", config)

@@ -25,13 +25,16 @@ use uni_db::{ModelAliasSpec, ModelTask, Uni, UniConfig, WarmupPolicy};
 /// Diagnostic perf-knob override read from env vars. Set
 /// `UNIKO_WAL_DISABLED=1` to disable WAL, or
 /// `UNIKO_AUTOFLUSH_THRESHOLD=N` to override the L0 auto-flush
-/// threshold. Returns Some(cfg) only if at least one knob is set, so
-/// the default UniConfig isn't perturbed in normal use.
+/// threshold, or `UNIKO_QUERY_TIMEOUT_SECS=N` to raise uni-db's
+/// per-query timeout (30 s), which a store in a distant bucket can
+/// exceed. Returns Some(cfg) only if at least one knob is set, so the
+/// default UniConfig isn't perturbed in normal use.
 fn apply_perf_knobs_from_env() -> Option<UniConfig> {
     let wal = std::env::var("UNIKO_WAL_DISABLED").ok();
     let flush = std::env::var("UNIKO_AUTOFLUSH_THRESHOLD").ok();
     let flush_interval_off = std::env::var("UNIKO_AUTOFLUSH_INTERVAL_OFF").ok();
-    if wal.is_none() && flush.is_none() && flush_interval_off.is_none() {
+    let query_timeout = std::env::var("UNIKO_QUERY_TIMEOUT_SECS").ok();
+    if wal.is_none() && flush.is_none() && flush_interval_off.is_none() && query_timeout.is_none() {
         return None;
     }
     let mut cfg = UniConfig::default();
@@ -48,6 +51,13 @@ fn apply_perf_knobs_from_env() -> Option<UniConfig> {
     if matches!(flush_interval_off.as_deref(), Some("1") | Some("true")) {
         cfg.auto_flush_interval = None;
         tracing::warn!("UNIKO_AUTOFLUSH_INTERVAL_OFF=1 — disabling time-based flush");
+    }
+    if let Some(s) = query_timeout
+        && let Ok(n) = s.parse::<u64>()
+        && n > 0
+    {
+        cfg.query_timeout = std::time::Duration::from_secs(n);
+        tracing::warn!(secs = n, "UNIKO_QUERY_TIMEOUT_SECS set");
     }
     Some(cfg)
 }
@@ -211,7 +221,7 @@ fn refuse_remote_in_memory(config: &UnikoConfig) -> Result<()> {
 /// - A local path alone is a local store.
 /// - A local path with `config.remote_storage` is a hybrid store: data in
 ///   the bucket, the write-ahead log and id allocator in the directory.
-/// - An `s3://` or `gs://` path is a remote-only store, kept wholly in the
+/// - An `s3://`, `gs://` or `az://` path is a remote-only store, kept wholly in the
 ///   bucket. `remote_storage`, when set, must name the same URL, and gives
 ///   its endpoint and credentials; unset, they come from the environment.
 pub(crate) fn uni_builder(
@@ -241,12 +251,15 @@ pub(crate) fn uni_builder(
     } else if at.contains("://") && file_url_path(&at).is_none() {
         return Err(UnikoError::Config(format!(
             "with remote_storage set, the store path ({at}) is a local directory (hybrid) or \
-             the store's s3:// or gs:// URL (remote-only)"
+             the store's s3://, gs:// or az:// URL (remote-only)"
         )));
     } else {
         builder.hybrid(&resolved.url)
     };
-    let mut builder = builder.cloud_storage(resolved.cloud);
+    let mut builder = match resolved.cloud {
+        Some(cloud) => builder.cloud_storage(cloud),
+        None => builder,
+    };
     if remote.set_aside_stale_wal {
         builder = builder.set_aside_stale_wal();
     }
@@ -876,19 +889,41 @@ impl KnowledgeBase {
 
     /// Graceful shutdown, flushing pending writes.
     ///
+    /// A store with [`remote_storage`](UnikoConfig::remote_storage) is
+    /// flushed first, and a failed flush is returned once the store has
+    /// shut down: a hybrid store's commits stay in this host's write-ahead
+    /// log until a flush writes them to the bucket, so another host would
+    /// not see them. (uni-db's shutdown flushes too, but only logs a
+    /// failure.) They are not lost: reopening the store from the same
+    /// local directory replays them.
+    ///
     /// # Errors
     ///
     /// Returns [`UnikoError::Internal`] if other `Arc` references still
-    /// exist, or [`UnikoError::Storage`] if shutdown fails.
+    /// exist, or [`UnikoError::Storage`] if the flush or shutdown fails.
     pub async fn shutdown(self) -> Result<()> {
         // Stop loading models nobody will use; a no-op once it finished.
         if let Some(task) = &self.prefetch_task {
             task.abort();
         }
+        let remote = self.config.remote_storage.as_ref().map(|r| r.url.clone());
         let db = Arc::try_unwrap(self.db).map_err(|_| {
             UnikoError::Internal("cannot shutdown: outstanding references exist".into())
         })?;
+        let flushed = match &remote {
+            Some(_) => db.flush().await,
+            None => Ok(()),
+        };
+        // Shut down either way: it releases the writer lease.
         db.shutdown().await?;
+        if let (Err(e), Some(url)) = (flushed, remote) {
+            return Err(UnikoError::Storage(format!(
+                "the store shut down, but its last commits did not reach {url}: {e}. They are \
+                 kept in this host's write-ahead log, and reopening the store from the same \
+                 local directory replays them. If flushes time out against a distant bucket, \
+                 raise UNI_FLUSH_STREAM_TIMEOUT (seconds, default 60)"
+            )));
+        }
         Ok(())
     }
 }
@@ -1482,7 +1517,7 @@ mod open_path_tests {
             .expect("in-memory refuses remote_storage");
         assert!(err.to_string().contains("in-memory"), "{err}");
         let err = with("https://bucket/kb").validate().unwrap_err();
-        assert!(err.to_string().contains("s3:// or gs://"), "{err}");
+        assert!(err.to_string().contains("s3://, gs:// or az://"), "{err}");
         drop(
             uni_builder(Path::new("s3://bucket/kb/"), &with("s3://bucket/kb"), false)
                 .expect("a remote-only store: the path is remote_storage's URL"),
@@ -1491,7 +1526,7 @@ mod open_path_tests {
             .err()
             .expect("a URI path naming another store");
         assert!(err.to_string().contains("different stores"), "{err}");
-        let err = uni_builder(Path::new("az://acct/kb"), &with("s3://bucket"), false)
+        let err = uni_builder(Path::new("https://acct/kb"), &with("s3://bucket"), false)
             .err()
             .expect("a URI that isn't an object store uniko supports");
         assert!(

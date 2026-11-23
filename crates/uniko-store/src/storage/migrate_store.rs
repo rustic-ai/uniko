@@ -78,7 +78,7 @@ impl KnowledgeBase {
     /// migrated in this process (inspect an open store through its handle's
     /// [`store_info`](Self::store_info) instead);
     /// [`UnikoError::Unsupported`] for a URI other than
-    /// `s3://` or `gs://`; or
+    /// `s3://`, `gs://` or `az://`; or
     /// [`UnikoError::Storage`] when the store can't be read.
     pub async fn inspect(
         path: impl AsRef<Path>,
@@ -267,13 +267,13 @@ pub(crate) async fn inspect_unclaimed(
 }
 
 /// Inspecting and migrating take a local store directory, or a
-/// remote-only store's `s3://` or `gs://` URL.
+/// remote-only store's `s3://`, `gs://` or `az://` URL.
 fn reject_remote(path: &Path) -> Result<()> {
     let at = path.to_string_lossy();
     if at.contains("://") && !super::remote::is_object_store_uri(&at) {
         return Err(UnikoError::Unsupported(format!(
             "inspecting or migrating a store at {at} isn't supported; use a local path or an \
-             s3:// or gs:// URL"
+             s3://, gs:// or az:// URL"
         )));
     }
     Ok(())
