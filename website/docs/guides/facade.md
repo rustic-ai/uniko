@@ -288,11 +288,14 @@ dl.resolve(&second, Some("source was corrupt")).await?;  // give up on another, 
 - The limit is fixed on each letter when it's stored, so changing the config later doesn't affect
   existing letters.
 - With a limit of 0, retriable failures are stored `exhausted`.
-- A retry that never ran to the end isn't counted: one that couldn't be queued because the ingest
-  queue was full, one cut short by shutdown, or one interrupted by a crash.
+- A retry that never ran isn't counted: one that couldn't be queued because the ingest queue was
+  full, or one cut short by shutdown.
+- A retry interrupted by a crash does count, because the payload may be what crashed the process.
+  Without that, a payload that kills the process would be retried on every restart, forever.
 
 **Restarts.** Letters persist. When a streaming instance starts, any letter left `retrying` by a
-process that stopped goes back to `pending`. A non-streaming instance can still resolve such a
+process that stopped goes back to `pending`, due at once, or to `exhausted` if the interrupted
+attempt was its last. A non-streaming instance can still resolve such a
 letter.
 
 **Resolving.**

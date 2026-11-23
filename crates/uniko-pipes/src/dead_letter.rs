@@ -621,6 +621,32 @@ impl DeadLetterQueue {
         self.kb.update_node(nid, &update).await
     }
 
+    /// Put a `retrying` letter whose claim another process left behind back
+    /// to `pending`, due now, keeping the attempt counted; or to
+    /// `exhausted` when that attempt used up its retries.
+    async fn count_interrupted(&self, nid: NodeId, letter: &DeadLetter) -> Result<(), UnikoError> {
+        if letter.status != DeadLetterStatus::Retrying {
+            return Ok(());
+        }
+        let now = Utc::now();
+        let mut update = HashMap::new();
+        if letter.retry_count < letter.max_retries {
+            update.insert(
+                "status".into(),
+                Value::String(DeadLetterStatus::Pending.as_str().into()),
+            );
+            update.insert("next_retry_at".into(), datetime_value(now));
+        } else {
+            update.insert(
+                "status".into(),
+                Value::String(DeadLetterStatus::Exhausted.as_str().into()),
+            );
+            update.insert("next_retry_at".into(), Value::Null);
+        }
+        update.insert("updated_at".into(), datetime_value(now));
+        self.kb.update_node(nid, &update).await
+    }
+
     /// Record that a claimed retry of `id` failed again with `error`.
     ///
     /// The letter goes back to `pending` with its next retry due after the
@@ -740,9 +766,14 @@ impl DeadLetterQueue {
     }
 
     /// Return letters left `retrying` by a process that stopped mid-retry
-    /// to `pending`, due now, without counting the attempt that never
-    /// finished. Retries claimed by this process are left alone. A pipeline
-    /// runs this when it starts. Returns how many were reset.
+    /// to `pending`, due now. Retries claimed by this process are left
+    /// alone. A pipeline runs this when it starts. Returns how many were
+    /// reset.
+    ///
+    /// The interrupted attempt stays counted: the payload may be what
+    /// stopped the process (a stack overflow, an OOM kill), and an uncounted
+    /// attempt would let it crash every restart forever. A letter whose
+    /// interrupted attempt was its last goes to `exhausted` instead.
     ///
     /// # Errors
     ///
@@ -760,7 +791,7 @@ impl DeadLetterQueue {
             let Some((nid, props)) = self.find(&letter.id).await? else {
                 continue;
             };
-            self.uncount_claim(nid, &decode(nid, &props)).await?;
+            self.count_interrupted(nid, &decode(nid, &props)).await?;
             reset += 1;
         }
         Ok(reset)

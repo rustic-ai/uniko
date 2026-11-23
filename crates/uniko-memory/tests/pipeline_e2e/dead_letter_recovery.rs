@@ -177,7 +177,8 @@ async fn queue_transitions() {
     );
 
     // A claim left by another process (here: another queue value) is stale:
-    // it can be resolved, and a reset puts it back uncounted.
+    // it can be resolved, and a reset puts it back pending, due now, with
+    // the attempt still counted, since the payload may be what stopped it.
     DeadLetterQueue::new(kb.clone())
         .begin_retry(&id, false)
         .await
@@ -186,10 +187,27 @@ async fn queue_transitions() {
     let letter = dlq.get(&id).await.unwrap().unwrap();
     assert_eq!(
         (letter.status, letter.retry_count),
-        (DeadLetterStatus::Pending, 0)
+        (DeadLetterStatus::Pending, 1)
     );
+    assert_eq!(
+        dlq.due(chrono::Utc::now(), 10).await.unwrap(),
+        vec![id.clone()]
+    );
+    // Interrupted again: that was its last retry, so it is exhausted rather
+    // than crashing every restart.
     DeadLetterQueue::new(kb.clone())
         .begin_retry(&id, false)
+        .await
+        .unwrap();
+    assert_eq!(dlq.reset_interrupted().await.unwrap(), 1);
+    let letter = dlq.get(&id).await.unwrap().unwrap();
+    assert_eq!(
+        (letter.status, letter.retry_count),
+        (DeadLetterStatus::Exhausted, 2)
+    );
+    assert!(dlq.due(chrono::Utc::now(), 10).await.unwrap().is_empty());
+    DeadLetterQueue::new(kb.clone())
+        .begin_retry(&id, true)
         .await
         .unwrap();
     assert!(dlq.resolve(&id, Some("stale")).await.unwrap());
