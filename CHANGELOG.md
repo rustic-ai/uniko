@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `access_key` and `sas_token` keys). Unset settings come from the `AZURE_*`
   environment. `Uniko.config()` redacts the key and token.
 
+### Fixed
+
+- **`shutdown` reports a flush that didn't reach the bucket.** uni-db's shutdown
+  only logs a failed flush, so a hybrid store whose flush timed out shut down
+  "successfully" with its last commits only in the local write-ahead log, and
+  another host opened it without them. A store with `remote_storage` is now
+  flushed first, and a failure is returned as a `Storage` error once the store
+  has closed. Reopening from the same directory still replays the commits.
+
 ### Changed
 
 - **`UNIKO_QUERY_TIMEOUT_SECS`** raises uni-db's 30-second query timeout, for a

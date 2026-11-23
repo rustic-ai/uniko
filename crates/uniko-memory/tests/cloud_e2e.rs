@@ -655,3 +655,120 @@ async fn two_prefixes(cloud: &Cloud) {
         .expect("inspect b");
     assert!(report.info.exists, "b is a store of its own: {report:?}");
 }
+
+/// A hybrid store's commits reach the bucket by the time it shuts down, so
+/// a host with an empty local directory sees all of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hybrid_store_is_in_the_bucket_after_shutdown() {
+    for cloud in Cloud::all() {
+        eprintln!("a_hybrid_store_is_in_the_bucket_after_shutdown: {cloud:?}");
+        hybrid_after_shutdown(&cloud).await;
+    }
+}
+
+async fn hybrid_after_shutdown(cloud: &Cloud) {
+    let root = cloud.root("hybrid-flush");
+    let cfg = root.config("kb");
+    let (host_a, host_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let memory = open(host_a.path(), &cfg).await.expect("open");
+    let agent = memory.agent("assistant");
+    agent
+        .session("chat")
+        .observe(Turn::new("alice", "I'm moving to Lisbon in March."))
+        .await
+        .expect("observe");
+    agent
+        .assert_fact(AssertFactParams {
+            subject: "alice".into(),
+            predicate: "moving_to".into(),
+            object: Some("Lisbon".into()),
+            ..AssertFactParams::default()
+        })
+        .await
+        .expect("assert fact");
+    agent
+        .goals()
+        .create(CreateGoalParams {
+            goal_id: Some("relocate".into()),
+            title: "Relocate to Lisbon".into(),
+            ..CreateGoalParams::default()
+        })
+        .await
+        .expect("create goal");
+    drop(agent);
+    memory.shutdown().await.expect("shutdown");
+
+    let memory = open(host_b.path(), &cfg)
+        .await
+        .expect("open on another host");
+    let counts = (
+        count(&memory, "MATCH (m:Message) RETURN count(m) AS c").await,
+        count(&memory, "MATCH (f:Fact) RETURN count(f) AS c").await,
+        count(&memory, "MATCH (g:Goal) RETURN count(g) AS c").await,
+    );
+    memory.shutdown().await.expect("shutdown");
+    assert_eq!(counts, (1, 1, 1), "messages, facts, goals on another host");
+}
+
+/// A flush that fails at shutdown is reported, not just logged: the commits
+/// are then only in this host's write-ahead log. Reopening from the same
+/// directory replays them, and a clean shutdown puts them in the bucket.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_flush_is_reported_at_shutdown() {
+    for cloud in Cloud::all() {
+        eprintln!("a_failed_flush_is_reported_at_shutdown: {cloud:?}");
+        failed_flush(&cloud).await;
+    }
+}
+
+async fn failed_flush(cloud: &Cloud) {
+    let root = cloud.root("failed-flush");
+    let cfg = root.config("kb");
+    let (host_a, host_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    // uni-db reads it when the store opens. nextest runs each test in a
+    // process of its own, so nothing else sees it.
+    let before = std::env::var("UNI_FLUSH_STREAM_TIMEOUT").ok();
+    // SAFETY: set before the store's threads start, and restored after.
+    unsafe { std::env::set_var("UNI_FLUSH_STREAM_TIMEOUT", "0") };
+    let memory = open(host_a.path(), &cfg).await.expect("open");
+    memory
+        .agent("assistant")
+        .session("chat")
+        .observe(Turn::new("alice", "I'm moving to Lisbon in March."))
+        .await
+        .expect("observe");
+    let err = memory
+        .shutdown()
+        .await
+        .expect_err("a flush that times out is reported");
+    // SAFETY: as above; the store is closed.
+    unsafe {
+        match &before {
+            Some(v) => std::env::set_var("UNI_FLUSH_STREAM_TIMEOUT", v),
+            None => std::env::remove_var("UNI_FLUSH_STREAM_TIMEOUT"),
+        }
+    };
+    assert!(
+        matches!(&err, UnikoError::Storage(m) if m.contains("did not reach")),
+        "{err}"
+    );
+
+    let memory = open(host_a.path(), &cfg)
+        .await
+        .expect("reopen on this host");
+    assert_eq!(
+        count(&memory, "MATCH (m:Message) RETURN count(m) AS c").await,
+        1,
+        "the write-ahead log replays the commit"
+    );
+    memory.shutdown().await.expect("a clean shutdown");
+    let memory = open(host_b.path(), &cfg)
+        .await
+        .expect("open on another host");
+    assert_eq!(
+        count(&memory, "MATCH (m:Message) RETURN count(m) AS c").await,
+        1,
+        "the clean shutdown put it in the bucket"
+    );
+    memory.shutdown().await.expect("shutdown");
+}
