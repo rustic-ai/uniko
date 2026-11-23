@@ -22,8 +22,10 @@ use crate::types::datetime_value;
 pub struct MigrationProgress {
     /// The migration running.
     pub migration: Migration,
-    /// `schema` (adding columns, rebuilding indexes), `backfill` (filling
-    /// the new columns for existing rows) or `done`.
+    /// `schema` (adding columns, rebuilding indexes), `rebuild` (rebuilding
+    /// the vector indexes of a run cut off in its schema step, one label at
+    /// a time), `backfill` (filling the new columns for existing rows) or
+    /// `done`.
     pub phase: String,
     /// The label being backfilled, during `backfill`.
     pub label: Option<String>,
@@ -363,6 +365,33 @@ async fn migrate_db(
         return Ok(Backfill::default());
     }
 
+    // Mark the run before the schema step, which saves the new index
+    // definitions before it builds them: cut off there, the stored schema
+    // already matches the config and only the marker says the indexes may
+    // be partly built. Every run marks, so no index build goes unmarked.
+    //
+    // Another migration's unfinished backfill (the only marker a run that
+    // doesn't cover it gets past the check with) is carried in this run's
+    // marker as `after` and put back once this run is done, so a cut-off
+    // run of either kind is still reported.
+    let after = if mine {
+        info.migration_after
+    } else {
+        info.migration_in_progress
+    }
+    .filter(|a| !migration.covers(*a));
+    // A store from before the marker column gets the column on its own
+    // first: adding one nullable property builds no index.
+    let has_marker_column = db
+        .schema()
+        .current()
+        .properties
+        .get(crate::schema::constants::labels::KNOWLEDGE_BASE_STATS)
+        .is_some_and(|p| p.contains_key("migration"));
+    if !has_marker_column {
+        crate::schema::add_migration_marker_column(db).await?;
+    }
+    set_marker(db, Some((migration, compatibility::MARKER_SCHEMA)), after).await?;
     progress(&MigrationProgress {
         migration,
         phase: "schema".into(),
@@ -370,20 +399,6 @@ async fn migrate_db(
         done: 0,
         total: 0,
     });
-    // Mark the run, unless another migration's unfinished run is marked:
-    // that marker stays until that migration completes. Mark before the
-    // schema step (the long index rebuild) when the store already has the
-    // marker column; a store from before it gets the column from that step.
-    let marks = info.migration_in_progress.is_none() || mine;
-    let has_marker_column = db
-        .schema()
-        .current()
-        .properties
-        .get(crate::schema::constants::labels::KNOWLEDGE_BASE_STATS)
-        .is_some_and(|p| p.contains_key("migration"));
-    if marks && has_marker_column {
-        set_marker(db, Some((migration, compatibility::MARKER_SCHEMA))).await?;
-    }
     // uni-db adds the new columns and indexes, and rebuilds every vector
     // index whose config changed, before `apply` returns.
     apply_schema_unchecked(db, config).await?;
@@ -392,9 +407,7 @@ async fn migrate_db(
     }
     // The schema step and its index builds are done: what's left, if
     // anything, is the backfill, which leaves the store correct if cut off.
-    if marks {
-        set_marker(db, Some((migration, compatibility::MARKER_BACKFILL))).await?;
-    }
+    set_marker(db, Some((migration, compatibility::MARKER_BACKFILL)), after).await?;
 
     let mut out = Backfill::default();
     if backfill {
@@ -413,11 +426,10 @@ async fn migrate_db(
             out.unfilled += b.unfilled;
         }
     }
-    // Record the new identity, then clear the marker: the migration is done.
+    // Record the new identity, then clear the marker, or put back the
+    // unfinished backfill this run displaced: the migration is done.
     set_identity(db, config).await?;
-    if marks {
-        set_marker(db, None).await?;
-    }
+    set_marker(db, after.map(|a| (a, compatibility::MARKER_BACKFILL)), None).await?;
     Ok(out)
 }
 
@@ -542,17 +554,28 @@ async fn count(db: &Uni, cypher: &str) -> Result<u64> {
         .map_or(0, |n| u64::try_from(n).unwrap_or(0)))
 }
 
-async fn set_marker(db: &Uni, migration: Option<(Migration, &str)>) -> Result<()> {
+/// Mark `migration` as running in `phase`, or clear the marker. `after` is
+/// another migration's unfinished backfill to put back once this one is
+/// done.
+async fn set_marker(
+    db: &Uni,
+    migration: Option<(Migration, &str)>,
+    after: Option<Migration>,
+) -> Result<()> {
     let value = match migration {
-        Some((m, phase)) => Value::Map(
-            [
+        Some((m, phase)) => {
+            let mut map: std::collections::HashMap<String, Value> = [
                 ("kind".to_string(), Value::String(m.as_str().to_string())),
                 ("phase".to_string(), Value::String(phase.to_string())),
                 ("started_at".to_string(), datetime_value(Utc::now())),
             ]
             .into_iter()
-            .collect(),
-        ),
+            .collect();
+            if let Some(a) = after {
+                map.insert("after".to_string(), Value::String(a.as_str().to_string()));
+            }
+            Value::Map(map)
+        }
         None => Value::Null,
     };
     let tx = db.session().tx().await?;

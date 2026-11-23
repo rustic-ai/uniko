@@ -134,10 +134,11 @@ A migration refuses to start unless it resolves every difference. `enable_hybrid
 any index change.
 
 A run marks the stats row until it finishes, and `store_info().migration_in_progress` reports
-the marker. The marker is set before the schema step when the store already has the stats row's
-`migration` column, and after it otherwise: an older store gets the column from that step. Only
-the migration kind that set a marker clears it. For example, a `rebuild_vector_indexes` run
-leaves an unfinished `enable_hybrid` marker in place. `MigrationReport.migration_in_progress`
+the marker. Every run sets the marker before its schema step. An older store without the stats
+row's `migration` column gets that column on its own first, which builds no index. Only the
+migration kind that set a marker clears it. A `rebuild_vector_indexes` run on a store with an
+unfinished `enable_hybrid` backfill marks itself while it runs, then puts the `enable_hybrid`
+marker back, so a cut-off run of either kind is still reported. `MigrationReport.migration_in_progress`
 names a migration still marked unfinished after the run, which is why `completed` can be false
 after a run that did its own part: rerun that migration to finish it.
 
@@ -188,7 +189,7 @@ On a network file system that doesn't support file locks, the cross-process chec
 `progress` is called after each phase and backfill batch. Each event carries:
 
 - `migration`;
-- `phase`: `"schema"`, `"backfill"` or `"done"`;
+- `phase`: `"schema"`, `"rebuild"` (only when rerunning a migration cut off in its schema step), `"backfill"` or `"done"`;
 - `label`: the label being backfilled, during `"backfill"`;
 - `done` and `total`: during `"backfill"`, the rows done so far in that label (filled plus
   unfilled) and the rows it had to do when its backfill started. The final `"done"` event has

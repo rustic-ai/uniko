@@ -186,6 +186,16 @@ pub(crate) fn auto_embed_multivector_index(
 ///
 /// Returns [`UnikoError::Schema`] if any registration step fails for a reason
 /// other than "already exists".
+/// Add the `KnowledgeBaseStats.migration` marker column alone, to a store
+/// from before it, so a migration can mark itself before its schema step.
+/// It is one nullable property: no index is built.
+pub(crate) async fn add_migration_marker_column(db: &Uni) -> crate::Result<()> {
+    kb_stats::register_labels(db.schema())
+        .apply()
+        .await
+        .map_err(|e| crate::UnikoError::Schema(e.to_string()))
+}
+
 pub async fn register_schema(db: &Uni, config: &UnikoConfig) -> crate::Result<()> {
     let builder = db.schema();
 
