@@ -254,8 +254,9 @@ impl Uniko {
     ///
     /// Reads the stored schema and model record only: it applies no schema,
     /// changes no index or data and loads no model, so it is safe to call
-    /// before deciding how to open a store (uni-db's own open and close may
-    /// still write bookkeeping files). Opening runs the same check and
+    /// before deciding how to open a store. The store is opened read-only,
+    /// so no writer lock or lease is taken and another process may have it
+    /// open. Opening runs the same check and
     /// refuses an incompatible config with [`UnikoError::IncompatibleStore`]
     /// before the store changes.
     ///
@@ -263,8 +264,7 @@ impl Uniko {
     ///
     /// Returns [`UnikoError::Config`] when the store is open, inspected or
     /// migrated in this process (use [`store_info`](Self::store_info) on an
-    /// open instance) or open for writing in another process,
-    /// [`UnikoError::Unsupported`] for a URI other than `s3://` or `gs://`, and
+    /// open instance), [`UnikoError::Unsupported`] for a URI other than `s3://` or `gs://`, and
     /// [`UnikoError`] when the store can't be read.
     pub async fn inspect_store(
         path: impl AsRef<Path>,

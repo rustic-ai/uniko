@@ -734,11 +734,16 @@ impl VectorMetricChoice {
 ///
 /// The URL's scheme picks the provider: `s3://bucket[/prefix]` for S3 and
 /// S3-compatible services (MinIO, LocalStack, R2), `gs://bucket[/prefix]`
-/// for Google Cloud Storage. A setting left `None` is read from the
-/// provider's usual environment variables when the store opens: for S3
-/// `AWS_REGION` (or `AWS_DEFAULT_REGION`), `AWS_ENDPOINT_URL`,
-/// `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`;
-/// for GCS `GOOGLE_APPLICATION_CREDENTIALS`. An `http://` endpoint is
+/// for Google Cloud Storage. A setting left `None` (or
+/// `virtual_hosted_style` left off) is filled by uni-db from the provider's
+/// usual environment variables when the store opens, in the order the
+/// provider's SDKs use: for S3 `AWS_REGION` (or `AWS_DEFAULT_REGION`),
+/// `AWS_ENDPOINT_URL_S3` before `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`,
+/// `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+/// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`, then a named `AWS_PROFILE`; for GCS
+/// `GOOGLE_SERVICE_ACCOUNT`, `GOOGLE_SERVICE_ACCOUNT_KEY` and
+/// application-default credentials (`GOOGLE_APPLICATION_CREDENTIALS`).
+/// A setting given here wins over all of them. An `http://` endpoint is
 /// allowed, for local services.
 ///
 /// `Debug` hides the secrets.

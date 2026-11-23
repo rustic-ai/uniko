@@ -7074,8 +7074,9 @@ mod dead_letters {
         let letter = dl.get(&id).await.unwrap().unwrap();
         assert_eq!(letter.status, DeadLetterStatus::Resolved);
         assert_eq!(
-            letter.retry_count, 1,
-            "the interrupted claim never finished, so only the real retry counts"
+            letter.retry_count, 2,
+            "the interrupted claim counts, so a payload that crashes the \
+             process can't retry forever"
         );
         drop(dl);
         memory.shutdown().await.expect("shutdown");

@@ -52,7 +52,7 @@ class MigrationProgressEvent(TypedDict):
     """What a ``Uniko.migrate_store`` ``progress`` callback is called with."""
 
     migration: MigrationName
-    phase: Literal["schema", "backfill", "done"]
+    phase: Literal["schema", "rebuild", "backfill", "done"]
     label: str | None
     done: int
     total: int

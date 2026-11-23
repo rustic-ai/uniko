@@ -249,6 +249,10 @@ pub struct StoreInfo {
     /// step: the index state is unknown.
     #[serde(skip)]
     pub(crate) migration_in_schema: bool,
+    /// Another migration's unfinished backfill that the marked run
+    /// displaced, to be put back when that run finishes.
+    #[serde(skip)]
+    pub(crate) migration_after: Option<Migration>,
 }
 
 /// Read what the store behind `db` was built with, without applying a
@@ -318,6 +322,9 @@ pub(crate) async fn inspect_db(db: &Uni, with_counts: bool) -> crate::Result<Sto
                 info.migration_in_progress = kind.parse().ok();
                 info.migration_in_schema = info.migration_in_progress.is_some()
                     && !matches!(m.get("phase"), Some(Value::String(p)) if p == MARKER_BACKFILL);
+                if let Some(Value::String(after)) = m.get("after") {
+                    info.migration_after = after.parse().ok();
+                }
             }
         }
     }

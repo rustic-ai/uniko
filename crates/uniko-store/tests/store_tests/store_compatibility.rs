@@ -530,6 +530,66 @@ async fn an_interrupted_migration_is_reported_and_resumed() {
     assert_eq!(info.migration_in_progress, None);
 }
 
+/// A rebuild over another migration's unfinished backfill still marks
+/// itself: cut off in its schema step, the next open is refused until it is
+/// rerun, and the rerun puts the backfill's marker back.
+#[tokio::test]
+async fn a_rebuild_over_an_unfinished_backfill_marks_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kb");
+    create(&path, bge_m3()).await;
+    set_marker(&path, &bge_m3(), "enable_hybrid", "backfill").await;
+    let mut dot = bge_m3();
+    dot.vector_metric = VectorMetricChoice::Dot;
+
+    // Cut the run off at the start of its schema step, after it marked
+    // itself: what a crash during the index build leaves.
+    let (p, c) = (path.clone(), dot.clone());
+    let crashed = tokio::spawn(async move {
+        KnowledgeBase::migrate(
+            &p,
+            c,
+            Migration::RebuildVectorIndexes,
+            &mut |e: &MigrationProgress| assert_ne!(e.phase, "schema", "crash"),
+        )
+        .await
+    })
+    .await;
+    assert!(crashed.is_err_and(|e| e.is_panic()));
+
+    let (info, verdict) = KnowledgeBase::inspect(&path, &dot).await.unwrap();
+    assert_eq!(
+        info.migration_in_progress,
+        Some(Migration::RebuildVectorIndexes)
+    );
+    assert!(!verdict.is_compatible());
+    let err = open(&path, dot.clone()).await.expect_err("refused");
+    assert!(matches!(err, UnikoError::IncompatibleStore(_)), "{err}");
+
+    let report = KnowledgeBase::migrate(
+        &path,
+        dot.clone(),
+        Migration::RebuildVectorIndexes,
+        &mut no_progress(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        report.migration_in_progress,
+        Some(Migration::EnableHybrid),
+        "{report:?}"
+    );
+    let (info, verdict) = KnowledgeBase::inspect(&path, &dot).await.unwrap();
+    assert_eq!(info.migration_in_progress, Some(Migration::EnableHybrid));
+    assert!(verdict.is_compatible(), "{verdict}");
+    open(&path, dot)
+        .await
+        .expect("a cut-off backfill opens")
+        .shutdown()
+        .await
+        .unwrap();
+}
+
 /// A cut-off index rebuild refuses the next open until it is rerun, since
 /// the index may be only partly built; a cut-off hybrid backfill opens.
 #[tokio::test]
@@ -707,6 +767,19 @@ async fn lock_child_opens_the_parents_store() {
         matches!(&err, UnikoError::Config(m) if m.contains("open for writing elsewhere")),
         "{err}"
     );
+    // Inspecting opens read-only, so the parent's writer lock doesn't
+    // stop it.
+    let started = std::time::Instant::now();
+    let (info, verdict) = KnowledgeBase::inspect(Path::new(&store), &UnikoConfig::default())
+        .await
+        .expect("inspecting a store open elsewhere");
+    assert!(info.exists);
+    assert!(verdict.is_compatible(), "{verdict}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "inspect waited for the writer: {:?}",
+        started.elapsed()
+    );
 }
 
 fn lock_child_test_name() -> String {
@@ -720,6 +793,7 @@ fn lock_child_test_name() -> String {
 
 /// A store open in one process can't be opened by another: uni-db's OS lock
 /// on its `writer.lock` refuses the second, and the first's close frees it.
+/// The other process can still inspect it.
 #[tokio::test]
 async fn a_second_process_cannot_open_an_open_store() {
     let dir = tempfile::tempdir().unwrap();
