@@ -111,7 +111,7 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 | `capabilities` | `capabilities() -> Awaitable[dict[str, Any]]` | `capabilities_sync` | Compiled features, extractors, each model's load state, the answer alias, OCR. Loads nothing. |
 | `check_readiness` | `check_readiness(requirements: list[Requirement], timeout: float \| None = None) -> Awaitable[list[dict[str, Any]]]` | `check_readiness_sync` | The unmet requirements, loading any required model not yet loaded (a failed one is retried each call). Never raises for an unmet one. |
 | `purge` | `purge() -> Awaitable[DeletionReport]` | `purge_sync` | Erase the whole graph (dev/test reset). |
-| `shutdown` | `shutdown() -> Awaitable[None]` | `shutdown_sync` | Drain workers and close. **Consumes the handle.** |
+| `shutdown` | `shutdown() -> Awaitable[None]` | `shutdown_sync` | Drain workers and close. **Consumes the handle.** Raises `UnikoError` (kind `"storage"`) when the final flush fails, after still closing the store: the commits are in the write-ahead log, and the next open from the same directory replays them. |
 
 `config()` returns every configuration field, nested the way the engine holds them
 (`embedding`, `reranker`, `nlp` and `ocr` are sub-dicts), in the same shape

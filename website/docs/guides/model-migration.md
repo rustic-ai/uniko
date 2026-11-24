@@ -204,6 +204,18 @@ and the argument order is `migrate_store(path, migration, config=None, ...)`, wh
 - an `async def` callback isn't awaited, so its body doesn't run;
 - it must not call other `_sync` uniko methods.
 
+## Upgrading uni-db: DATETIME index keys
+
+uni-db 6.0 builds the scalar indexes on uniko's DATETIME properties
+(`Message.timestamp`, `Session.started_at` and six others) through a hidden derived key column.
+They never existed before: uni-db stores DATETIME as a struct column, which Lance's BTree refuses.
+The first writable open of an existing store upgrades each one in place: it backfills the key
+column over the label's table, builds the index, and rebuilds the label's other indexes, which the
+rewrite drops. These include the vector and full-text indexes on Message and Observation, so on a
+large store that first open takes as long as rebuilding them. It runs before the store serves, and
+reports no progress. A failed upgrade is logged, the index stays as it was, and the store still
+opens. `inspect_store` opens read-only and doesn't trigger it.
+
 ## Changing the model or dimensions
 
 A different model, or the same model at another dimension size, can't be migrated in place.
