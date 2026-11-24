@@ -18,12 +18,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`shutdown` reports a flush that didn't reach the bucket.** uni-db's shutdown
-  only logs a failed flush, so a hybrid store whose flush timed out shut down
-  "successfully" with its last commits only in the local write-ahead log, and
-  another host opened it without them. A store with `remote_storage` is now
-  flushed first, and a failure is returned as a `Storage` error once the store
-  has closed. Reopening from the same directory still replays the commits.
+- **`shutdown` returns a failed final flush.** uni-db's shutdown used to log a
+  failed final flush and return Ok, so a hybrid store whose flush timed out shut
+  down "successfully" with its last commits only in the local write-ahead log,
+  and another host opened it without them. uni-db 6.0 returns the failure
+  (rustic-ai/uni-db#354), after still releasing the writer lease, and uniko's
+  `shutdown` passes it on as a `Storage` error, for every store. Reopening from
+  the same local directory replays the commits.
+- **A flush to a slow bucket runs to the end.** uni-db abandoned a flush after
+  60 s in all; it now gives up after 60 s without a table commit, or 15 times
+  that in all (rustic-ai/uni-db#355). It also checks one table's existence
+  instead of listing every table, a round trip each on an object store.
+- **DATETIME indexes are built.** The BTree indexes on `Message.timestamp`,
+  `Session.started_at`, `Episode.timestamp`, `Action.started_at`,
+  `ConsolidationCycle.started_at`, `Observation.temporal_anchor`,
+  `Source.first_seen` and `Source.retired_at` never existed: uni-db stores
+  DATETIME as a struct column, which Lance's BTree refuses, and only logged it.
+  uni-db 6.0 indexes DATETIME through a hidden derived key column
+  (rustic-ai/uni-db#356), and range and equality filters on those properties
+  use it.
+
+### Upgrading
+
+- **The first writable open of an existing store rewrites its DATETIME-indexed
+  tables.** uni-db upgrades each of the indexes above in place: it backfills the
+  key column over the label's table, builds the index, and rebuilds the label's
+  other indexes, which the rewrite drops, including the vector and full-text
+  indexes on Message and Observation. On a large store the open takes as long as
+  those rebuilds. A failed upgrade is logged and leaves the index as it was; the
+  store still opens. `inspect_store` opens read-only and doesn't trigger it.
 
 ### Changed
 

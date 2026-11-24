@@ -501,15 +501,16 @@ An unknown key is refused, and so is a setting for another provider than the URL
   `set_aside_stale_wal` to move that log to `wal_set_aside/` in the directory and open the store
   as the bucket has it; nothing is deleted.
 - **Shutting down reports a failed flush.** A hybrid store's last commits stay in the local
-  write-ahead log until a flush writes them to the bucket. If that flush fails, `shutdown` still
-  closes the store and releases its lease, then returns a `Storage` error saying the commits did
-  not reach the bucket. They aren't lost: reopening from the same directory replays them, and the
-  next clean shutdown writes them out.
-- **A distant bucket can need longer timeouts.** A flush writes every table that changed, each in
-  several round trips, and uni-db abandons one after 60 seconds. A store far from its bucket can
-  run past that (measured: uniko's full schema to Azure Blob Storage at about 85 ms round trip).
-  Raise it with `UNI_FLUSH_STREAM_TIMEOUT` (seconds), and the 30-second query timeout with
-  `UNIKO_QUERY_TIMEOUT_SECS`. Both are read when the store opens.
+  write-ahead log until a flush writes them to the bucket. If the final flush fails, `shutdown`
+  still stops the store and releases its lease, then returns a `Storage` error ("the final flush
+  at shutdown failed …"). The commits aren't lost: reopening from the same local directory replays
+  them, and the next clean shutdown writes them out. Reopen there before opening the store from
+  another host, which wouldn't see them.
+- **A slow bucket.** uni-db gives up on a flush only after 60 seconds with no table committed, or
+  after 15 times that in all, so a flush that keeps making progress against a distant bucket runs
+  to the end. `UNI_FLUSH_STREAM_TIMEOUT` (seconds) changes both limits. Whole-store queries can
+  still pass uni-db's 30-second query timeout against a distant bucket;
+  `UNIKO_QUERY_TIMEOUT_SECS` raises it. Both are read when the store opens.
 - An in-memory store refuses `remote_storage`.
 
 Tested end to end against LocalStack and the AWS Emulator; not yet against AWS S3 or GCS

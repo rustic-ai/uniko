@@ -76,6 +76,12 @@ test keeps its stores under a fresh prefix in the container. Against a
 distant region a whole-store operation can exceed uni-db's 30 s query
 timeout; `UNIKO_QUERY_TIMEOUT_SECS` raises it.
 
+A final flush that fails at shutdown is returned by uni-db's `shutdown`
+(uniko passes it on as `Storage`). `store_tests::shutdown_tests` forces one
+by making a local store's `storage/` directory read-only. Setting
+`UNI_FLUSH_STREAM_TIMEOUT=0` no longer does: the timeout now bounds time
+without a table commit, checked every 10 ms, and a small flush finishes first.
+
 ### One integration-test binary per crate
 
 Every test binary links the whole stack (uni-db, Lance, DataFusion, ONNX
