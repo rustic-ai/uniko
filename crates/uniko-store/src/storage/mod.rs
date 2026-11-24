@@ -889,41 +889,27 @@ impl KnowledgeBase {
 
     /// Graceful shutdown, flushing pending writes.
     ///
-    /// A store with [`remote_storage`](UnikoConfig::remote_storage) is
-    /// flushed first, and a failed flush is returned once the store has
-    /// shut down: a hybrid store's commits stay in this host's write-ahead
-    /// log until a flush writes them to the bucket, so another host would
-    /// not see them. (uni-db's shutdown flushes too, but only logs a
-    /// failure.) They are not lost: reopening the store from the same
-    /// local directory replays them.
+    /// uni-db's shutdown stops the store's background tasks and releases
+    /// its writer lease whether or not its final flush succeeds, then
+    /// returns the failure. A failed flush leaves the last commits only in
+    /// the write-ahead log. They are not lost: the next open replays them.
+    /// On a hybrid store that log is on this host, so another host opening
+    /// the store doesn't see them until it is reopened here first.
     ///
     /// # Errors
     ///
     /// Returns [`UnikoError::Internal`] if other `Arc` references still
-    /// exist, or [`UnikoError::Storage`] if the flush or shutdown fails.
+    /// exist, or [`UnikoError::Storage`] if the final flush or the shutdown
+    /// fails.
     pub async fn shutdown(self) -> Result<()> {
         // Stop loading models nobody will use; a no-op once it finished.
         if let Some(task) = &self.prefetch_task {
             task.abort();
         }
-        let remote = self.config.remote_storage.as_ref().map(|r| r.url.clone());
         let db = Arc::try_unwrap(self.db).map_err(|_| {
             UnikoError::Internal("cannot shutdown: outstanding references exist".into())
         })?;
-        let flushed = match &remote {
-            Some(_) => db.flush().await,
-            None => Ok(()),
-        };
-        // Shut down either way: it releases the writer lease.
         db.shutdown().await?;
-        if let (Err(e), Some(url)) = (flushed, remote) {
-            return Err(UnikoError::Storage(format!(
-                "the store shut down, but its last commits did not reach {url}: {e}. They are \
-                 kept in this host's write-ahead log, and reopening the store from the same \
-                 local directory replays them. If flushes time out against a distant bucket, \
-                 raise UNI_FLUSH_STREAM_TIMEOUT (seconds, default 60)"
-            )));
-        }
         Ok(())
     }
 }
