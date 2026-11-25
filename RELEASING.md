@@ -140,6 +140,18 @@ For **each** of the 6 publishable crates, on crates.io:
 - Workflow filename: `release.yml`
 - Environment: `release`
 
+The workflow sends an identifying User-Agent when exchanging and revoking
+tokens; crates.io can reject curl's default User-Agent with HTTP 403. It logs
+the server's error response and stops on a failed token exchange, so a publisher
+configuration mismatch is visible instead of being retried as a publish error.
+Transient token request failures are retried by curl up to three times.
+
+For each crate, `cargo publish --dry-run --locked` packages and verifies the
+build before the workflow requests a short-lived token. The subsequent
+`cargo publish --no-verify --locked` uploads the verified package without another
+verification build, and the token is revoked after the attempt. This keeps long
+builds outside the token's 30-minute lifetime.
+
 > **First publish of a brand-new crate name:** crates.io trusted publishing can
 > only be configured on a crate that already exists. If a name has never been
 > published, do a **one-time manual bootstrap** of that version from a maintainer

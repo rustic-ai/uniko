@@ -605,9 +605,9 @@ jobs:
         # the first failure, before the output is printed or any of the above
         # handling runs.
         #
-        # Each attempt mints its own crates.io token through Trusted Publishing,
-        # the exchange rust-lang/crates-io-auth-action performs, and revokes it
-        # afterwards. Those tokens expire 30 minutes after they are issued, and
+        # Each attempt verifies the package before minting its crates.io token
+        # through Trusted Publishing, then uploads with --no-verify and revokes
+        # the token afterwards. Tokens expire 30 minutes after issuance, and
         # the verification builds alone take longer than that: 0.5.1 got one
         # token up front, published four crates, and every upload after minute
         # 30 failed with 403 "Invalid authentication token".
@@ -619,20 +619,37 @@ jobs:
         run: |
           set -uo pipefail
           tokens_url=https://crates.io/api/v1/trusted_publishing/tokens
+          user_agent='uniko-release (https://github.com/rustic-ai/uniko)'
           mint_token() {
-            local jwt
-            jwt="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=crates.io" | jq -r .value)" || return 1
-            CARGO_REGISTRY_TOKEN="$(jq -n --arg jwt "$jwt" '{jwt: $jwt}' \
-              | curl -sSf -X POST -H 'Content-Type: application/json' --data @- "$tokens_url" \
-              | jq -r .token)" || return 1
-            [ -n "$CARGO_REGISTRY_TOKEN" ] && [ "$CARGO_REGISTRY_TOKEN" != null ] || return 1
+            local jwt response
+            if response="$(curl -sS --fail-with-body --retry 3 --max-time 60 \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=crates.io")"; then
+              jwt="$(echo "$response" | jq -er '.value | strings | select(length > 0)')" || {
+                echo "::error::GitHub OIDC response did not contain a JWT"; return 1;
+              }
+            else
+              echo "::error::GitHub OIDC request failed: $response"; return 1
+            fi
+            echo "::add-mask::$jwt"
+            if response="$(jq -n --arg jwt "$jwt" '{jwt: $jwt}' \
+              | curl -sS --fail-with-body --retry 3 --max-time 60 -A "$user_agent" \
+                -X POST -H 'Content-Type: application/json' --data @- "$tokens_url")"; then
+              CARGO_REGISTRY_TOKEN="$(echo "$response" | jq -er '.token | strings | select(length > 0)')" || {
+                echo "::error::crates.io response did not contain a publishing token"; return 1;
+              }
+            else
+              echo "::error::crates.io token exchange failed: $response"
+              echo "Check Trusted Publishing: rustic-ai/uniko, release.yml, environment release."
+              return 1
+            fi
             echo "::add-mask::$CARGO_REGISTRY_TOKEN"
             export CARGO_REGISTRY_TOKEN
           }
           revoke_token() {
             [ -n "${CARGO_REGISTRY_TOKEN:-}" ] || return 0
-            curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer $CARGO_REGISTRY_TOKEN" \
+            curl -sS --fail --max-time 60 -A "$user_agent" -o /dev/null \
+              -X DELETE -H "Authorization: Bearer $CARGO_REGISTRY_TOKEN" \
               "$tokens_url" || echo "  -> could not revoke the crates.io token"
             unset CARGO_REGISTRY_TOKEN
           }
@@ -642,10 +659,15 @@ jobs:
             while :; do
               attempt=$((attempt + 1))
               echo "::group::cargo publish -p $crate (attempt $attempt/$max)"
-              if mint_token; then
-                if out="$(cargo publish -p "$crate" --locked 2>&1)"; then rc=0; else rc=$?; fi
+              if out="$(cargo publish -p "$crate" --dry-run --locked 2>&1)"; then
+                echo "$out"
+                # No token is held during the potentially hours-long build.
+                if ! mint_token; then
+                  echo "::endgroup::"; return 1
+                fi
+                if out="$(cargo publish -p "$crate" --no-verify --locked 2>&1)"; then rc=0; else rc=$?; fi
               else
-                out="could not mint a crates.io token"; rc=1
+                rc=$?
               fi
               revoke_token
               echo "$out"; echo "::endgroup::"
@@ -653,6 +675,12 @@ jobs:
               [ "$rc" -eq 0 ] && return 0
               if echo "$out" | grep -qiE 'already (exists|uploaded)'; then
                 echo "  -> $crate already on crates.io; skipping."; return 0
+              fi
+              if echo "$out" | grep -qiE '(^|[^0-9])(401|403)([^0-9]|$)|invalid authentication token'; then
+                echo "::error::publishing authorization failed for $crate"; return 1
+              fi
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::failed to publish $crate after $attempt attempts"; return 1
               fi
               if echo "$out" | grep -qiE '429|too many requests|rate limit'; then
                 local when target now wait
@@ -666,9 +694,6 @@ jobs:
                 fi
                 echo "  -> rate limited; sleeping ${wait}s then retrying $crate"
                 sleep "$wait"; continue
-              fi
-              if [ "$attempt" -ge "$max" ]; then
-                echo "::error::failed to publish $crate after $attempt attempts"; return 1
               fi
               echo "  -> transient error; retrying in 30s"; sleep 30
             done

@@ -36,7 +36,7 @@ jobs:
           # ripgrep: the uni-db seal below greps with `rg`, which the
           # GitHub-hosted Ubuntu image does NOT ship. Without it the seal
           # silently passed on every run from 2026-06-14 to 2026-08-02.
-          sudo apt-get install -y protobuf-compiler mold ripgrep
+          sudo apt-get install -y protobuf-compiler mold ripgrep jq
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
@@ -98,6 +98,9 @@ jobs:
       # publish can't be undone. Fast (cargo metadata, no compile).
       - name: Check crates.io publish order
         run: python3 scripts/ci/check_publish_list.py
+
+      - name: Test crates.io publishing workflow
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
 
       # Assert every version derives from [workspace.package].version: the
       # internal [workspace.dependencies] pins match it, and wheel pyprojects
