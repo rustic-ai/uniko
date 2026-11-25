@@ -8,7 +8,7 @@
 //!
 //! Run:
 //!   cargo nextest run -p uniko-extract --features onnx \
-//!     --test nlp_v7_integration_test --run-ignored all --no-capture
+//!     --test integration nlp_v7_integration_test:: --run-ignored all --no-capture
 
 #[cfg(feature = "onnx")]
 mod onnx_tests {

@@ -67,6 +67,12 @@ create_exception!(
 );
 create_exception!(
     _uniko,
+    IncompatibleStoreError,
+    ConfigError,
+    "The store can't be opened with this config as is. `.differences` lists each one as a dict (`field`, `stored`, `requested`, `verdict`, `migration`); `.compatible` and `.migrations` are as on `StoreReport`."
+);
+create_exception!(
+    _uniko,
     UnsupportedError,
     UnikoError,
     "The content modality has no registered extractor."
@@ -95,6 +101,11 @@ pub fn to_pyerr(err: CoreError) -> PyErr {
             attach_json(&err, "diagnostics", &diagnostics);
             (err, "degraded")
         }
+        CoreError::IncompatibleStore(compatibility) => {
+            let err = IncompatibleStoreError::new_err(msg);
+            attach_compatibility(&err, &compatibility);
+            (err, "incompatible_store")
+        }
         CoreError::Config(_) => (ConfigError::new_err(msg), "config"),
         CoreError::Llm(_) => (LlmError::new_err(msg), "llm"),
         CoreError::Timeout(_) => (UnikoTimeoutError::new_err(msg), "timeout"),
@@ -122,6 +133,20 @@ fn attach_json(err: &PyErr, name: &str, value: &impl serde::Serialize) {
         if let Ok(obj) = crate::convert::json_to_py(py, &json) {
             let _ = err.value(py).setattr(name, obj);
         }
+    });
+}
+
+/// Attach `.differences` (flat dicts, the same shape as `StoreDifference`),
+/// `.compatible` and `.migrations` to an `IncompatibleStoreError`. A
+/// failure is suppressed, as in [`attach_kind`].
+fn attach_compatibility(err: &PyErr, compatibility: &uniko_api::tools::Compatibility) {
+    Python::attach(|py| {
+        let value = err.value(py);
+        if let Ok(list) = crate::store::difference_dicts(py, compatibility) {
+            let _ = value.setattr("differences", list);
+        }
+        let _ = value.setattr("compatible", compatibility.is_compatible());
+        let _ = value.setattr("migrations", crate::store::migration_names(compatibility));
     });
 }
 
@@ -154,5 +179,9 @@ pub fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add("UnsupportedError", py.get_type::<UnsupportedError>())?;
     m.add("ReadinessError", py.get_type::<ReadinessError>())?;
     m.add("DegradedError", py.get_type::<DegradedError>())?;
+    m.add(
+        "IncompatibleStoreError",
+        py.get_type::<IncompatibleStoreError>(),
+    )?;
     Ok(())
 }

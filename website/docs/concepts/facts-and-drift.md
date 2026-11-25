@@ -43,8 +43,9 @@ A consolidation cycle (`run_cycle` / `run_cycle_with`) does five things:
 
 1. **Query** unprocessed Observations that carry a structured triple
    (`subject` and `predicate` both non-null).
-2. **Group** them by `(subject, predicate)` and pick a canonical `object` per
-   group.
+2. **Group** them by `(subject, predicate)` — and by visibility scope, so a
+   scoped Observation never merges with or contradicts a Fact in another scope —
+   and pick a canonical `object` per group.
 3. **Upsert** one Fact per group, reusing the first contributing Observation's
    embedding as the Fact's embedding source.
 4. **Wire** a `SUPPORTED_BY` edge from each Fact to every contributing
@@ -301,8 +302,8 @@ expansion, so it doesn't answer from a belief that's actively churning.
 
 Drift handles knowledge that *changed*. Decay handles knowledge that *stopped earning its
 keep*. The formal **Rules** that drive reasoning carry a `confidence` score that decays
-exponentially each consolidation cycle a Rule doesn't match, so rules your agent never uses
-fade out on their own:
+exponentially on each rule-decay pass (`apply_decay_cycle`, run from the cortex sweep) in
+which a Rule doesn't match, so rules your agent never uses fade out on their own:
 
 ```text
 confidence' = confidence * 0.95^missed_cycles

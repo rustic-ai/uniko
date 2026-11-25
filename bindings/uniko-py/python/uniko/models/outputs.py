@@ -21,15 +21,19 @@ from __future__ import annotations
 import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from ..types import (
     CircuitState,
+    DeadLetterStatus,
     GoalPhase,
+    MigrationName,
     IngestKind,
     RecallKind,
     RecallSourceKind,
+    RegistrationOutcome,
     TaskPhase,
+    VerdictName,
     WorkerStatus,
 )
 
@@ -56,6 +60,39 @@ class RecallSource(BaseModel):
         return cls.model_validate(native)
 
 
+class SegmentPosition(BaseModel):
+    """One segment of a chunk derived from media (native ``SegmentPosition``):
+    its byte range in the chunk text and its own position."""
+
+    model_config = _OUT
+
+    start: int
+    end: int
+    page: Optional[int] = None
+    time_start_ms: Optional[int] = None
+    time_end_ms: Optional[int] = None
+    bbox: Optional[tuple[float, float, float, float]] = None
+    confidence: Optional[float] = None
+    speaker: Optional[str] = None
+
+
+class MediaPosition(BaseModel):
+    """Where in an image, recording or video a chunk came from (native
+    ``MediaPosition``)."""
+
+    model_config = _OUT
+
+    modality: str
+    source_model_version: Optional[str] = None
+    page: Optional[int] = None
+    time_start_ms: Optional[int] = None
+    time_end_ms: Optional[int] = None
+    bbox: Optional[tuple[float, float, float, float]] = None
+    confidence: Optional[float] = None
+    speaker: Optional[str] = None
+    segments: list[SegmentPosition] = Field(default_factory=list)
+
+
 class RecallItem(BaseModel):
     """A recalled node with score and lineage (native ``RecallItem``)."""
 
@@ -72,6 +109,7 @@ class RecallItem(BaseModel):
     token_count: int = 0
     context: Optional[str] = None
     address: Optional[str] = None
+    position: Optional[MediaPosition] = None
 
     @classmethod
     def from_native(cls, native: Any) -> "RecallItem":
@@ -183,6 +221,7 @@ class SearchHit(BaseModel):
     chunk_id: str
     chunk_index: int
     address: Optional[str] = None
+    position: Optional[MediaPosition] = None
     start: int
     end: int
     text: str
@@ -318,7 +357,7 @@ class ModelStatus(BaseModel):
     provider_id: str
     model_id: str
     revision: Optional[str] = None
-    state: str = Field(description="'not_loaded', 'loaded' or 'failed'.")
+    state: str = Field(description="'not_loaded', 'loading', 'loaded' or 'failed'.")
     error: Optional[str] = Field(
         default=None, description="Set when state is 'failed'."
     )
@@ -359,12 +398,14 @@ class ReadinessFailure(BaseModel):
     )
     code: str = Field(
         description="'not_in_catalog', 'not_configured', 'not_compiled', "
-        "'no_extractor', 'load_failed', 'timed_out', 'nlp_unavailable' "
-        "or 'not_accelerated'."
+        "'no_extractor', 'load_failed', 'timed_out', 'nlp_unavailable', "
+        "'not_accelerated', 'verification_failed' or 'not_supported'."
     )
     alias: Optional[str] = None
     error: Optional[str] = Field(
-        default=None, description="The redacted load error, for 'load_failed'."
+        default=None,
+        description="The redacted load error for 'load_failed', or the reason "
+        "for 'verification_failed'.",
     )
 
     @classmethod
@@ -445,6 +486,30 @@ class ArtifactView(BaseModel):
 
     @classmethod
     def from_native(cls, native: Any) -> "ArtifactView":
+        return cls.model_validate(native)
+
+
+class MediaSourceView(BaseModel):
+    """The original media a text artifact was derived from (native
+    ``MediaSourceView``). With ``bytes_retained``, ``Data.artifact_bytes`` on
+    ``artifact_id`` returns the original bytes."""
+
+    model_config = _OUT
+
+    artifact_id: str
+    modality: Optional[str] = None
+    mime: Optional[str] = None
+    hash: str
+    size: Optional[int] = None
+    path: Optional[str] = None
+    duration_ms: Optional[int] = None
+    sample_rate: Optional[int] = None
+    channels: Optional[int] = None
+    derivation_kind: Optional[str] = None
+    bytes_retained: bool
+
+    @classmethod
+    def from_native(cls, native: Any) -> "MediaSourceView":
         return cls.model_validate(native)
 
 
@@ -576,9 +641,175 @@ class WorkerHealth(BaseModel):
     items_failed: int
     avg_latency_ms: float
     degradations: dict[str, int] = Field(default_factory=dict)
+    dead_lettered: int = 0
+    retries: int = 0
+    retries_succeeded: int = 0
 
     @classmethod
     def from_native(cls, native: Any) -> "WorkerHealth":
+        return cls.model_validate(native)
+
+
+class DeadLetterCounts(BaseModel):
+    """Dead letters per status (native ``DeadLetterCounts``)."""
+
+    model_config = _OUT
+
+    pending: int
+    retrying: int
+    exhausted: int
+    resolved: int
+    legacy: int
+
+    @classmethod
+    def from_native(cls, native: Any) -> "DeadLetterCounts":
+        return cls.model_validate(native)
+
+
+class RetryRefusal(BaseModel):
+    """A dead letter ``retry_pending`` could not resubmit."""
+
+    model_config = _OUT
+
+    id: str
+    reason: str
+
+
+class RetryReport(BaseModel):
+    """What ``DeadLetters.retry_pending`` did (native ``RetryReport``)."""
+
+    model_config = _OUT
+
+    retried: list[str] = Field(default_factory=list)
+    refused: list[RetryRefusal] = Field(default_factory=list)
+
+    @classmethod
+    def from_native(cls, native: Any) -> "RetryReport":
+        return cls.model_validate(native)
+
+
+class StoredEmbedding(BaseModel):
+    """The embedding setup a store was built with (native ``StoredEmbedding``)."""
+
+    model_config = _OUT
+
+    model_id: Optional[str] = None
+    dimensions: Optional[int] = None
+    sparse_dimensions: Optional[int] = None
+    multivector_dimensions: Optional[int] = None
+    algorithm: Optional[str] = None
+    metric: Optional[str] = None
+    embed_alias: Optional[str] = None
+    document_prefix: Optional[str] = None
+    query_prefix: Optional[str] = None
+    batch_size: Optional[int] = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_hybrid(self) -> bool:
+        """The store has the sparse or ColBERT column."""
+        return (
+            self.sparse_dimensions is not None
+            or self.multivector_dimensions is not None
+        )
+
+
+class StoreInfo(BaseModel):
+    """What a store was built with (native ``StoreInfo``)."""
+
+    model_config = _OUT
+
+    exists: bool
+    embedding: StoredEmbedding
+    hybrid_backfill_pending: Optional[int] = None
+    migration_in_progress: Optional[MigrationName] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "StoreInfo":
+        return cls.model_validate(native)
+
+
+class StoreDifference(BaseModel):
+    """One way a store differs from a config (native ``StoreDifference``)."""
+
+    model_config = _OUT
+
+    field: str
+    stored: str
+    requested: str
+    verdict: VerdictName
+    migration: Optional[MigrationName] = None
+
+
+class StoreReport(BaseModel):
+    """What ``Uniko.inspect_store`` found (native ``StoreReport``)."""
+
+    model_config = _OUT
+
+    info: StoreInfo
+    differences: list[StoreDifference] = Field(default_factory=list)
+    compatible: bool
+    migrations: list[MigrationName] = Field(default_factory=list)
+
+    @classmethod
+    def from_native(cls, native: Any) -> "StoreReport":
+        return cls.model_validate(native)
+
+
+class MigrationReport(BaseModel):
+    """What ``Uniko.migrate_store`` did (native ``MigrationReport``)."""
+
+    model_config = _OUT
+
+    migration: MigrationName
+    rows_backfilled: int
+    rows_unfilled: int
+    completed: bool
+    elapsed_secs: float
+    migration_in_progress: Optional[MigrationName] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "MigrationReport":
+        return cls.model_validate(native)
+
+
+class Registration(BaseModel):
+    """What ``Agent.register`` did (native ``Registration``)."""
+
+    model_config = _OUT
+
+    participant_id: str
+    outcome: RegistrationOutcome
+
+    @classmethod
+    def from_native(cls, native: Any) -> "Registration":
+        return cls.model_validate(native)
+
+
+class DeadLetter(BaseModel):
+    """One dead-lettered streaming item (native ``DeadLetter``)."""
+
+    model_config = _OUT
+
+    id: str
+    step: str
+    error: str
+    error_kind: Optional[str] = None
+    retriable: bool
+    status: DeadLetterStatus
+    retry_count: int
+    max_retries: int
+    ingest_type: Optional[str] = None
+    agent_id: Optional[str] = None
+    replayable: bool
+    created_at: Optional[datetime.datetime] = None
+    updated_at: Optional[datetime.datetime] = None
+    next_retry_at: Optional[datetime.datetime] = None
+    resolved_at: Optional[datetime.datetime] = None
+    resolution: Optional[str] = None
+
+    @classmethod
+    def from_native(cls, native: Any) -> "DeadLetter":
         return cls.model_validate(native)
 
 
@@ -753,6 +984,16 @@ __all__ = [
     "SummarizeReport",
     "WorkerHealth",
     "PipelineHealth",
+    "DeadLetter",
+    "Registration",
+    "StoredEmbedding",
+    "StoreInfo",
+    "StoreDifference",
+    "StoreReport",
+    "MigrationReport",
+    "DeadLetterCounts",
+    "RetryReport",
+    "RetryRefusal",
     "PromotionReport",
     "TopicReport",
     "ConsolidationReport",
@@ -762,6 +1003,9 @@ __all__ = [
     "MatchedProcedure",
     "MessageView",
     "ArtifactView",
+    "MediaSourceView",
+    "MediaPosition",
+    "SegmentPosition",
     "GoalView",
     "TaskView",
     "GoalContext",

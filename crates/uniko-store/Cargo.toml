@@ -11,6 +11,8 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Integration tests are modules of one binary (tests/integration.rs).
+autotests = false
 
 [features]
 default = []
@@ -35,6 +37,8 @@ async-trait = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 object_store = { workspace = true }
+# Parses an object-store URI for the store lease, as uni-db does.
+url = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -44,5 +48,10 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+futures = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

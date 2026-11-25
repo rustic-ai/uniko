@@ -19,12 +19,13 @@ The repo has three buildable surfaces:
 
 Install once, for any surface that touches the native stack:
 
-- **Rust ≥ 1.91** (edition 2024) — `rustup toolchain install stable`. The MSRV is
-  pinned by `rust-version = "1.91"` in the root `Cargo.toml`.
+- **Rust ≥ 1.95** (edition 2024) — `rustup toolchain install stable`. The MSRV is
+  pinned by `rust-version = "1.95"` in the root `Cargo.toml`.
 - **A C/C++ toolchain** — required by native ML dependencies (`ort` / ONNX
   Runtime, `tokenizers`).
-- **`protobuf-compiler` (`protoc`)** — must be on `PATH`. The stack statically
-  links ONNX Runtime; the build shells out to `protoc`.
+- **`protobuf-compiler` (`protoc`)** — must be on `PATH`. Lance (uni-db's
+  storage layer) shells out to `protoc` at build time to compile its protobuf
+  definitions.
   - Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`
 - **`mold`** (Linux only) — **required, not optional.** `.cargo/config.toml`
   forces `-C link-arg=-fuse-ld=mold` for every Linux build; linking the ~500
@@ -61,8 +62,9 @@ Cargo workspace members (`Cargo.toml`):
 | `crates/uniko-api` | The public facade. |
 | `crates/uniko-bench` | Benchmark harness (`publish = false`). |
 | `bindings/uniko-py` | Async-first PyO3 Python SDK (alpha, `publish = false`). |
+| `bindings/uniko-cuda`, `bindings/uniko-metal` | GPU wheel variants of `uniko-py` (same source, GPU features). Members but not `default-members`. |
 
-`uni-db` (`^3` — the latest 3.x) and `uni-xervo` (`0.17.0`) are pulled from
+`uni-db` (`^6.0` — the latest 6.x) and `uni-xervo` (`0.20.0`) are pulled from
 crates.io — there is nothing external to install or run for them. Those are the
 requirements declared in the workspace `Cargo.toml`; `Cargo.lock` pins the exact
 resolved versions. Refresh uni-db within the range with
@@ -110,6 +112,10 @@ cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal
 
 # 6. dependency policy
 cargo deny check
+
+# 7. release guards: crates.io publish order, and version sync
+python3 scripts/ci/check_publish_list.py
+python3 scripts/ci/check_version_sync.py
 ```
 
 The uni-db seal should print **nothing**. Any output is a layering violation —
@@ -126,7 +132,7 @@ cargo install cargo-deny --locked
 
 ```sh
 cargo nextest run -p uniko-memory             # single crate
-cargo nextest run -E 'test(recall_cascade)'   # filter by test name
+cargo nextest run -E 'test(recall_temporal)'  # filter by test name
 ```
 
 ### Cargo feature flags
@@ -137,10 +143,13 @@ Local inference is **off by default** — opt in with `onnx`:
 | --- | --- | --- | --- |
 | `uniko-extract` | `code-parse` | **on** | Tree-sitter parsers (Python, Rust, JS, TS) for structure-aware code chunking. |
 | `uniko-extract` | `onnx` | off | Pulls in `ort`, `tokenizers`, `ndarray` for the local ONNX inference path. |
+| `uniko-extract` | `pdf-ocr` | off | Tiered Native+OCR PDF extraction (`uni-xervo-pdf`). OCR still runs only with `ocr.enabled = true`. |
 | `uniko-memory` | `onnx` | off | Forwards to `uniko-extract/onnx`. |
+| `uniko-memory` | `pdf-ocr` | off | Forwards to `uniko-extract/pdf-ocr`. |
 | `uniko-memory` | `llm` | off | Enables the abstractive (LLM-rewritten) summary path. Without it, summaries stay deterministic/extractive and fully offline. |
 | `uniko-store` | `gpu-cuda` | off | NVIDIA CUDA acceleration in uni-db (needs CUDA toolkit at build time). |
 | `uniko-store` | `gpu-metal` | off | Apple Metal / CoreML acceleration (macOS only). |
+| `uniko-store` | `candle` | off | uni-db's in-process candle LLM provider (`provider-candle`). |
 | `uniko-store` | `batch-record` | off | Diagnostic-only batch capture for benchmarks. Never enable in production. |
 
 ---
@@ -151,7 +160,8 @@ An async-first PyO3 SDK over the `Uniko` facade, built with `maturin` and manage
 with `uv`. You only need this if you are changing the Python surface.
 
 > Needs `protoc` + a C/C++ toolchain on `PATH` (the engine statically links ONNX
-> Runtime). **Status: alpha — no prebuilt wheels yet; build from source.**
+> Runtime). **Status: alpha.** Users install the prebuilt wheels from PyPI
+> (`uniko`, `uniko-cuda`, `uniko-metal`); contributors build from source.
 
 ### Build the extension
 
@@ -246,11 +256,17 @@ reviewed before merge.
 
 ## 8. CI reference
 
-CI (`.github/workflows/ci.yml`, `ubuntu-xlarge`) installs `protobuf-compiler`
-and `mold` plus a Rust stable toolchain with `clippy` + `rustfmt`, then runs the uni-db seal,
-`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`,
-`cargo fmt --all --check`, and `cargo nextest run --workspace`. A separate job
-runs `cargo deny check`. Keeping the [§3 check loop](#the-local-check-loop-mirrors-ci-exactly)
+CI (`.github/workflows/ci.yml`, `ubuntu-xlarge`) installs `protobuf-compiler`,
+`mold` and `ripgrep` plus a Rust stable toolchain with `clippy` + `rustfmt`, then
+runs the uni-db seal, `cargo check`, `cargo clippy -- -D warnings` (both
+`--workspace --exclude uniko-cuda --exclude uniko-metal`), `cargo fmt --all
+--check`, `scripts/ci/check_publish_list.py`, `scripts/ci/check_version_sync.py`
+and `cargo nextest run` (a serial warm pass over `uniko-cortex`, then the full
+workspace, with the same excludes). A `python` job builds the binding and runs
+pytest, stubtest, ruff and ty; a separate job runs `cargo deny check`.
+`expensive.yml` runs the `EXPENSIVE_TESTS=1` suites (Rust and Python) nightly
+and on demand, and `cloud.yml` runs the S3 tests against LocalStack and the
+AWS Emulator after each merge to `main`. Keeping the [§3 check loop](#the-local-check-loop-mirrors-ci-exactly)
 green locally is sufficient to pass CI.
 
 ---

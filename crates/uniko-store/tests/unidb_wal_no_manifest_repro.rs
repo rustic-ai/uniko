@@ -104,7 +104,7 @@ async fn child_writer() {
 /// for it to abort. Returns once the child is gone.
 fn crash_writer(store: &Path, flush_first: bool) {
     let mut cmd = Command::new(std::env::current_exe().expect("test binary path"));
-    cmd.args(["--exact", "child_writer", "--nocapture"])
+    cmd.args(["--exact", &child_test_name(), "--nocapture"])
         .env(CHILD_ENV, store);
     if flush_first {
         cmd.env(FLUSH_ENV, "1");
@@ -190,4 +190,16 @@ async fn crash_after_a_flush_recovers() {
         .get("name")
         .expect("name");
     assert_eq!(name, "ada");
+}
+
+/// The child test's full name in this binary, e.g.
+/// `unit_crash_atomicity::child_writer`: the test is a module of the
+/// crate's one integration binary, so its name carries the module path.
+fn child_test_name() -> String {
+    let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
+    if module.is_empty() {
+        "child_writer".to_string()
+    } else {
+        format!("{module}::child_writer")
+    }
 }

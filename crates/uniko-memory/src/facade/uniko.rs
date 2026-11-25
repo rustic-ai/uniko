@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use uniko_extract::ingest::{ModalityExtractor, ModalityRegistry};
+use uniko_extract::ingest::{ModalityExtractor, ModalityRegistry, ModelExtractor};
 use uniko_pipes::config::PipelineConfig;
 use uniko_pipes::health::PipelineHealth;
 use uniko_store::config::{EmbeddingConfig, NlpConfig, RerankerConfig, UnikoConfig};
@@ -49,6 +49,19 @@ pub struct Uniko {
     streaming: Option<Arc<PipelineSystem>>,
     scope: RecallScope,
     pub(super) extractors: Arc<ModalityRegistry>,
+    /// Whether readiness checks also verify remote aliases
+    /// ([`UnikoBuilder::verify_remote`]).
+    pub(super) verify_remote: bool,
+}
+
+/// What [`Uniko::inspect_store`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StoreReport {
+    /// What the store was built with.
+    pub info: uniko_store::StoreInfo,
+    /// How it compares with the config it was checked against.
+    pub compatibility: uniko_store::Compatibility,
 }
 
 impl fmt::Debug for Uniko {
@@ -236,6 +249,70 @@ impl Uniko {
         self.streaming.as_ref().map(|pipeline| pipeline.health())
     }
 
+    /// What the store at `path` was built with, and whether `config` can
+    /// open it as is.
+    ///
+    /// Reads the stored schema and model record only: it applies no schema,
+    /// changes no index or data and loads no model, so it is safe to call
+    /// before deciding how to open a store. The store is opened read-only,
+    /// so no writer lock or lease is taken and another process may have it
+    /// open. Opening runs the same check and
+    /// refuses an incompatible config with [`UnikoError::IncompatibleStore`]
+    /// before the store changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::Config`] when the store is open, inspected or
+    /// migrated in this process (use [`store_info`](Self::store_info) on an
+    /// open instance), [`UnikoError::Unsupported`] for a URI other than `s3://`, `gs://` or `az://`, and
+    /// [`UnikoError`] when the store can't be read.
+    pub async fn inspect_store(
+        path: impl AsRef<Path>,
+        config: &UnikoConfig,
+    ) -> Result<StoreReport, UnikoError> {
+        let (info, compatibility) = KnowledgeBase::inspect(path, config).await?;
+        Ok(StoreReport {
+            info,
+            compatibility,
+        })
+    }
+
+    /// What this instance's store was built with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when the store can't be read.
+    pub async fn store_info(&self) -> Result<uniko_store::StoreInfo, UnikoError> {
+        self.kb.store_info().await
+    }
+
+    /// Bring the store at `path` in line with `config` in place. See
+    /// [`KnowledgeBase::migrate`] for what each [`Migration`](uniko_store::Migration)
+    /// does; anything else, such as a new model or dimension size, needs a
+    /// fresh store. `progress` is called after each phase and backfill batch.
+    /// The store must not be open elsewhere.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError::IncompatibleStore`] when the migration can't
+    /// resolve the store's differences from `config`, or the error that
+    /// stopped it; the work already done is kept, and a rerun resumes.
+    pub async fn migrate_store(
+        path: impl AsRef<Path>,
+        config: UnikoConfig,
+        migration: uniko_store::Migration,
+        mut progress: impl FnMut(&uniko_store::MigrationProgress) + Send,
+    ) -> Result<uniko_store::MigrationReport, UnikoError> {
+        KnowledgeBase::migrate(path, config, migration, &mut progress).await
+    }
+
+    /// The streaming pipeline's dead letters: list, count, retry and
+    /// resolve ingest items that failed. See [`DeadLetters`](crate::DeadLetters).
+    #[must_use]
+    pub fn dead_letters(&self) -> crate::DeadLetters {
+        crate::DeadLetters::new(&self.kb, self.streaming.clone())
+    }
+
     /// Fill `Chunk.search_text` for chunks written before it existed, so
     /// the lexical recall channel and [`Sources::search`](crate::Sources::search)
     /// see them. Run it once after opening a store from an earlier release;
@@ -272,7 +349,7 @@ impl Uniko {
             match Arc::try_unwrap(pipeline) {
                 Ok(pipeline) => pipeline.shutdown().await.map_err(UnikoError::Pipeline)?,
                 Err(_) => tracing::warn!(
-                    "Uniko::shutdown: pipeline still shared by Agent/Session handles; \
+                    "Uniko::shutdown: pipeline still shared by Agent, Session or DeadLetters handles; \
                      skipping pipeline drain (drop those handles first)"
                 ),
             }
@@ -282,7 +359,7 @@ impl Uniko {
             // actionable guidance — this is a usage issue, not a bug.
             UnikoError::Internal(msg) if msg.contains("outstanding references") => {
                 UnikoError::Config(
-                    "Uniko::shutdown requires all Agent and Session handles to be dropped first"
+                    "Uniko::shutdown requires all Agent, Session and DeadLetters handles to be dropped first"
                         .to_string(),
                 )
             }
@@ -304,6 +381,7 @@ impl Uniko {
             streaming,
             scope,
             extractors,
+            verify_remote: false,
         }
     }
 }
@@ -357,6 +435,7 @@ pub struct UnikoBuilder {
     prefetch: PrefetchPolicy,
     requirements: Vec<super::Requirement>,
     readiness_timeout: Option<std::time::Duration>,
+    verify_remote: bool,
 }
 
 impl UnikoBuilder {
@@ -483,6 +562,19 @@ impl UnikoBuilder {
         self
     }
 
+    /// Register a model-backed extractor: OCR, captions, document
+    /// extraction or transcription through catalog aliases, for one
+    /// modality. Replaces any earlier extractor for that modality.
+    ///
+    /// [`build`](Self::build) checks it against the catalog before the
+    /// store opens: a mode the modality cannot use, a missing alias or one
+    /// serving the wrong task, a caption alias whose provider drops images,
+    /// and a video extractor without a composer all fail there.
+    #[must_use]
+    pub fn model_extractor(self, extractor: ModelExtractor) -> Self {
+        self.extractor(Arc::new(extractor.into_extractor()))
+    }
+
     /// Open the store over a [`SharedRuntime`] instead of loading its own
     /// models, so several instances load each model once.
     ///
@@ -540,6 +632,29 @@ impl UnikoBuilder {
     #[must_use]
     pub fn readiness_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.readiness_timeout = Some(timeout);
+        self
+    }
+
+    /// Also check, when readiness runs, that each required remote alias
+    /// can reach its endpoint with a valid credential. Off by default.
+    ///
+    /// Each required alias that loaded gets one cheap authenticated request
+    /// (a model lookup for OpenAI and most providers, `/health` for
+    /// llama.cpp), at most eight at a time, within the
+    /// [`readiness_timeout`](UnikoBuilder::readiness_timeout). A failure is
+    /// reported as `verification_failed`, with the reason (`unauthorized`,
+    /// `unreachable`, `not found`, ...) in its `error`. Local models pass
+    /// without any request.
+    ///
+    /// Applies to [`build`](UnikoBuilder::build) and to every later
+    /// [`check_readiness`](Uniko::check_readiness) on the instance, so a
+    /// health endpoint probing often makes these requests each time.
+    /// Without it, nothing contacts a remote provider before its first
+    /// request, and a remote alias reads as ready once its client is
+    /// configured.
+    #[must_use]
+    pub fn verify_remote(mut self, verify: bool) -> Self {
+        self.verify_remote = verify;
         self
     }
 
@@ -638,6 +753,11 @@ impl UnikoBuilder {
             check_answer_alias(&entries, alias)?;
         }
 
+        // A model-backed extractor must run on this catalog: refuse a mode
+        // it cannot serve before anything is created.
+        for extractor in self.extractors.extractors() {
+            extractor.validate(&entries)?;
+        }
         // Readiness, static step: catalog, features and extractors only,
         // so an unmet requirement fails before the store is created.
         super::readiness::check_static(
@@ -647,6 +767,7 @@ impl UnikoBuilder {
                 entries: &entries,
                 extractors: &self.extractors,
                 answer_alias: llm_alias.as_deref(),
+                verify_remote: self.verify_remote,
             },
         )?;
         let requirement_config = (!self.requirements.is_empty()).then(|| config.clone());
@@ -679,6 +800,7 @@ impl UnikoBuilder {
                 entries: &entries,
                 extractors: &self.extractors,
                 answer_alias: llm_alias.as_deref(),
+                verify_remote: self.verify_remote,
             };
             let failures =
                 super::readiness::check(&kb, &self.requirements, &cx, self.readiness_timeout).await;
@@ -712,9 +834,9 @@ impl UnikoBuilder {
             None
         };
 
-        Ok(Uniko::from_parts(
-            kb, llm_alias, streaming, self.scope, extractors,
-        ))
+        let mut memory = Uniko::from_parts(kb, llm_alias, streaming, self.scope, extractors);
+        memory.verify_remote = self.verify_remote;
+        Ok(memory)
     }
 }
 

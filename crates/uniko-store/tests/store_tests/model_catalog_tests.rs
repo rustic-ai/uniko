@@ -222,6 +222,24 @@ async fn a_store_opened_without_prefetch_reports_models_not_loaded() {
         ModelState::Loaded
     );
 
+    // So does a load straight through the runtime, which the store never
+    // sees: the state is the runtime's own.
+    kb.model_runtime()
+        .unwrap()
+        .reranker("rerank/default")
+        .await
+        .unwrap();
+    let statuses = kb.model_status().await.unwrap();
+    let rerank = status_of(&statuses, "rerank/default");
+    assert_eq!(rerank.state, ModelState::Loaded);
+    assert!(
+        rerank
+            .active_execution_providers
+            .as_ref()
+            .is_some_and(|eps| !eps.is_empty()),
+        "{rerank:?}"
+    );
+
     kb.shutdown().await.unwrap();
 }
 
@@ -263,10 +281,11 @@ async fn model_status_redacts_endpoints_and_never_shows_options() {
     kb.shutdown().await.unwrap();
 }
 
-/// The old shared-runtime path still works but knows no catalog.
+/// The old shared-runtime path knows no catalog, so it reports every
+/// alias the runtime holds.
 #[tokio::test]
 #[allow(deprecated)]
-async fn a_store_over_a_bare_runtime_has_no_model_status() {
+async fn a_store_over_a_bare_runtime_reports_the_runtime_aliases() {
     let config = UnikoConfig::default();
     let runtime = KnowledgeBase::build_shared_runtime(&config, &[])
         .await
@@ -275,7 +294,14 @@ async fn a_store_over_a_bare_runtime_has_no_model_status() {
     let kb = KnowledgeBase::open_with_runtime(dir.path(), config, runtime)
         .await
         .unwrap();
-    assert!(kb.model_status().await.is_none());
+    let statuses = kb
+        .model_status()
+        .await
+        .expect("the runtime knows its aliases");
+    assert!(
+        statuses.iter().any(|s| s.alias == "embed/default"),
+        "{statuses:?}"
+    );
     kb.shutdown().await.unwrap();
 }
 
@@ -370,7 +396,11 @@ async fn background_prefetch_returns_first_and_loads_later() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         let statuses = kb.model_status().await.unwrap();
-        if statuses.iter().all(|s| s.state != ModelState::NotLoaded) {
+        // Settled: every alias has loaded or failed, none still to come.
+        if statuses
+            .iter()
+            .all(|s| !matches!(s.state, ModelState::NotLoaded | ModelState::Loading))
+        {
             assert_eq!(
                 status_of(&statuses, "embed/default").state,
                 ModelState::Loaded

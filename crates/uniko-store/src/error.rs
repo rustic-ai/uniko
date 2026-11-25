@@ -88,6 +88,13 @@ pub enum UnikoError {
     /// stage and why; best-effort mode returns these on the result instead.
     #[error("degraded: {}", crate::diagnostics::describe(.0))]
     Degraded(Vec<crate::Diagnostic>),
+
+    /// The store at a path can't be opened with this config as is: each
+    /// difference says whether it needs a fresh store or names the
+    /// in-place migration that fixes it. Raised before anything on disk
+    /// changes or any model loads.
+    #[error("incompatible store: {0}")]
+    IncompatibleStore(Box<crate::Compatibility>),
 }
 
 impl UnikoError {
@@ -145,6 +152,18 @@ impl From<uni_db::UniError> for UnikoError {
         // instead of flattening every variant to an opaque Storage(String).
         // `UniError` is `#[non_exhaustive]`, so we delegate to its classifier
         // rather than enumerating variants here.
+        //
+        // A store held by another writer, a writer fenced off from its
+        // store, and a stale hybrid WAL are configuration problems for the
+        // caller to resolve, not storage faults.
+        if matches!(
+            err,
+            uni_db::UniError::StoreLocked { .. }
+                | uni_db::UniError::WriterFenced { .. }
+                | uni_db::UniError::StaleWal { .. }
+        ) {
+            return UnikoError::Config(err.to_string());
+        }
         if err.is_retriable() {
             UnikoError::Conflict(err.to_string())
         } else {

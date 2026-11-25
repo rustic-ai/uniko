@@ -5,7 +5,7 @@
 //! CLS filtered it, and derived observations.
 //!
 //! Run: cargo nextest run -p uniko-extract --features onnx \
-//!   --test dump_nlp_pipeline --nocapture --run-ignored all
+//!   --test integration dump_nlp_pipeline:: --nocapture --run-ignored all
 
 #[cfg(feature = "onnx")]
 mod onnx_dump {

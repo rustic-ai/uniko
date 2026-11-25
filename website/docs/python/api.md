@@ -57,7 +57,7 @@ have a `_sync` twin in the **Sync** column; assume the async signature shown and
 the name for the blocking form.
 
 !!! tip "`__version__`"
-    `uniko.__version__` tracks the crate version (currently `0.5.1`), single-sourced from Cargo
+    `uniko.__version__` tracks the crate version (currently `0.6.0`), single-sourced from Cargo
     via `env!("CARGO_PKG_VERSION")` rather than hardcoded. It falls back to the deliberately
     invalid sentinel `"0+unknown"` if the native module fails to expose it.
 
@@ -97,21 +97,27 @@ and `shutdown` when done. `repr(uni)` is `Uniko(open)` or `Uniko(shut down)`.
 | `agent` | `agent(agent_id: str) -> Agent` | — (sync) | Mint an agent identity (cheap). |
 | `config` | `config() -> dict[str, Any]` | — (sync) | The full configuration this instance runs with, as nested dicts. |
 | `health` | `health() -> PipelineHealth \| None` | — (sync) | Streaming-pipeline health; `None` without `streaming(True)`. |
+| `inspect_store` | `@staticmethod inspect_store(path, config=None, *, embedding=None) -> Awaitable[StoreReport]` | `inspect_store_sync` | What the store at `path` was built with and how a config compares (`compatible`, `differences`, `migrations`). `migrations` is empty whenever a difference is incompatible. Applies no schema, changes no index or data and loads no model. Opens the store read-only, taking no writer lock or lease, so another process may have it open. A local path that isn't a store isn't touched at all and reports `info.exists == False`. Raises `ConfigError` while the store is open, inspected or migrated in this process (use `store_info` on an open handle), and `UnsupportedError` for a URI other than `s3://`, `gs://` or `az://` (a remote-only store, opened by its URL, is inspected like a local one). See [Changing the Embedding Model](../guides/model-migration.md). |
+| `migrate_store` | `@staticmethod migrate_store(path, migration, config=None, *, embedding=None, progress=None) -> Awaitable[MigrationReport]` | `migrate_store_sync` | Run `"enable_hybrid"` or `"rebuild_vector_indexes"` in place. The argument order differs from Rust's `migrate_store(path, config, migration, progress)`. `progress` gets a dict, typed as `uniko.types.MigrationProgressEvent` (`migration`, `phase`: `"schema"` \| `"rebuild"` \| `"backfill"` \| `"done"`, `label`, `done`, `total`); the final `"done"` event has `done == total == rows_backfilled + rows_unfilled`. An exception or panic in the callback is printed and ignored, and it can't cancel the run. An `async def` callback isn't awaited, and the callback must not call other `_sync` uniko methods. Resumable. Raises `IncompatibleStoreError` when the migration can't resolve the differences; `ConfigError` when there is no store at `path`, the config sets `schema_path`, or the store is open, inspected or migrated, in this process or another; and `UnsupportedError` for a URI other than `s3://`, `gs://` or `az://`. While a migration runs, opening the store raises `ConfigError`. |
+| `store_info` | `store_info() -> Awaitable[StoreInfo]` | `store_info_sync` | What this instance's store was built with, including `hybrid_backfill_pending`. |
+| `dead_letters` | property `-> DeadLetters` | — | Failed streaming items: list, count, retry, resolve. See [`DeadLetters`](#deadletters). |
 | `add_team_member` | `add_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `add_team_member_sync` | Record a team membership; `False` when already recorded. |
 | `remove_team_member` | `remove_team_member(participant_id: str, team_id: str) -> Awaitable[bool]` | `remove_team_member_sync` | Remove it; `False` when not recorded. |
 | `add_org_member` | `add_org_member(participant_id: str, org_id: str) -> Awaitable[bool]` | `add_org_member_sync` | Record a direct org membership. |
 | `remove_org_member` | `remove_org_member(participant_id: str, org_id: str) -> Awaitable[bool]` | `remove_org_member_sync` | Remove it. |
 | `add_team_to_org` | `add_team_to_org(team_id: str, org_id: str) -> Awaitable[bool]` | `add_team_to_org_sync` | Put a team in an org; its members get the org. |
 | `remove_team_from_org` | `remove_team_from_org(team_id: str, org_id: str) -> Awaitable[bool]` | `remove_team_from_org_sync` | Take it out again. |
+| `backfill_search_text` | `backfill_search_text() -> Awaitable[int]` | `backfill_search_text_sync` | Fill the lexical search text of chunks stored before that channel existed; returns how many were filled. Run once after upgrading an older store. |
 | `capabilities` | `capabilities() -> Awaitable[dict[str, Any]]` | `capabilities_sync` | Compiled features, extractors, each model's load state, the answer alias, OCR. Loads nothing. |
 | `check_readiness` | `check_readiness(requirements: list[Requirement], timeout: float \| None = None) -> Awaitable[list[dict[str, Any]]]` | `check_readiness_sync` | The unmet requirements, loading any required model not yet loaded (a failed one is retried each call). Never raises for an unmet one. |
 | `purge` | `purge() -> Awaitable[DeletionReport]` | `purge_sync` | Erase the whole graph (dev/test reset). |
-| `shutdown` | `shutdown() -> Awaitable[None]` | `shutdown_sync` | Drain workers and close. **Consumes the handle.** |
+| `shutdown` | `shutdown() -> Awaitable[None]` | `shutdown_sync` | Drain workers and close. **Consumes the handle.** Raises `UnikoError` (kind `"storage"`) when the final flush fails, after still closing the store: the commits are in the write-ahead log, and the next open from the same directory replays them. |
 
 `config()` returns every configuration field, nested the way the engine holds them
 (`embedding`, `reranker`, `nlp` and `ocr` are sub-dicts), in the same shape
 `UnikoBuilder.config()` accepts, so you can read it, change a value and build with it.
-`embedding.provider_options` is shown as `"<redacted>"` when set, because it can hold API keys.
+`embedding.provider_options` is shown as `"<redacted>"` when set, because it can hold API keys,
+and so are `remote_storage.secret_access_key`, `session_token` and `service_account_key`.
 The fields and their defaults are listed in the [configuration guide](../guides/configuration.md).
 
 `capabilities()` reports what this build and instance can do:
@@ -120,7 +126,7 @@ The fields and their defaults are listed in the [configuration guide](../guides/
   `gpu-metal`, `candle`, `llm`, `batch-record`) and whether this build has it;
 - `extractors`: the modalities with a registered extractor;
 - `models`: one entry per catalog alias, with `alias`, `task`, `provider_id`, `model_id`,
-  `revision`, `state` (`"not_loaded"`, `"loaded"` or `"failed"`, with `error` when failed),
+  `revision`, `state` (`"not_loaded"`, `"loading"`, `"loaded"` or `"failed"`, with `error` when failed),
   `api_key_env`, `base_url`, and the requested and active ONNX execution providers;
 - `answer_alias`, `ocr_compiled` and `ocr_configured`.
 
@@ -133,9 +139,9 @@ that fails, so a single bad alias shows up here as `"failed"` instead of stoppin
 loading; a later successful use clears it. `extractors` lists only extractors registered with
 `extractor()`; built-in text, code, markup, structured and PDF ingest are always available. Model entries never include
 provider options; an API key appears only as its environment-variable name, and `base_url` has
-any userinfo and query string removed. `active_execution_providers` is only known for loaded
-local ONNX embedding and reranking models, and lists the providers requested minus those not
-compiled in, not proof that a GPU attached. `TypedUniko.capabilities()` returns the same as a
+any userinfo and query string removed. `active_execution_providers` is known once a local ONNX
+model has loaded, and lists the providers its sessions attached: one that failed to register, or
+whose output disagreed with CPU, is left out. `TypedUniko.capabilities()` returns the same as a
 `Capabilities` Pydantic model.
 
 !!! warning "`shutdown` needs sole ownership"
@@ -155,7 +161,8 @@ compiled in, not proof that a GPU attached. `TypedUniko.capabilities()` returns 
 
 Chainable, synchronous setters; `build` is the terminal async step. Returns `self` from every setter
 so you can fluently compose, and re-using a builder after `build()` raises
-`RuntimeError("UnikoBuilder already consumed by build()")`.
+`RuntimeError("UnikoBuilder already consumed by build() or build_runtime()")`; so does re-using it
+after `build_runtime()`.
 
 | Method | Signature | Sync | Description |
 | --- | --- | --- | --- |
@@ -171,10 +178,12 @@ so you can fluently compose, and re-using a builder after `build()` raises
 | `runtime` | `runtime(runtime: SharedRuntime) -> UnikoBuilder` | — (sync) | Open over a runtime shared with other instances; `build()` raises `ConfigError` if it does not serve this builder's models. |
 | `require` | `require(requirements: list[Requirement]) -> UnikoBuilder` | — (sync) | Models or stages `build()` must have ready; it raises `ReadinessError` otherwise. Adds to earlier calls. |
 | `readiness_timeout` | `readiness_timeout(seconds: float \| None) -> UnikoBuilder` | — (sync) | How long `build()` waits for the required models to load; `None` or `math.inf` waits as long as loading takes. |
+| `verify_remote` | `verify_remote(on: bool) -> UnikoBuilder` | — (sync) | Also check that each required remote model is reachable and accepts its credential, at `build()` and every later `check_readiness`; a failure is `verification_failed`. Off by default. |
 | `streaming` | `streaming(on: bool) -> UnikoBuilder` | — (sync) | Enables the fire-and-forget `submit`/`flush` lane. |
 | `scope_to_agent` | `scope_to_agent() -> UnikoBuilder` | — (sync) | Reads default to the agent's visibility. |
 | `scope` | `scope(viewer: Viewer \| None) -> UnikoBuilder` | — (sync) | Every agent reads as `viewer`; `None` reads everything (the default). |
-| `extractor` | `extractor(modality: str, extract: Callable[[ExtractRequest], str]) -> UnikoBuilder` | — (sync) | Index `"image"`, `"audio"` or `"video"` sources as the text `extract` returns. |
+| `extractor` | `extractor(modality: str, extract: Callable[[ExtractRequest], str \| Extraction \| list[Extraction]], *, retention: str = "none") -> UnikoBuilder` | — (sync) | Index `"image"`, `"audio"` or `"video"` sources as the text or `Extraction` that `extract` returns. |
+| `model_extractor` | `model_extractor(modality: str, *, ocr=None, caption=None, caption_prompt=None, max_caption_tokens=None, document=None, transcribe=None, language=None, composer=None, retention="none") -> UnikoBuilder` | — (sync) | Index them with catalog models by alias. See [Extractors](#extractors). |
 | `build` | `build() -> Awaitable[Uniko]` | `build_sync` | Terminal: produce the `Uniko` instance. |
 | `build_runtime` | `build_runtime() -> Awaitable[SharedRuntime]` | `build_runtime_sync` | Terminal: a `SharedRuntime` for this builder's models, loaded as `prefetch()` says. |
 
@@ -195,7 +204,9 @@ bob = await uniko.Uniko.builder().path("./bob").runtime(runtime).build()
 
 `Requirement` names what an application needs: `Requirement.alias(alias)`,
 `.embedder()`, `.reranker()`, `.nlp()`, `.ocr()`, `.generator()`,
-`.extractor("image" | "audio" | "video")` and `.accelerated(alias)`. `build()` loads each
+`.extractor("image" | "audio" | "video")` and `.accelerated(alias)`. Its `name` property is the
+requirement as a failure reports it (e.g. `"alias:gen/m"`), and requirements compare and hash by
+value. Another modality raises `ConfigError`. `build()` loads each
 required model whatever the `prefetch()` policy and raises `ReadinessError`, whose `.failures` is a
 list of dicts (`requirement`, `code`, `alias`, `error`). A requirement the catalog, compiled
 features or registered extractors cannot meet fails before the store is created.
@@ -237,20 +248,31 @@ uni = (uniko.Uniko.builder()
   capacity of `0`, and similar constraints raise `ConfigError` there, not in the setter.
 - **Embedding presets**: `nomic`, `nomic-q`, `minilm`, `bge-small` (the default), `bge-large`,
   `bge-m3`, `gemma`.
-- **Reopening a store with a different embedding model raises `ConfigError`**. Its vectors were
-  made with the original model and are not comparable with another's.
-- `blob_storage` and `vector_algorithm` are replaced whole rather than merged, since a different
-  variant has different keys: `{"blob_storage": {"kind": "fs", "root": "/data/blobs"}}`.
+- **Reopening a store with a different embedding model raises `IncompatibleStoreError`**, a
+  `ConfigError` subclass. Its vectors were made with the original model and are not comparable
+  with another's. A changed index setting raises it too, until a migration runs; see
+  [Changing the Embedding Model](../guides/model-migration.md).
+- `blob_storage`, `remote_storage` and `vector_algorithm` are replaced whole rather than merged,
+  since a different variant has different keys: `{"blob_storage": {"kind": "fs", "root": "/data/blobs"}}`.
+- **`remote_storage` keeps the store's data in an object store**
+  (`{"url": "s3://bucket/kb", "endpoint": ..., "region": ..., ...}`, a `gs://` URL, or
+  `{"url": "az://container/kb", "account": ..., "access_key": ...}`; settings left out come from the
+  `AWS_*` / `GOOGLE_*` / `AZURE_*` environment, and `Uniko.config()` redacts the secrets). With a local `path()` the store is
+  *hybrid*: the directory holds only its write-ahead log and ids, and `set_aside_stale_wal` decides
+  what happens to a stale local log. With the store's own `s3://`, `gs://` or `az://` URL as the path it is
+  *remote-only*. One writer holds the store at a time: a second open raises `ConfigError`
+  ("open for writing elsewhere"). An unknown key raises `ConfigError`, and an in-memory store
+  refuses `remote_storage`. The fields are listed in the
+  [configuration guide](../guides/configuration.md#remote-storage).
 
 ---
 
 ### Extractors
 
 `extractor` lets a model you run index images, audio or video. Uniko calls `extract` with an
-`ExtractRequest` (`modality`, `data` as bytes, `mime`, `path`, `metadata`) and stores the
-returned text as the artifact's content, chunked and embedded like a document; the original
-bytes are not kept. The function runs on a worker thread and holds the GIL only while it
-runs. An exception in it fails that ingest.
+`ExtractRequest` (`modality`, `data` as bytes, `mime`, `path`, `metadata`). It stores the result
+as an artifact, chunked and embedded like a document. The function runs on a worker thread and
+holds the GIL only while it runs. An exception in it fails that ingest.
 
 ```python
 def caption(request: uniko.ExtractRequest) -> str:
@@ -259,6 +281,48 @@ def caption(request: uniko.ExtractRequest) -> str:
 memory = uniko.Uniko.builder().extractor("image", caption).build_sync()
 memory.agent("a").session("s").ingest_sync(uniko.IngestSource.from_path("photo.png"))
 ```
+
+`extract` may instead return an `Extraction` of `Segment`s, or a list of them (one per model).
+Each chunk then carries its segments' page, time range, region, confidence and model:
+
+```python
+uniko.Extraction(
+    [uniko.Segment("bring the q3 forecast", "transcript", start_ms=2400, end_ms=4100)],
+    uniko.ModelProvenance("asr/host", "whisper-large", "transcribe"),
+)
+```
+
+| Class | Constructor | Notes |
+| --- | --- | --- |
+| `Segment` | `Segment(text, kind="text", *, page=None, start_ms=None, end_ms=None, bbox=None, confidence=None, speaker=None)` | `kind` is `caption`, `transcript`, `ocr_region`, `page_block` or `text`. `bbox` is `(x0, y0, x1, y1)`. Raises `ConfigError` for another kind, or an end before the start. |
+| `ModelProvenance` | `ModelProvenance(alias, model_id, task)` | Stored on each chunk as `alias@model_id`. |
+| `Extraction` | `Extraction(segments, model=None)` | |
+| `VideoFrame` | `VideoFrame(timestamp_ms, data, mime)` | A frame a composer returns. |
+| `VideoParts` | `VideoParts(frames, audio=None)` | What a composer returns. `audio` is 16 kHz 16-bit PCM WAV. |
+
+`model_extractor` uses catalog models instead, by alias:
+
+- `ocr`: an OCR alias, such as `ocr/default` with `{"ocr": {"enabled": True}}`. Lines are grouped
+  into chunks, with each line's box in the hit's `position.segments` (or `position.bbox` for a chunk
+  of one line);
+- `caption`: a generation alias on `remote/openai`, `remote/azure-openai` or `remote/llamacpp`,
+  sent the image with `caption_prompt` and up to `max_caption_tokens` (512);
+- `document`: a document-extraction alias;
+- `transcribe`: a transcription alias, in `language` if given. No provider is usable yet: uni-db's
+  model runtime doesn't register `local/whisper-cpp`, so `build()` refuses it. Until it does,
+  return `transcript` segments from your own `extractor`.
+
+A video needs `composer`, a callable taking an `ExtractRequest` and returning `VideoParts`. The
+image modes run on each frame and `transcribe` on the audio. `build()` raises `UnsupportedError`
+or `ConfigError` for a mode the modality can't use, a caption provider that drops images, or an
+alias missing from the catalog.
+
+`retention` keeps the original: `"none"` (the default), `"identity"` (hash, type and size, as a
+source the text links to) or `"bytes"` (the bytes too). `Data.media_sources(artifact_id)`
+returns the sources as `MediaSourceView`s (`artifact_id`, `modality`, `mime`, `hash`, `size`,
+`path`, `duration_ms`, `sample_rate`, `channels`, `derivation_kind`, `bytes_retained`). With
+`bytes_retained`, `Data.artifact_bytes(source.artifact_id)` returns the original. The
+[guide](../guides/multimodal.md) covers chunking, visibility and deletion.
 
 ---
 
@@ -354,6 +418,7 @@ builder's terminal `run`/`run_sync`. See [Reasoning with Locy](../guides/reasoni
 | Method | Signature | Sync | Description |
 | --- | --- | --- | --- |
 | `session` | `session(session_id: str) -> Session` | — (sync) | Open a conversation thread. |
+| `register` | `register(*, name: str \| None = None) -> Awaitable[Registration]` | `register_sync` | Record this agent as a participant of kind `agent`, writing nothing else. Returns a `Registration` with `participant_id` and `outcome` (`"created"`, `"upgraded"` or `"existing"`). Idempotent; a participant of kind `unknown` (for example from `add_org_member`) becomes `agent`, keeping its name and memberships. `name` is set only when the participant has none. Optional: goals, tasks, actions and tool calls create the participant themselves. |
 | `delete_session` | `delete_session(session_id: str) -> Awaitable[DeletionReport]` | `delete_session_sync` | Hard-delete a session and cascade. |
 | `finalize_session` | `finalize_session(session_id: str) -> Awaitable[FinalizeReport]` | `finalize_session_sync` | Build/refresh a session's retrieval surfaces without its `Session` handle. |
 | `retire_source` | `retire_source(source_id: str) -> Awaitable[bool]` | `retire_source_sync` | Hide everything recorded under a source id from recall, reversibly. |
@@ -500,11 +565,13 @@ the artifact's chunks is forgotten or hidden.
 | --- | --- | --- | --- |
 | `message` | `message(message_id: str) -> Awaitable[MessageView \| None]` | `message_sync` | Fetch a stored message. |
 | `artifact` | `artifact(artifact_id: str) -> Awaitable[ArtifactView \| None]` | `artifact_sync` | Fetch an artifact's metadata + text. |
+| `media_sources` | `media_sources(artifact_id: str) -> Awaitable[list[MediaSourceView]]` | `media_sources_sync` | The original media an artifact's text was derived from; see [Extractors](#extractors). |
 | `artifact_bytes` | `artifact_bytes(artifact_id: str) -> Awaitable[bytes \| None]` | `artifact_bytes_sync` | Fetch the raw binary payload. |
 
 !!! warning "Binary payloads: use `artifact_bytes`"
-    Raw bytes cannot be read back through a Cypher `RETURN`. `artifact_bytes` is the supported path
-    for binary payloads — reach for it instead of `query`/`query_in` when you need the bytes.
+    An artifact's payload is kept by the configured blob backend (`blob_storage`). `artifact_bytes`
+    reads it through that backend whichever one is configured, and applies the policy above —
+    reach for it instead of `query`/`query_in` when you need the bytes.
 
 ---
 
@@ -530,11 +597,11 @@ Goals & tasks, reached via `agent.goals`. Reads are scoped to the goals the agen
 assigned to it. Transition methods return `bool` — `False` when the id does not resolve. Creation
 methods return the new node id (`int`).
 
-!!! note "The Participant must exist first"
-    Create the agent's Participant by sending at least one turn before creating goals:
+!!! note "No setup turn needed"
+    Creating a goal or task creates the agent's Participant first when it doesn't exist yet, as
+    `register()` would, so a fresh store needs no prior turn:
 
     ```python
-    await agent.session("setup").observe(uniko.Turn("assistant", "kicking off"))
     goals = agent.goals
     gid = await goals.create("Ship the Python SDK", goal_id="g1",
                              description="PyO3 bindings", metrics={"target_phase": 3})
@@ -660,7 +727,10 @@ A `Turn` is reusable — feeding it to `observe`/`submit` does not consume it.
 | `.attach` | `.attach(source: IngestSource)` | Attach one source. |
 | `.attachments` | `.attachments(sources: list[IngestSource])` | Attach many. |
 | `.tool_call` | `.tool_call(call: ToolCall)` | Record a tool call this turn made; it commits with the turn. |
-| `.visibility` | `.visibility(visibility: str)` | Scope the turn and what derives from it; see [Visibility](#visibility). |
+| `.visibility` | `.visibility(visibility: str)` | Scope the turn and what derives from it; see [Visibility](#visibility). An unparsable value raises `ConfigError`. |
+| `.category` | `.category(category: str)` | Your own record category; `Scope.categories` filters on it. Never enters the searchable text. |
+| `.source` | `.source(source_id: str)` | A stable logical source id; `Scope.sources` filters on it and `Agent.retire_source` hides it. |
+| `.revision` | `.revision(revision_id: str)` | Which revision of that source the turn reflects. |
 
 ```python
 turn = (uniko.Turn("alice", "see the attached report")
@@ -675,11 +745,14 @@ turn = (uniko.Turn("alice", "see the attached report")
 ToolCall(tool_name: str)
 ```
 
+`call.tool_name` and `call.performer_id` (`None` unless `.performer(...)` was set) read the call back.
+
 One call of one tool. Reusable, like `Turn`.
 
 | Setter | Signature | Default / Notes |
 | --- | --- | --- |
 | `.call_id` | `.call_id(call_id: str)` | Derived from the session, turn, tool, arguments and result if unset. |
+| `.performer` | `.performer(participant_id: str)` | The turn's sender, or the session's agent for `observe_tool`. The turn keeps its sender; a missing performer is created as kind `unknown` and an existing one keeps its kind (`register` makes an agent). The same call id under a different performer, named or by default, raises `IdConflictError`. |
 | `.arguments` | `.arguments(arguments: Any)` | Any JSON-shaped value. |
 | `.json_output` / `.text_output` / `.bytes_output` | `.json_output(value)`, `.text_output(text)`, `.bytes_output(data, mime)` | The result, stored verbatim. |
 | `.status` / `.error` | `.status(status: str)`, `.error(error: str)` | — |
@@ -701,6 +774,9 @@ Factories build a source; chainable setters refine it.
 | `.with_mime` | `.with_mime(mime: str)` | Skip sniffing; invalid MIME raises `ValueError`. |
 | `.with_id` | `.with_id(id: str)` | Set the artifact id. |
 | `.with_path` | `.with_path(path: str)` | Set the logical path. |
+| `.with_category` | `.with_category(category: str)` | Your own record category, as on `Turn.category`. |
+| `.with_source` | `.with_source(source_id: str)` | A stable logical source id, as on `Turn.source`. |
+| `.with_revision` | `.with_revision(revision_id: str)` | Which revision of that source these bytes are. The same revision with changed bytes raises `IdConflictError`; a new revision supersedes the previous one. |
 
 ```python
 src = uniko.IngestSource.from_bytes(raw).with_mime("application/pdf").with_id("doc-1")
@@ -722,6 +798,9 @@ Confines reads to a subset of the graph. Chainable.
 | `.until` | `.until(until: datetime)` | Exclusive upper bound. |
 | `.as_participant` | `.as_participant(participant_id: str)` | Read as this participant, memberships looked up at recall time. |
 | `.as_viewer` | `.as_viewer(viewer: Viewer)` | Read as this explicit viewer. |
+| `.categories` | `.categories(categories: list[str])` | Restrict to these record categories, applied during candidate generation; no match gives an empty result. |
+| `.sources` | `.sources(sources: list[str])` | Restrict to these logical source ids. |
+| `.include_superseded` | `.include_superseded()` | Also return superseded revisions and retired sources (historical recall). |
 
 `Viewer(participant_id, teams=None, orgs=None)` is a viewer identity with the memberships given
 rather than looked up; it has `participant_id`, `teams` and `orgs` properties.
@@ -758,13 +837,23 @@ One ranked piece of context.
 | Field | Type |
 | --- | --- |
 | `node_id` | `int` |
-| `kind` | `str` |
+| `kind` | `"chunk"`, `"observation"`, `"fact"`, `"procedure"`, `"topic"`, `"episode"`, `"message"` or `"other"` (`uniko.types.RecallKind`) |
 | `score` | `float` |
 | `content` | `str` |
 | `sources` | `list[RecallSource]` |
 | `token_count` | `int` — tokens in `content`, as the budget counts them |
 | `context` | `str \| None` — for a tool-output chunk, the header of what it inherits |
 | `address` | `str \| None` — where the chunk sits in its source |
+| `position` | `MediaPosition \| None` — for a chunk derived from an image, audio or video: modality, model, page, time range, box, confidence, speaker, and `segments` (each grouped segment's byte range and position). `SearchHit.position` is the same. |
+| `category` | `str \| None` (property) — the record category the turn or source set |
+| `source_id` | `str \| None` (property) — the logical source id it was recorded under |
+| `revision_id` | `str \| None` (property) — the source revision it came from |
+
+`MediaPosition` has `modality`, `source_model_version`, `page`, `time_start_ms`, `time_end_ms`,
+`bbox` (`(x0, y0, x1, y1)`), `confidence`, `speaker` and `segments`, a list of `SegmentPosition`
+with `start` and `end` (the byte range in the chunk) plus the same `page`, `time_start_ms`,
+`time_end_ms`, `bbox`, `confidence` and `speaker`. Every field but `modality`, `segments`,
+`start` and `end` may be `None`.
 
 ### `ContextBundle`
 
@@ -785,7 +874,7 @@ One stage outcome of a recall or an ingest. No query or content text is included
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `stage` | `str` | Recall: `query_embedding`, `query_analysis`, `sparse`, `colbert`, `rerank`, `source`, `provenance`. Ingest: `nlp`, `observation_model`, `observation_rules`, `pdf_extraction`, `artifact_embedding`, `extractor_post_commit`. |
+| `stage` | `str` | Recall: `query_embedding`, `query_analysis`, `sparse`, `colbert`, `rerank`, `source`, `provenance`. Ingest: `nlp`, `observation_model`, `observation_rules`, `pdf_extraction`, `artifact_embedding`, `extractor_post_commit`, `media_extraction`. |
 | `status` | `str` | `applied`, `skipped`, `fallback` or `failed`. |
 | `code` | `str \| None` | Why, when not `applied`, e.g. `embed_failed`, `rerank_failed`, `query_failed`, `not_reached`, `nlp_unavailable`. |
 | `target` | `str \| None` | The node label, model alias or source the stage ran on. |
@@ -846,9 +935,11 @@ The result of recording one tool call.
 ### `SearchHit`, `Outline`, `OutlineEntry`, `ReadResult`, `ToolCallView`
 
 Returned by `Sources`. A `SearchHit` has `source_kind`, `source_id`, `chunk_id`, `chunk_index`,
-`address`, `start`, `end`, `text`, `context`, `score`, `session_id`, `call_id` and `tool_name`. An
-`Outline` has `format`, `total_bytes`, `total_lines`, `truncated` and `entries`, each an
-`OutlineEntry` with `address`, `kind`, `summary`, `start`, `end` and `depth`. A `ReadResult` has the
+`address`, `position` (a `MediaPosition` for a chunk derived from media, else `None`), `start`,
+`end`, `text`, `context`, `score`, `session_id`, `call_id` and `tool_name`. An
+`Outline` has `source_kind`, `source_id`, `format`, `total_bytes`, `total_lines`, `truncated` and
+`entries`, each an `OutlineEntry` with `address`, `kind` (`"object"`, `"array"`, `"scalar"` or
+`"chunk"`), `summary`, `start`, `end` and `depth`. A `ReadResult` has `source_kind`, `source_id`, the
 verbatim `text`, its byte span `start`/`end`, `first_line`/`last_line`, `truncated`, and
 `next_bytes` — the `(start, end)` still to read when it was cut. A `ToolCallView` has `call_id`,
 `tool_name`, `action_type`, `arguments`, `status`, `error`, `started_at`, `ended_at`,
@@ -1009,7 +1100,7 @@ Returned by `Session.ingest`.
 
 | Field | Type |
 | --- | --- |
-| `kind` | `str` |
+| `kind` | `"artifact"` or `"pdf"` (`uniko.types.IngestKind`) |
 | `artifact_id` | `str` |
 | `artifact_node_id` | `int` |
 | `chunk_node_ids` | `list[int]` |
@@ -1036,7 +1127,100 @@ Returned by `Uniko.health`.
 `queue_depth`, `queue_capacity`, `items_processed`, `items_failed`, `avg_latency_ms`, and
 `degradations`: degraded ingest stages counted since start, keyed `stage:code`
 (e.g. `"pdf_extraction:extraction_failed"`). Streaming ingest has no per-call result, so this is
-where its diagnostics surface.
+where its diagnostics surface. `dead_lettered`, `retries` and `retries_succeeded` count dead
+letters stored, retries resubmitted and retries that succeeded since start.
+
+### `DeadLetters`
+
+From `Uniko.dead_letters`. Listing, counting and resolving work on any instance; retrying needs
+`streaming(True)` and raises `ConfigError` otherwise. Drop the handle before `shutdown()`, as with
+an `Agent` or `Session`.
+
+| Method | Signature | Sync | Description |
+| --- | --- | --- | --- |
+| `list` | `list(*, status=None, limit=None) -> Awaitable[list[DeadLetter]]` | `list_sync` | Oldest first. `status` is `"pending"`, `"retrying"`, `"exhausted"`, `"resolved"` or `"legacy"`. |
+| `get` | `get(id: str) -> Awaitable[DeadLetter \| None]` | `get_sync` | One letter. |
+| `counts` | `counts() -> Awaitable[DeadLetterCounts]` | `counts_sync` | Letters per status: `pending`, `retrying`, `exhausted`, `resolved`, `legacy`. |
+| `retry` | `retry(id: str, *, force=False) -> Awaitable[None]` | `retry_sync` | Resubmit the stored payload; the outcome lands on the letter, and `Session.flush` waits for it. `force` retries a permanent failure or one out of retries. Raises `ConfigError` when it can't be retried, and `UnikoError` with `kind == "pipeline"` when the ingest queue is full (the attempt isn't counted). |
+| `retry_pending` | `retry_pending(limit=100) -> Awaitable[RetryReport]` | `retry_pending_sync` | Retry pending, retriable letters now, at most `limit`. `RetryReport.retried` lists the ids resubmitted; `refused` lists `RetryRefusal(id, reason)`. |
+| `resolve` | `resolve(id: str, note=None) -> Awaitable[bool]` | `resolve_sync` | Close a letter without retrying it. Only the letter changes, and its payload is dropped. Raises `ConfigError` while this process is retrying it. |
+
+A `DeadLetter` has these fields:
+- `id`, `step`, `error`, `error_kind` (e.g. `"internal"`, `"id_conflict"`);
+- `retriable`, `status`, `retry_count`, `max_retries`;
+- `ingest_type`, `agent_id`, `replayable`;
+- `created_at`, `updated_at`, `next_retry_at`, `resolved_at`, `resolution`.
+
+The typed `uniko.models.DeadLetter` mirrors them. Automatic background retries are opt-in through
+the `dead_letter_auto_retry` config key; see the facade guide.
+
+### `StoreReport`
+
+Returned by `Uniko.inspect_store`. Rust's `StoreReport` holds a `Compatibility`; Python flattens
+it into `compatible`, `differences` and `migrations`, and represents verdicts and migrations as
+strings.
+
+| Field | Type |
+| --- | --- |
+| `info` | `StoreInfo` |
+| `differences` | `list[StoreDifference]` — empty when the config opens the store as is |
+| `compatible` | `bool` |
+| `migrations` | `list["enable_hybrid" \| "rebuild_vector_indexes"]` — empty when any difference is incompatible |
+
+### `StoreInfo`
+
+Returned by `Uniko.store_info`, and as `StoreReport.info`.
+
+| Field | Type |
+| --- | --- |
+| `exists` | `bool` — `False` for a path that isn't a store |
+| `embedding` | `StoredEmbedding` |
+| `hybrid_backfill_pending` | `int \| None` — chunks and observations whose hybrid columns aren't filled yet, on a hybrid store |
+| `migration_in_progress` | `"enable_hybrid" \| "rebuild_vector_indexes" \| None` — a migration that started and hasn't finished |
+
+### `StoredEmbedding`
+
+The embedding setup a store was built with, as stored. Every field is `None` when the store
+doesn't record it.
+
+| Field | Type |
+| --- | --- |
+| `model_id` | `str \| None` — `None` on a store from before the model was recorded |
+| `dimensions` | `int \| None` |
+| `sparse_dimensions` | `int \| None` |
+| `multivector_dimensions` | `int \| None` |
+| `algorithm` | `str \| None` — e.g. `"hnsw_sq(m=16, ef_construction=100)"` |
+| `metric` | `str \| None` — `"cosine"`, `"l2"` or `"dot"` |
+| `embed_alias` | `str \| None` — `"embed/default"`, or `"embed/hybrid"` on a hybrid store |
+| `document_prefix` | `str \| None` |
+| `query_prefix` | `str \| None` |
+| `batch_size` | `int \| None` |
+| `is_hybrid` | `bool` (property) — the store has the sparse or ColBERT column |
+
+### `StoreDifference`
+
+One entry of `StoreReport.differences`.
+
+| Field | Type |
+| --- | --- |
+| `field` | `str` — e.g. `"dimensions"`, `"model_id"`, `"vector_metric"` |
+| `stored` | `str` |
+| `requested` | `str` |
+| `verdict` | `"incompatible" \| "needs_migration" \| "unknown"` — `"unknown"` for a verdict this build doesn't know; the alias is `uniko.types.VerdictName` |
+| `migration` | `"enable_hybrid" \| "rebuild_vector_indexes" \| None` — set when `verdict` is `"needs_migration"` |
+
+### `MigrationReport`
+
+Returned by `Uniko.migrate_store`.
+
+| Field | Type |
+| --- | --- |
+| `migration` | `"enable_hybrid" \| "rebuild_vector_indexes"` |
+| `rows_backfilled` | `int` — existing rows whose new columns were filled |
+| `rows_unfilled` | `int` — rows re-embedded whose new columns still came back empty; passed over in this run, but still counted as pending, so a rerun tries them again |
+| `completed` | `bool` — the store needs nothing further for this config. Still true when the only pending rows are the unfilled ones |
+| `migration_in_progress` | `"enable_hybrid" \| "rebuild_vector_indexes" \| None` — a migration still marked unfinished on the store after the run, which is why `completed` can be false after a run that did its own part; rerun that migration to finish it |
+| `elapsed_secs` | `float` |
 
 The closed sets of strings the API passes (`GoalView.phase`, `RecallItem.kind`,
 `WorkerHealth.status`, and others) have `Literal` aliases in `uniko.types` for type checking.
@@ -1082,11 +1266,11 @@ print(ContextBundle.model_json_schema())               # OpenAPI-ready
 
 | Module | What it holds |
 | --- | --- |
-| `uniko.models.outputs` | Pydantic mirrors of the frozen snapshots — `ContextBundle`, `RecallItem`, `Answer`, `ObserveResult`, `FinalizeReport`, `DeletionReport`, the views, and more. Each has a `from_native(native)` classmethod. |
-| `uniko.models.inputs` | Validated input payloads (`extra="forbid"`) — `GoalSpec`, `TaskSpec`, `ScopeSpec`, `TurnSpec`, `IngestSourceSpec`, `LlmSpecModel` — each with `to_native()`. |
+| `uniko.models.outputs` | Pydantic mirrors of the frozen snapshots — `ContextBundle`, `RecallItem`, `Answer`, `ObserveResult`, `FinalizeReport`, `DeletionReport`, the views, and more. Each has a `from_native(native)` classmethod. It adds models for what the native API returns as dicts: `Capabilities` (with `ModelStatus` entries), `ReadinessFailure` and `AbducedModification`. `ContextBundleModel`, `RecallItemModel` and `RecallSourceModel` are aliases. |
+| `uniko.models.inputs` | Validated input payloads (`extra="forbid"`) — `GoalSpec`, `TaskSpec`, `ScopeSpec`, `TurnSpec`, `ToolCallSpec`, `IngestSourceSpec`, `LlmSpecModel` — each with `to_native()`. `LlmSpecModel` is a union discriminated on `provider` (`"openai"`, `"openai_with_key_env"`, `"llamacpp"`, `"generic"`); validate a raw dict with `LlmSpecAdapter`, and convert any variant with `llm_to_native(spec)`. |
 | `uniko.models.config` | `UnikoConfigModel`, the full configuration `Uniko.config()` returns and `UnikoBuilder.config()` accepts, with nested `EmbeddingConfigModel`, `RerankerConfigModel`, `NlpConfigModel` and `OcrConfigModel`. Unknown keys are rejected. |
-| `uniko.models.adapters` | Free functions (`observe`, `ingest`, `recall_in`, `answer_in`, …) that take a native handle, accept specs, and return models. Each has a `*_sync` twin. |
-| `uniko.models.typed` | `TypedUniko`, `TypedUnikoBuilder`, `TypedAgent`, `TypedSession`, `TypedData`, `TypedGoals` — wrapper handles whose snapshot-returning methods hand back Pydantic models. |
+| `uniko.models.adapters` | Free functions (`observe`, `ingest`, `recall_in`, `answer_in`, `create_goal`, `create_task`) that take a native handle, accept specs, and return models. Each has a `*_sync` twin. |
+| `uniko.models.typed` | `TypedUniko`, `TypedUnikoBuilder`, `TypedAgent`, `TypedSession`, `TypedData`, `TypedGoals` — wrapper handles whose snapshot-returning methods hand back Pydantic models. `TypedAgent.sources` and `TypedUniko.dead_letters` return the typed `TypedSources` and `TypedDeadLetters` wrappers. |
 
 !!! note "Where the overlay passes through"
     Surfaces with no fixed shape — Cypher result rows, rule parameters, raw artifact bytes — pass
@@ -1106,10 +1290,18 @@ Cypher rows (`query`, `query_in`, `run_rule`, `AssumeBuilder.run`) come back as 
 | Int | `int` |
 | Float | `float` |
 | String | `str` |
-| Bytes | `bytes` — **not** readable via Cypher `RETURN`; use [`Data.artifact_bytes`](#data) |
+| Bytes | `bytes` — for an artifact's payload use [`Data.artifact_bytes`](#data) |
+| Vector | `list[float]` |
+| Sparse vector | `{"indices": list[int], "values": list[float]}` |
+| Binary vector | `bytes` |
 | List | `list` |
 | Map / record | `dict` |
-| DateTime | `datetime` (tz-aware) |
+| Node | `{"id", "labels", "properties"}` dict |
+| Edge | `{"id", "type", "start", "end", "properties"}` dict |
+| Path | `{"nodes", "edges"}` dict |
+| DateTime | `datetime` (tz-aware UTC) |
+| Date, duration or other temporal value with no instant | its string form |
+| Anything else | its string form — never `None`, which only a database null is |
 
 ---
 
@@ -1134,13 +1326,15 @@ Each is an `issubclass` of `UnikoError` and carries a fixed `.kind`.
 
 | Class | `.kind` | When |
 | --- | --- | --- |
-| `ConfigError` | `"config"` | `answer()` without an LLM; using a handle after `shutdown`; bad configuration. |
+| `ConfigError` | `"config"` | `answer()` without an LLM; using a handle after `shutdown`; bad configuration; a store open for writing elsewhere. |
 | `LlmError` | `"llm"` | The generation model failed. |
 | `UnikoTimeoutError` | `"timeout"` | An operation timed out. |
 | `ConflictError` | `"conflict"` | Transient SSI / antidependency abort — **retriable**. |
-| `UnsupportedError` | `"unsupported"` | No extractor for the modality. |
+| `IdConflictError` | `"id_conflict"` | A stable id reused for different content: a message, artifact or call id, a source revision with changed bytes, a repeated id inside one `commit_unit`, or a call id under another performer. **Not** retriable. |
+| `UnsupportedError` | `"unsupported"` | No extractor for the modality, an extractor mode the modality or provider can't use, a `remote_storage` URL on an unsupported provider, or `inspect_store` / `migrate_store` on a URI other than `s3://`, `gs://` or `az://`. |
 | `ReadinessError` | `"not_ready"` | A `require()`d model or stage is unavailable; `.failures` lists each. |
 | `DegradedError` | `"degraded"` | A `strict=True` recall had a stage fall back or fail; `.diagnostics` lists them as dicts. |
+| `IncompatibleStoreError` | `"incompatible_store"` | The store can't be opened (or migrated) with this config as is. A subclass of `ConfigError`, so `except ConfigError` catches it, but its `.kind` is `"incompatible_store"`. `.differences` lists dicts with `field`, `stored`, `requested`, `verdict` (`"incompatible"`, `"needs_migration"` or `"unknown"`; `uniko.types.VerdictName`) and `migration`; `.compatible` is a bool and `.migrations` the migration names that would fix it (empty when any difference is incompatible). |
 
 !!! note "`UnikoTimeoutError`, formerly `uniko.TimeoutError`"
     The class was renamed so that `from uniko import *` no longer shadows the built-in

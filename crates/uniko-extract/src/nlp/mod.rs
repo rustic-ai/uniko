@@ -70,10 +70,7 @@ impl NlpPipeline {
     pub async fn try_new(kb: &KnowledgeBase) -> Option<Self> {
         let runtime = kb.model_runtime()?;
         let model = match runtime.nlp_model(NLP_ALIAS).await {
-            Ok(m) => {
-                kb.note_model_loaded(NLP_ALIAS);
-                m
-            }
+            Ok(m) => m,
             Err(e) => {
                 tracing::debug!(error = %e, alias = NLP_ALIAS, "xervo NlpModel unavailable");
                 return None;

@@ -17,7 +17,9 @@ use tokio::task::JoinHandle;
 use uniko_pipes::cancel::ShutdownCoordinator;
 use uniko_pipes::circuit_breaker::{CircuitBreaker, CircuitState};
 use uniko_pipes::config::PipelineConfig;
-use uniko_pipes::dead_letter::DeadLetterQueue;
+use uniko_pipes::dead_letter::{
+    DeadLetter, DeadLetterCounts, DeadLetterFilter, DeadLetterQueue, RetryPolicy,
+};
 use uniko_pipes::health::{HealthTracker, PipelineHealth};
 use uniko_pipes::metrics::register_pipeline_metrics;
 use uniko_pipes::step::Step;
@@ -25,7 +27,9 @@ use uniko_pipes::types::{ConsolidationTask, IngestTask};
 use uniko_store::KnowledgeBase;
 
 use self::consolidation_worker::ConsolidationWorker;
-use self::ingest_worker::IngestWorker;
+use self::ingest_worker::{IngestJob, IngestWorker};
+
+mod retry;
 
 /// Root orchestrator for all pipeline workers.
 ///
@@ -50,7 +54,7 @@ use self::ingest_worker::IngestWorker;
 /// ```
 pub struct PipelineSystem {
     shutdown: ShutdownCoordinator,
-    ingest_tx: mpsc::Sender<IngestTask>,
+    ingest_tx: mpsc::Sender<IngestJob>,
     consolidation_tx: mpsc::Sender<ConsolidationTask>,
     llm_breaker: Arc<CircuitBreaker>,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -60,6 +64,31 @@ pub struct PipelineSystem {
     ingest_inflight: Arc<AtomicUsize>,
     started_at: Instant,
     config: PipelineConfig,
+    retrier: Arc<retry::Retrier>,
+    /// Cancels every worker when the system is dropped, even without
+    /// [`shutdown`](Self::shutdown): otherwise the retry scheduler, which
+    /// holds its own sender and store handle, would keep running.
+    _cancel_on_drop: tokio_util::sync::DropGuard,
+}
+
+/// What [`PipelineSystem::retry_pending`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RetryReport {
+    /// Letters resubmitted for a retry.
+    pub retried: Vec<String>,
+    /// Letters that could not be resubmitted, with the reason.
+    pub refused: Vec<RetryRefusal>,
+}
+
+/// A dead letter [`PipelineSystem::retry_pending`] could not resubmit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RetryRefusal {
+    /// The letter's id.
+    pub id: String,
+    /// Why it was not resubmitted.
+    pub reason: String,
 }
 
 impl PipelineSystem {
@@ -78,7 +107,14 @@ impl PipelineSystem {
             config.circuit_failure_threshold,
             config.circuit_recovery_ms,
         ));
-        let dlq = Arc::new(DeadLetterQueue::new(kb.clone()));
+        let dlq = Arc::new(DeadLetterQueue::with_policy(
+            kb.clone(),
+            RetryPolicy::new(
+                config.dead_letter_max_retries,
+                config.dead_letter_retry_backoff_ms,
+                config.dead_letter_retry_max_backoff_ms,
+            ),
+        ));
 
         // Bounded channels with backpressure.
         let (ingest_tx, ingest_rx) = mpsc::channel(config.ingest_queue_capacity);
@@ -99,7 +135,6 @@ impl PipelineSystem {
             llm_breaker.clone(),
             dlq.clone(),
             ingest_health.clone(),
-            config.dead_letter_max_retries,
             consolidation_tx.clone(),
             ingest_inflight.clone(),
         );
@@ -115,17 +150,40 @@ impl PipelineSystem {
         );
         let consolidation_handle = tokio::spawn(consolidation_worker.run());
 
+        let retrier = Arc::new(retry::Retrier::new(
+            dlq,
+            ingest_tx.clone(),
+            ingest_inflight.clone(),
+            ingest_health.clone(),
+        ));
+        // Return retries a stopped process left mid-flight to `pending`
+        // now, so they can be resolved or retried without waiting for this
+        // pipeline's first retry.
+        let reset = retrier.clone();
+        tokio::spawn(async move { reset.reset_interrupted_once().await });
+        let mut workers = vec![ingest_handle, consolidation_handle];
+        if config.dead_letter_auto_retry {
+            workers.push(
+                retrier
+                    .clone()
+                    .spawn_scheduler(shutdown.ingest_token(), config.dead_letter_retry_backoff_ms),
+            );
+        }
+
+        let cancel_on_drop = shutdown.cancel_on_drop();
         Self {
             shutdown,
             ingest_tx,
             consolidation_tx,
             llm_breaker,
-            workers: Mutex::new(vec![ingest_handle, consolidation_handle]),
+            workers: Mutex::new(workers),
             ingest_health,
             consolidation_health,
             ingest_inflight,
             started_at: Instant::now(),
             config,
+            retrier,
+            _cancel_on_drop: cancel_on_drop,
         }
     }
 
@@ -138,13 +196,14 @@ impl PipelineSystem {
     ///
     /// Returns [`uniko_store::UnikoError::Pipeline`] on channel failure.
     pub fn submit_ingest(&self, task: IngestTask) -> Result<(), uniko_store::UnikoError> {
-        self.ingest_tx
-            .try_send(task)
-            .map_err(|e| uniko_store::UnikoError::Pipeline(format!("ingest channel: {e}")))?;
-        // Count the item only once accepted; the worker decrements when it
-        // finishes (see `IngestWorker`'s drop guard).
-        self.ingest_inflight.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        self.submit_job(IngestJob {
+            task,
+            retry_of: None,
+        })
+    }
+
+    fn submit_job(&self, job: IngestJob) -> Result<(), uniko_store::UnikoError> {
+        self.retrier.submit_job(job)
     }
 
     /// Await until every submitted ingest item has finished processing.
@@ -171,6 +230,74 @@ impl PipelineSystem {
         self.consolidation_tx
             .try_send(task)
             .map_err(|e| uniko_store::UnikoError::Pipeline(format!("consolidation channel: {e}")))
+    }
+
+    /// The pipeline's dead-letter queue, for listing, counting and
+    /// resolving letters.
+    #[must_use]
+    pub fn dead_letter_queue(&self) -> &DeadLetterQueue {
+        &self.retrier.dlq
+    }
+
+    /// Dead letters matching `filter`, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`uniko_store::UnikoError::Storage`] on graph failure.
+    pub async fn dead_letters(
+        &self,
+        filter: &DeadLetterFilter,
+    ) -> Result<Vec<DeadLetter>, uniko_store::UnikoError> {
+        self.retrier.dlq.list(filter).await
+    }
+
+    /// How many dead letters are in each status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`uniko_store::UnikoError::Storage`] on graph failure.
+    pub async fn dead_letter_counts(&self) -> Result<DeadLetterCounts, uniko_store::UnikoError> {
+        self.retrier.dlq.counts().await
+    }
+
+    /// Retry dead letter `id`: count the attempt and resubmit its stored
+    /// payload unchanged. The outcome lands on the letter once the item is
+    /// processed (resolved, pending again, or exhausted); a following
+    /// [`quiesce`](Self::quiesce) waits for it.
+    ///
+    /// `force` retries a letter whose failure a retry can't normally fix,
+    /// or one that has used all its retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`uniko_store::UnikoError::Config`] when the letter can't be
+    /// retried (see [`DeadLetterQueue::begin_retry`]), or
+    /// [`uniko_store::UnikoError::Pipeline`] when the ingest queue is full;
+    /// the attempt is then not counted.
+    pub async fn retry_dead_letter(
+        &self,
+        id: &str,
+        force: bool,
+    ) -> Result<(), uniko_store::UnikoError> {
+        self.retrier.retry(id, force).await
+    }
+
+    /// Retry up to `limit` pending dead letters whose failure a retry can
+    /// fix, oldest first, regardless of their backoff.
+    ///
+    /// Stops early, leaving the rest pending, if the ingest queue fills.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`uniko_store::UnikoError::Storage`] when the letters can't
+    /// be read.
+    pub async fn retry_pending(
+        &self,
+        limit: usize,
+    ) -> Result<RetryReport, uniko_store::UnikoError> {
+        self.retrier
+            .retry_due(chrono::DateTime::<chrono::Utc>::MAX_UTC, limit)
+            .await
     }
 
     /// Query aggregate pipeline health.

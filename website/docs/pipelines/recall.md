@@ -104,9 +104,9 @@ coverage = 0.4 · facet_coverage + 0.3 · mean_score + 0.3 · diversity
 where `facet_coverage` is a proxy — `min(count of retrieved Semantic/Procedural items,
 facet_count) / facet_count`, not a per-item entity match — `mean_score` is the average fused
 score, and `diversity` counts
-distinct tiers in the bundle (out of 5). The `0.4 / 0.3 / 0.3` weighting was tuned on LoCoMo
-to balance breadth (facet coverage), answer quality (mean score), and tier diversity; adjust
-it if your workload weights those differently. If `coverage ≥ 0.75` **and** at least 3 items
+distinct tiers in the bundle (out of 5). The `0.4 / 0.3 / 0.3` weighting is the spec's (§IX)
+balance of breadth (facet coverage), answer quality (mean score), and tier diversity; it is a
+constant in `compute_coverage`, not a config knob. If `coverage ≥ 0.75` **and** at least 3 items
 were found, Phase 1 is "sufficient" and the cascade returns immediately with
 `phase1_only = true` — the heavier phases never run.
 
@@ -257,8 +257,9 @@ Phase 1 Facts can still influence the Phase 3 result, via one of three strategie
 === "Merge"
 
     The top 3 Phase 1 Facts are merged into the Phase 3 bundle by score (max-score
-    deduplication per node id). This is the current best-known stack — conv-26 → 0.750,
-    conv-30 → 0.802 with the rest of the stack.
+    deduplication per node id). This was the best strategy in the v1 ablations — conv-26 →
+    0.750, conv-30 → 0.802 with the rest of the stack — before `Boost` beat it and became the
+    `UnikoConfig` default.
 
 === "Off"
 
@@ -278,13 +279,17 @@ pub struct ContextBundle {
     pub phase1_only: bool,   // cascade exited after Phase 1
     pub phase2_only: bool,   // cascade exited after Phase 2
     pub coverage: f64,
+    pub diagnostics: Vec<Diagnostic>, // each stage that ran, fell back or failed
 }
 ```
 
-Finally, access control. `recall` wraps the cascade and applies `RecallConfig.viewer`:
+Finally, redaction and access control. `recall` wraps the cascade, first dropping
+soft-forgotten (redacted) content for every caller, then applying `RecallConfig.viewer`:
 
 - `ViewerScope::As(viewer)` filters the bundle through `policy::filter_bundle` so the viewer
   only sees the Facts, Observations, Messages and Chunks their visibility (private/team/org) admits.
+- `ViewerScope::AsParticipant(id)` resolves the participant's viewer inside `recall`, then
+  filters the same way.
 - `ViewerScope::Unrestricted` (default) does no filtering — a *named, greppable* fail-open
   choice for trusted internal/bench callers. It logs a warning if the unfiltered bundle
   contains policy-scoped items, so production callers serving a specific
@@ -292,7 +297,8 @@ Finally, access control. `recall` wraps the cascade and applies `RecallConfig.vi
 
 !!! warning "Set a viewer when serving a participant"
     The default is fail-open by design, but it is the wrong default for any caller answering
-    on behalf of a specific user. Pass `ViewerScope::As(viewer)` to scope visibility.
+    on behalf of a specific user. Pass `ViewerScope::As(viewer)` (or
+    `ViewerScope::AsParticipant(id)`) to scope visibility.
 
 ---
 

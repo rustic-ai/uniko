@@ -1,6 +1,6 @@
 //! Diagnose broken graph structure in conv-30 KB.
 //!
-//! Run: cargo nextest run -p uniko-bench --test diagnostics graph_debug --nocapture --run-ignored all
+//! Run: cargo nextest run -p uniko-bench --test integration diagnostics::graph_debug --nocapture --run-ignored all
 
 use crate::common::{load_kb, load_kb_no_schema};
 use uniko_store::KnowledgeBase;

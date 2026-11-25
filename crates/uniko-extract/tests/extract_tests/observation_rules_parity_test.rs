@@ -6,7 +6,7 @@
 //! Gated on the `onnx` feature — both `nlp` and `observations::rules_engine`
 //! are themselves ONNX-gated.
 //!
-//! Run: cargo nextest run -p uniko-extract --features onnx --test observation_rules_parity_test
+//! Run: cargo nextest run -p uniko-extract --features onnx --test integration observation_rules_parity_test::
 
 #![cfg(feature = "onnx")]
 

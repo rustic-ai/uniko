@@ -5,7 +5,7 @@
 //! policy/access-control filtering. Each former `tests/<name>.rs` file is
 //! included as a module so the suite links once instead of once per file.
 //!
-//! Run: `cargo nextest run -p uniko-memory --test lifecycle_e2e`
+//! Run: `cargo nextest run -p uniko-memory --test integration lifecycle_e2e::`
 
 mod consolidation_e2e;
 mod policy_e2e;

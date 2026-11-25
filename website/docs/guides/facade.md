@@ -71,7 +71,8 @@ let memory = Uniko::builder()
 | `.readiness_timeout(Duration)` | How long `build()` waits for the required models to load. |
 | `.streaming(bool)` | Enables the fire-and-forget `submit`/`flush` lane. |
 | `.scope_to_agent()` / `.scope(RecallScope)` | Default read visibility. |
-| `.extractor(Arc<dyn ModalityExtractor>)` | A pluggable image/audio/video extractor — implement `modality()` and `extract()` on `uniko_extract::ingest::modality::ModalityExtractor` (`Send + Sync + Debug`). Without one, image/audio/video sources return `UnikoError::Unsupported`. |
+| `.extractor(Arc<dyn ModalityExtractor>)` | An image/audio/video extractor: a `TextExtractor` over your function, or your own `ModalityExtractor` (`prepare` outside the transaction, `apply_in_tx` inside it). Without one, image/audio/video sources return `UnikoError::Unsupported`. See [Images, Audio and Video](multimodal.md). |
+| `.model_extractor(ModelExtractor)` | An extractor backed by catalog models: OCR, captions, document extraction or transcription by alias, and a composer for video. `build()` refuses a mode the modality or catalog can't serve. See [Images, Audio and Video](multimodal.md#models-from-the-catalog). |
 | `.raw_config(UnikoConfig)` | Drop in a fully-tuned config (see [Configuration](configuration.md)). |
 
 **`LlmSpec`** picks the generation model: `openai(alias, model, base_url)` (reads `OPENAI_API_KEY`),
@@ -130,8 +131,8 @@ the load state in `capabilities()` is shared across them.
 
 One layer down, `SharedRuntime::build(&config, extra, policy)` with
 `KnowledgeBase::in_memory_shared` / `open_shared` does the same. `build_shared_runtime` and
-`open_with_runtime` are deprecated: they skip that check, and `model_status()` returns `None` for
-a store opened that way.
+`open_with_runtime` are deprecated: they skip that check, and a store opened that way does not
+know its catalog, so `model_status()` lists every alias the runtime holds.
 
 !!! note "Capabilities, not wiring"
     You never construct a `KnowledgeBase`, a pipeline, or a model catalog. The builder is the only
@@ -148,6 +149,27 @@ let mut session = agent.session("chat-42"); // a conversation thread
 
 One instance can mint many agents (`alice`, `bob`); each can be scoped to what *it* may see. A session
 groups turns and lets attachments attach to the right message.
+
+### Register an agent
+
+`memory.agent(id)` only makes a handle; nothing is written. To record an agent's identity before it
+does anything, register it:
+
+```rust
+use uniko_memory::{AgentRegistration, EnsureOutcome};
+
+let reg = agent.register(AgentRegistration::new().name("Reporter")).await?;
+assert_eq!(reg.outcome, EnsureOutcome::Created); // later calls return Existing
+```
+
+Registration writes one `Participant` of kind `agent` and nothing else: no session, message or
+action. It's idempotent and safe to call concurrently, and the participant survives a reopen. A
+participant that already exists keeps its name, metadata and memberships. If it has kind `unknown`
+(ingest and `add_org_member` create participants that way), it becomes `agent` and the outcome is
+`Upgraded`. A later turn from the agent never sets the kind back to `unknown`.
+
+Registering is optional. Goals, tasks, actions and tool calls create the agent's participant
+themselves, so `agent.goals().create(...)` works on a fresh store.
 
 ---
 
@@ -220,6 +242,89 @@ A degraded stage in streamed work (see [Ingest diagnostics](#ingest-diagnostics)
 report on, so it is counted in `memory.health()`: `ingest.degradations` maps `stage:code` to a
 count since start, over items that succeeded (a failed item goes to the dead-letter queue).
 
+### Dead letters — recovering failed streamed items
+
+A streamed item whose ingest fails is kept as a dead letter, with its payload, so it can be
+inspected, retried and resolved:
+
+```rust
+use uniko_memory::{DeadLetterFilter, DeadLetterStatus};
+
+let dl = memory.dead_letters();
+for letter in dl.list(&DeadLetterFilter::new().status(DeadLetterStatus::Pending)).await? {
+    println!("{} failed in {}: {} ({:?})", letter.id, letter.step, letter.error, letter.error_kind);
+}
+dl.retry(&first, false).await?;             // resubmit one; its outcome lands on the letter
+let report = dl.retry_pending(100).await?;  // or every pending one that can succeed
+session.flush().await?;                     // waits for the retries just started
+dl.resolve(&second, Some("source was corrupt")).await?;  // give up on another, keeping the record
+```
+
+| Status | Meaning |
+|---|---|
+| `pending` | Waiting for a retry; `next_retry_at` says when one is due. |
+| `retrying` | A retry has been resubmitted. |
+| `exhausted` | Out of retries, or failed in a way a retry can't fix. |
+| `resolved` | A retry succeeded (`resolution = "retried"`), or `resolve` was called. |
+| `legacy` | Written by an earlier uniko that didn't keep payloads: can be resolved, not retried. |
+
+**Which failures can be retried.**
+- **Permanent:** an id conflict, an unsupported or invalid payload, an incompatible store, and
+  configuration, schema or Locy errors fail the same way every time. They're stored `exhausted` with `retriable = false`,
+  and `retry` refuses them unless `force` is set.
+- **Retriable:** every other kind, for example model, timeout, storage, search or internal
+  failures.
+- **No payload:** a payload that can't be stored, such as a file path that isn't valid UTF-8,
+  leaves a letter that is kept for inspection but is `exhausted` and not replayable.
+
+**What a retry does.**
+- It resubmits the stored payload unchanged, so a message keeps its id, sender, source and the
+  agent it was submitted under.
+- `submit_source` records no agent, so a document or file letter has `agent_id = None`.
+- Ingest dedups by id and content, so replaying an item that partly landed doesn't write it twice.
+
+**The retry limit.**
+- Each retry counts, and a letter stops at `dead_letter_max_retries` (default 3).
+- The limit is fixed on each letter when it's stored, so changing the config later doesn't affect
+  existing letters.
+- With a limit of 0, retriable failures are stored `exhausted`.
+- A retry that never ran isn't counted: one that couldn't be queued because the ingest queue was
+  full, or one cut short by shutdown.
+- A retry interrupted by a crash does count, because the payload may be what crashed the process.
+  Without that, a payload that kills the process would be retried on every restart, forever.
+
+**Restarts.** Letters persist. When a streaming instance starts, any letter left `retrying` by a
+process that stopped goes back to `pending`, due at once, or to `exhausted` if the interrupted
+attempt was its last. A non-streaming instance can still resolve such a
+letter.
+
+**Resolving.**
+- `resolve` changes only the letter, and drops its stored payload.
+- It refuses a letter whose retry this process is still running.
+- Resolved letters are kept. There's no purge yet.
+
+**Health.** `memory.health()` counts `dead_lettered`, `retries` and `retries_succeeded` since
+start. `dl.counts()` gives the stored totals per status.
+
+**Handles.** Like an `Agent` or `Session`, a `DeadLetters` handle shares the instance, so drop it
+before `memory.shutdown()`.
+
+**Automatic retries** are off by default. With `dead_letter_auto_retry = true`, a background task
+retries pending, retriable letters once their backoff has elapsed:
+- the first retry waits `dead_letter_retry_backoff_ms` (default 30 s);
+- each later retry waits twice as long, up to `dead_letter_retry_max_backoff_ms` (default 1 h);
+- the task runs every backoff interval, at most once a second and at least once a minute;
+- each pass takes at most 32 letters, and letters still stop at the retry limit;
+- permanent failures are never retried automatically.
+
+The schedule is stored on the letters, so it carries across restarts. `flush` waits for a retry
+the task has already started, but not for one that isn't due yet. The task stops when the
+instance shuts down or is dropped. A store opens in one handle at a time, within a process and
+across processes (see [Changing the Embedding Model](model-migration.md#migrate-in-place)), so only
+one instance ever retries a store's dead letters.
+
+Binary payloads are stored as JSON, about three to four times their size, until they're resolved.
+
 ### Ingest diagnostics
 
 Ingest is best-effort in the same way recall is: without the NLP model, rules extract entities
@@ -238,6 +343,7 @@ reports nothing. The free function `ingest_source` collects nothing; use `Sessio
 | `pdf_extraction` | `failed` / `tiered_failed` or `extraction_failed`, with the artifact id as `target`: it is stored without (or with fewer) chunks. The id is the one the source was given (`IngestSource` `with_id`) or a generated one, so it is not a secret only if yours is not. |
 | `artifact_embedding` | `failed` / `pool_failed`: the artifact's own vector is left for the backfill migration. |
 | `extractor_post_commit` | `failed` / `post_commit_failed`, with the artifact id as `target`: a registered extractor's post-commit step failed. |
+| `media_extraction` | `skipped` / `no_audio_track`, with the transcription alias as `target`: a video extractor's composer returned no audio track while `transcribe` is set. |
 
 Whether models loaded at startup is reported by [`capabilities()`](#9-check-what-is-available),
 not per call. To refuse to run without a stage at all, [require it at
@@ -409,7 +515,7 @@ for item in &bundle.items {
         item.kind,                                       // Chunk / Fact / Observation / …
         if item.kind.is_derived() { " derived" } else { "" },
         item.content);
-    for src in &item.sources { /* Message | Attachment | Document — the lineage */ }
+    for src in &item.sources { /* Message | Attachment | Document | Session | Tool — the lineage */ }
 }
 ```
 
@@ -427,6 +533,7 @@ the document fetch:
 ```rust
 let view  = agent.data().artifact("spec.pdf").await?;        // metadata + reassembled text
 let bytes = agent.data().artifact_bytes("spec.pdf").await?;  // the original blob
+let media = agent.data().media_sources("photo-1").await?;     // the image/recording a text came from
 let msg   = agent.data().message("m-12").await?;             // sender / session / attachments
 ```
 
@@ -504,7 +611,8 @@ supporting evidence it's soft-invalidated with a recorded reason, not silently d
 
 - the optional engine features this build compiled in;
 - the modalities with a registered extractor;
-- each catalog model alias with its load state (`NotLoaded`, `Loaded` or `Failed` with the error);
+- each catalog model alias with its load state (`NotLoaded`, `Loading`, `Loaded` or `Failed` with
+  the error), as the model runtime reports it;
 - the answer alias, and whether OCR is compiled in and enabled.
 
 ```rust
@@ -515,11 +623,12 @@ for model in caps.models.unwrap_or_default() {
 ```
 
 Prefetch at open (with the default `PrefetchPolicy::Eager`) loads each alias in turn and keeps
-going past a failure, which it logs at `warn` and records as `Failed`; a later successful use
-clears it. A hybrid embedder that only uni-db's auto-embedding on write has used reads as
-`NotLoaded` until the first recall. `extractors` lists only extractors you registered; built-in
+going past a failure, which it logs at `warn`. The runtime records it, and a timed-out load, as
+`Failed` until a later load succeeds. The state counts every load, including one made only by
+uni-db's auto-embedding on write. `extractors` lists only extractors you registered; built-in
 text, code, markup, structured and PDF ingest are always available. Model entries never carry provider options; credentials show only as the
-`api_key_env` variable name and `base_url` loses any userinfo and query. The same per-alias report
+`api_key_env` variable name, and `base_url` (the configured endpoint, or a remote provider's
+default one) loses any userinfo and query. The same per-alias report
 is available one layer down as `KnowledgeBase::model_status()`.
 
 ### Require models at startup
@@ -554,8 +663,8 @@ if let Err(UnikoError::NotReady(failures)) = &built {
 | `Nlp` | `nlp/default` loads and the NLP pipeline starts (needs the `onnx` feature). |
 | `Ocr` | `pdf-ocr` is compiled in, `ocr.enabled` is set, and `ocr/default` loads. |
 | `Generator` | The answer alias is set and loads. |
-| `Extractor(modality)` | An extractor is registered for the modality. |
-| `Accelerated(alias)` | The alias loads, and a non-CPU execution provider it asks for is among its active providers. This catches a build without the accelerator: `["cuda", "cpu"]` on a build without `gpu-cuda` runs on CPU and fails as `not_accelerated`. It cannot yet catch a GPU build whose GPU is missing or broken, because uni-xervo reports the providers compiled in, not the ones that attached (rustic-ai/uni-xervo#64). Only local ONNX embedding, hybrid-embedding and reranking models report providers; any other alias fails as `not_supported`. |
+| `Extractor(modality)` | An extractor is registered for the modality, and a model extractor's aliases load. |
+| `Accelerated(alias)` | The alias loads, and a non-CPU execution provider it asks for is among the providers its sessions attached. `["cuda", "cpu"]` fails as `not_accelerated` when the model runs on CPU: on a build without `gpu-cuda`, on a GPU build whose CUDA libraries or driver are missing, or when the accelerator's output disagreed with CPU at load (uni-xervo then moves the model to CPU). Every `local/onnx` model reports its providers except document extraction; any other alias (a remote model, whisper.cpp) fails as `not_supported`. |
 
 A requirement the catalog, the compiled features or the registered extractors cannot meet fails
 before the store is created, without contacting any provider. The rest are checked after the store
@@ -565,8 +674,16 @@ the default `Eager` policy `build()` still waits for the rest afterwards. When a
 `build()` shuts the store down before returning, so a persistent path can be opened again.
 
 A remote model (an OpenAI-compatible endpoint, a hosted embedder) counts as loaded once its client
-is built and its API-key variable is set: nothing contacts the server, so readiness does not prove
-it is reachable (rustic-ai/uni-xervo#66).
+is built and its API-key variable is set: by default nothing contacts the server. Add
+`.verify_remote(true)` to the builder to also check that each required remote alias is reachable
+and accepts its credential. Each gets one cheap authenticated request (a model lookup for OpenAI
+and most providers, `/health` for llama.cpp), at most eight at a time, within `readiness_timeout`.
+A failure is `verification_failed`, and its `error` starts with the reason: `unauthorized`,
+`unreachable`, `not found`, `rate limited`, `timed out`, `unavailable`, `configuration error` or
+`failed`. A check still running when `readiness_timeout` runs out is cancelled and reported as
+`timed_out`.
+The setting also applies to every later `check_readiness` on the instance, so a frequent health
+probe makes these requests each time.
 
 Each failure carries a stable `code`:
 
@@ -580,6 +697,7 @@ Each failure carries a stable `code`:
 | `timed_out` | The model had not loaded when the timeout ran out. |
 | `nlp_unavailable` | The NLP models loaded but the pipeline could not start. |
 | `not_accelerated` | None of the accelerators the model asked for is among its active providers. |
+| `verification_failed` | With `verify_remote`, the remote endpoint could not be reached or rejected the credential; `error` holds the reason. |
 | `not_supported` | The check cannot be made for this model (an `Accelerated` requirement on a model that does not report providers). |
 
 `memory.check_readiness(&requirements, timeout).await` runs the same check on a built instance,
@@ -669,9 +787,9 @@ async fn main() -> anyhow::Result<()> {
 | Identity | `memory.agent(id)` / `agent.session(id)` | `Agent` / `Session` |
 | Write | `session.observe(Turn)` / `session.ingest(IngestSource)` | `ObserveResult` / `IngestOutcome` |
 | Finalize | `session.finalize()` / `agent.finalize_session(id)` | `FinalizeReport` |
-| Compile | `agent.consolidate()` | `CycleStats` |
+| Compile | `agent.consolidate()` / `consolidate_with(options)` | `ConsolidationReport` (`cycle`, `procedures`, `topics`) |
 | Read | `agent.recall` / `answer` / `query` (+ `_in`) | `ContextBundle` / `Answer` / `Vec<Record>` |
-| Retrieve | `agent.data().message` / `artifact` / `artifact_bytes` | `Option<…View>` / `Option<Vec<u8>>` |
+| Retrieve | `agent.data().message` / `artifact` / `artifact_bytes` / `media_sources` | `Option<…View>` / `Option<Vec<u8>>` / `Vec<MediaSourceView>` |
 | Plan | `agent.goals()` (create / transition / read) | `GoalView` / `TaskView` / `GoalContext` |
 | Reason | `agent.define_rule` / `run_rule` / `assume` / `abduce` | rows / derivations |
 | Curate | `forget_*` / `delete_*` / `purge` | `DeletionReport` |

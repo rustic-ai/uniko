@@ -749,10 +749,16 @@ impl KnowledgeBase {
         limit: i64,
         allow: Option<&[NodeId]>,
     ) -> Result<Vec<ScoredRow>> {
+        // An empty allow-set admits nothing, as on every other channel. Do
+        // not fall through to the unfiltered `null` below: that would make a
+        // scope that matches nothing return out-of-scope rows.
+        if allow.is_some_and(<[NodeId]>::is_empty) {
+            return Ok(Vec::new());
+        }
         let session = self.db.session();
         // The proc's 5th arg is a SQL filter; pass `_vid IN (…)` for an
         // allow-set (applied during retrieval), else the literal `null`.
-        let filter_allow = allow.filter(|ids| !ids.is_empty());
+        let filter_allow = allow;
         let filter_arg = if filter_allow.is_some() {
             "$filter"
         } else {
@@ -790,9 +796,11 @@ impl KnowledgeBase {
     /// no token vectors (not embedded yet, or a null column) is left out;
     /// the caller decides how to rank it.
     ///
-    /// This does not go through `uni.vector.query`, whose `_vid IN (…)`
-    /// filter is not applied to unflushed rows of a multi-vector column
-    /// (rustic-ai/uni-db#343).
+    /// This reads the candidates directly rather than going through
+    /// `uni.vector.query`: a rerank needs exact scores for exactly these
+    /// ids, which a filtered top-k search does not promise. (Before uni-db
+    /// 5.3 that search also leaked unflushed rows past its filter,
+    /// rustic-ai/uni-db#343.)
     ///
     /// `label`/`colbert_field`/`content_field` are trusted identifiers.
     /// Returns an empty vec when either input is empty.
@@ -1477,5 +1485,35 @@ mod maxsim_tests {
         let q = vec![vec![1.0, 0.0]];
         let d = [1.0_f32, 0.0, 0.0];
         assert!(maxsim(&q, &[&d], VectorMetricChoice::Cosine).is_err());
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use crate::config::UnikoConfig;
+    use crate::storage::KnowledgeBase;
+
+    /// A scope that matches nothing yields no sparse hits. It must not fall
+    /// back to an unfiltered query, which would return out-of-scope rows
+    /// (issue #70). The store has no sparse column, so reaching the query at
+    /// all would fail: an `Ok` with no rows proves it never ran.
+    #[tokio::test]
+    async fn an_empty_allow_set_returns_no_sparse_hits() {
+        let kb = match KnowledgeBase::in_memory(UnikoConfig::default()).await {
+            Ok(kb) => kb,
+            Err(e) => return eprintln!("skipping: store unavailable: {e}"),
+        };
+        let rows = kb
+            .recall_sparse_search("Chunk", "sparse_embedding", "text", "q", 5, Some(&[]))
+            .await
+            .expect("an empty scope runs no query");
+        assert!(rows.is_empty());
+        let unscoped = kb
+            .recall_sparse_search("Chunk", "sparse_embedding", "text", "q", 5, None)
+            .await;
+        assert!(
+            unscoped.is_err(),
+            "without a sparse column the query itself fails"
+        );
     }
 }

@@ -74,6 +74,10 @@ pub struct PreparedToolCall {
     pub chain_in_session: bool,
     /// Who may see the call's result (`private:{id}`, `team:{id}`, …).
     pub visibility: Option<String>,
+    /// The participant that performed the call, when it is not the batch's
+    /// default (the turn's sender, or the recording session's agent). It is
+    /// created as kind `unknown` if it doesn't exist yet.
+    pub performer_id: Option<String>,
 }
 
 impl PreparedToolCall {
@@ -144,25 +148,37 @@ pub fn payload_hash(bytes: &[u8]) -> String {
 /// Each call becomes an Action linked `PERFORMED_BY` the performer,
 /// `IN_SESSION`, `TRIGGERED_BY` its message and `NEXT_ACTION` from the one
 /// before it; its payload is applied as an artifact linked `PRODUCED`. A
-/// call whose `action_id` already exists is a replay when its payload hash
-/// matches and nothing is written; otherwise the call is refused.
+/// call whose `action_id` already exists is a replay, with nothing written,
+/// when its payload hash matches and its stored `PERFORMED_BY` participant
+/// is the performer this call resolves to; otherwise the call is refused.
 ///
 /// # Errors
 ///
 /// - [`UnikoError::IdConflict`] when an `action_id` exists with a
-///   different result.
+///   different result or performer (including a performer since deleted).
 /// - any underlying read or write error.
 pub async fn write_tool_calls_in_tx(
     kb: &KnowledgeBase,
     tx: &uniko_store::Transaction,
     calls: &[PreparedToolCall],
     ctx: ToolWriteCtx,
+    performers: &HashMap<String, NodeId>,
     seen: &mut UnitArtifactSeen,
 ) -> uniko_store::Result<Vec<ToolCallOutcome>> {
     let mut out = Vec::with_capacity(calls.len());
     let mut prev_in_batch: Option<NodeId> = None;
     for call in calls {
-        // Replay or conflict, decided before any write.
+        let performer_nid = match &call.performer_id {
+            Some(id) => *performers.get(id).ok_or_else(|| {
+                UnikoError::Internal(format!(
+                    "tool call '{}': performer '{id}' was not resolved before the write",
+                    call.action_id
+                ))
+            })?,
+            None => ctx.performer_nid,
+        };
+        // Replay or conflict, decided before any write: the same id is a
+        // replay only with the same result and the same performer.
         if let Some((nid, props)) = kb
             .get_node_by_ext_id_in_tx(tx, labels::ACTION, "action_id", &call.action_id)
             .await?
@@ -171,7 +187,8 @@ pub async fn write_tool_calls_in_tx(
                 Some(Value::String(h)) => Some(h.as_str()),
                 _ => None,
             };
-            if stored != call.payload_hash.as_deref() {
+            let performed_by = kb.action_performer_in_tx(tx, nid).await?;
+            if stored != call.payload_hash.as_deref() || performed_by != Some(performer_nid) {
                 return Err(UnikoError::id_conflict(
                     labels::ACTION,
                     "action_id",
@@ -195,7 +212,7 @@ pub async fn write_tool_calls_in_tx(
         let mut edge_rows: Vec<(&str, NodeId, NodeId, HashMap<String, Value>)> = vec![(
             edges::PERFORMED_BY,
             action_node,
-            ctx.performer_nid,
+            performer_nid,
             HashMap::new(),
         )];
         if let Some(sid) = ctx.session_nid {
@@ -303,10 +320,40 @@ fn action_props(call: &PreparedToolCall) -> HashMap<String, Value> {
     props
 }
 
+/// Make sure every explicit performer among `calls` has a Participant and
+/// return their node ids by participant id. A missing one is created as
+/// kind `unknown`; an existing one keeps its kind. Naming a performer never
+/// reclassifies anyone: only `register` makes an agent.
+///
+/// Runs outside any transaction, before the write takes its locks, the
+/// same way a turn's sender is set up: a participant with no actions yet is
+/// a normal state, so it needs no rollback if the write then fails.
+///
+/// # Errors
+///
+/// Returns [`UnikoError::Storage`] on database failure.
+pub async fn ensure_performers(
+    kb: &KnowledgeBase,
+    calls: &[PreparedToolCall],
+) -> uniko_store::Result<HashMap<String, NodeId>> {
+    let mut out = HashMap::new();
+    for id in calls.iter().filter_map(|c| c.performer_id.as_deref()) {
+        if out.contains_key(id) {
+            continue;
+        }
+        let (nid, _) = kb
+            .ensure_participant(id, "unknown", &HashMap::new(), &HashMap::new())
+            .await?;
+        out.insert(id.to_string(), nid);
+    }
+    Ok(out)
+}
+
 /// Write `calls` in one transaction of their own.
 ///
 /// For calls recorded apart from any turn: `Session::observe_tool` and
-/// `record_action`. The performer must already exist. The session is
+/// `record_action`. The default performer must already exist; explicit
+/// performers are created (see [`ensure_performers`]). The session is
 /// created when `create_session` is set and otherwise must exist, or the
 /// call is recorded without its `IN_SESSION` link; a
 /// `triggered_by_message_id` that names no message is skipped, as
@@ -343,6 +390,7 @@ pub async fn ingest_tool_calls(
             .map(|(nid, _)| nid),
         None => None,
     };
+    let performers = ensure_performers(kb, calls).await?;
     let content_ids: Vec<String> = calls
         .iter()
         .flat_map(PreparedToolCall::content_ids)
@@ -360,7 +408,7 @@ pub async fn ingest_tool_calls(
             performer_nid,
             triggered_by_nid: None,
         };
-        match write_tool_calls_in_tx(kb, &tx, calls, ctx, &mut seen).await {
+        match write_tool_calls_in_tx(kb, &tx, calls, ctx, &performers, &mut seen).await {
             Ok(outcomes) => match tx.commit().await {
                 Ok(_) => break outcomes,
                 Err(e) => {

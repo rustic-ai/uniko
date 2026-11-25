@@ -7,7 +7,7 @@
 //! summary table to stdout.
 //!
 //! Run: cargo test -p uniko-extract --features onnx \
-//!     --test cls_raw_dump -- --ignored --nocapture
+//!     --test integration cls_raw_dump:: -- --ignored --nocapture
 
 #[cfg(feature = "onnx")]
 mod raw {

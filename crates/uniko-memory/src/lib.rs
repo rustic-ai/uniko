@@ -48,17 +48,19 @@ pub(crate) mod value_convert;
 #[doc(inline)]
 pub use action::{RecordActionParams, RecordActionResult, record_action};
 #[doc(inline)]
-pub use agent::{Agent, ConsolidateOptions, ConsolidationReport, RuleView};
+pub use agent::{
+    Agent, AgentRegistration, ConsolidateOptions, ConsolidationReport, Registration, RuleView,
+};
 pub use consolidation::{CycleStats, TripleSource};
 #[doc(inline)]
 pub use episode::{RecordEpisodeParams, record_episode};
 #[doc(inline)]
 pub use facade::{
-    ArtifactView, Capabilities, Data, FinalizeReport, GoalContext, GoalPhase, GoalView, Goals,
-    LlmSpec, MessageView, ObserveResult, Outline, OutlineEntry, ReadRange, ReadResult, RecallScope,
-    Requirement, SearchHit, SearchOptions, Session, SourceRef, Sources, SummarizeReport, TaskPhase,
-    TaskView, ToolCall, ToolCallResult, ToolCallView, ToolOutput, Turn, TurnUnit, Uniko,
-    UnikoBuilder, UnitResult,
+    ArtifactView, Capabilities, Data, DeadLetters, FinalizeReport, GoalContext, GoalPhase,
+    GoalView, Goals, LlmSpec, MediaSourceView, MessageView, ObserveResult, Outline, OutlineEntry,
+    ReadRange, ReadResult, RecallScope, Requirement, SearchHit, SearchOptions, Session, SourceRef,
+    Sources, StoreReport, SummarizeReport, TaskPhase, TaskView, ToolCall, ToolCallResult,
+    ToolCallView, ToolOutput, Turn, TurnUnit, Uniko, UnikoBuilder, UnitResult,
 };
 #[doc(inline)]
 pub use fact::{AssertFactParams, InvalidateFactParams, assert_fact, invalidate_fact};
@@ -74,22 +76,32 @@ pub use recall::{
 // Method return / field types surfaced so the facade exposes no
 // un-nameable types: `Agent::assert_fact` -> FactUpsert, the `Session`
 // ingest verbs -> *IngestResult.
-#[doc(no_inline)]
-pub use uniko_extract::ingest::{
-    ArtifactIngestResult, AtomicIngestResult, ExtractFn, ExtractRequest, IngestContext, IngestData,
-    IngestOutcome, IngestSource, ModalityExtractor, ModalityPrepared, ModalityRegistry,
-    PdfIngestResult, TextExtractor, ingest_source, resolve_mime,
-};
-// Content-type taxonomy shared by ingest routing and recall channels.
+/// What [`DeadLetters::retry_pending`] did.
+pub use pipeline::{RetryRefusal, RetryReport};
 /// Cortex sweep outcomes, part of [`ConsolidationReport`].
 pub use uniko_cortex::{
     procedures::{MatchedProcedure, PromotionReport},
     topics::TopicReport,
 };
+#[doc(no_inline)]
+pub use uniko_extract::ingest::{
+    ArtifactIngestResult, AtomicIngestResult, Derivation, ExtractFn, ExtractOutput, ExtractRequest,
+    Extraction, IngestContext, IngestData, IngestOutcome, IngestSource, MediaRetention,
+    ModalityExtractor, ModalityPrepared, ModalityRegistry, ModelExtractor, ModelProvenance,
+    PdfIngestResult, Segment, SegmentKind, TextExtractor, VideoFrame, VideoParts, ingest_source,
+    resolve_mime,
+};
 /// LLM circuit-breaker state, part of [`PipelineHealth`].
 pub use uniko_pipes::CircuitState;
+/// Where in an image, recording or video a recalled or found chunk came from.
+pub use uniko_store::repository::media::{MediaPosition, SegmentPosition};
+// Content-type taxonomy shared by ingest routing and recall channels.
 #[doc(no_inline)]
 pub use uniko_pipes::content::{ContentType, Mime, Modality};
+/// Dead-letter views and options, used by [`DeadLetters`].
+pub use uniko_pipes::dead_letter::{
+    DeadLetter, DeadLetterCounts, DeadLetterFilter, DeadLetterStatus,
+};
 /// Streaming-pipeline health, returned by [`Uniko::health`].
 pub use uniko_pipes::health::{PipelineHealth, WorkerHealth, WorkerStatus};
 #[doc(no_inline)]
@@ -99,8 +111,10 @@ pub use uniko_store::operations::facts::{FactUpsert, fact_id_for, fact_id_for_sc
 // reaching into `uniko_store`.
 #[doc(no_inline)]
 pub use uniko_store::{
-    DeletionReport, Diagnostic, DiagnosticCode, ModelState, ModelStatus, NodeId, PrefetchPolicy,
-    ReadinessCode, ReadinessFailure, SharedRuntime, Stage, StageStatus, UnikoError,
+    Compatibility, DeletionReport, Diagnostic, DiagnosticCode, EnsureOutcome, Migration,
+    MigrationProgress, MigrationReport, ModelState, ModelStatus, NodeId, PrefetchPolicy,
+    ReadinessCode, ReadinessFailure, SharedRuntime, Stage, StageStatus, StoreDifference, StoreInfo,
+    StoredEmbedding, UnikoError, Verdict,
 };
 // Logic / query surface: `Agent::query` / `run_rule` / `abduce` return
 // these; `Value` is the graph value type for query params and rows.
@@ -130,7 +144,7 @@ pub use summary::generate_session_summary;
 pub use task::{CreateTaskParams, create_task};
 #[doc(no_inline)]
 pub use uniko_store::config::{
-    EmbeddingConfig, NlpConfig, NlpGeneration, RerankerConfig, UnikoConfig,
+    EmbeddingConfig, NlpConfig, NlpGeneration, RemoteStorage, RerankerConfig, UnikoConfig,
 };
 
 /// Sort `items` in descending order by the `f64` key returned by `score`.

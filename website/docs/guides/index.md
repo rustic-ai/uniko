@@ -29,6 +29,11 @@ The supplement to the pipelines — goals and tasks via `agent.goals()`, plus `r
 `record_action`, `add_observation`, `assert_fact`, for knowledge an agent alone can give.
 </div>
 <div class="feature-card" markdown>
+### [Images, Audio and Video](multimodal.md)
+Index media through OCR, captions, document extraction or transcription, with each chunk's page,
+time range, region and model, and trace the text back to the original.
+</div>
+<div class="feature-card" markdown>
 ### [Recall & Retrieval](retrieval.md)
 Reading memory back — `agent.recall`/`answer`, item `kind` + `sources` provenance, cited answers,
 and dereferencing sources with `agent.data()`.
@@ -63,25 +68,30 @@ the agent decides what is worth recording — and procedural memory only accumul
 agents call `record_episode`. The richer the episode stream, the more the system improves
 over time.
 
-**Locy reasoning** is what makes consolidation more than aggregation. Three stdlib rules
-ship registered and run each cortex sweep (`sequence_detector`, `episode_pattern_detector`,
-`contradiction_detector`); a fourth, `relevance_decay`, runs in Rust. Procedure promotion
-invokes `sequence_detector` during the cortex sweep — which fires once every
-`cortex_every_n` successful consolidation cycles (default 4), not on every cycle — to turn
-recurring action sequences into Procedures.
+**Locy reasoning** is what makes consolidation more than aggregation. Four stdlib rules
+ship registered and run each cortex sweep: `episode_pattern_detector` and
+`contradiction_detector` in the rule sweep, `sequence_detector` in procedure promotion, and
+`relevance_decay` in the decay sweep, whose matches Rust then prunes. On a streaming instance
+the cortex sweep fires once every `cortex_cycle_every_n_consolidations` successful
+consolidation cycles (default 4), not on every cycle; `agent.consolidate()` runs procedure
+promotion and topic detection on each call. Procedure promotion turns recurring action
+sequences into Procedures.
 
 !!! note
     Procedure promotion invokes the `sequence_detector` Locy rule by name via a `QUERY`
-    goal-query. The three registered stdlib rules run automatically each cortex sweep; the
+    goal-query. The four registered stdlib rules run automatically each cortex sweep; the
     [Reasoning with Locy](reasoning-with-locy.md) guide shows how to invoke them and write
     your own.
 
 **Configuration** externalises the cadences and thresholds the pipelines use — the
 consolidation triggers and the recall coverage gates. The guide maps every knob on
-`UnikoConfig` and documents the lower-level retrieval constants that stay compiled-in.
+`UnikoConfig`; lower-level retrieval constants, such as the Phase 1 coverage gate (0.75), stay
+compiled-in.
 The cortex sweep throttles (`cortex_cycle_every_n_consolidations`, `cortex_min_interval_secs`)
 live on `PipelineConfig` in `uniko-pipes`; the facade builds the pipeline with
-`PipelineConfig::default()`, so those run on their built-in cadence.
+`PipelineConfig::from_uniko_config`, which carries the queue, consolidation, circuit-breaker
+and dead-letter settings from `UnikoConfig` and leaves the cortex throttles at their defaults
+(every 4 cycles, at most once per 600 s), so those run on their built-in cadence.
 
 ## Suggested reading order
 
@@ -97,8 +107,8 @@ live on `PipelineConfig` in `uniko-pipes`; the facade builds the pipeline with
 
 === "Tuning recall quality"
 
-    1. [Configuration](configuration.md) — the Phase 1 (0.75) and Phase 2 (0.65) coverage
-       thresholds and what they gate.
+    1. [Configuration](configuration.md) — the Phase 2 coverage threshold (0.65) and the
+       other cascade gates; Phase 1's 0.75 gate is a compiled-in constant.
     2. [Recall & Retrieval](retrieval.md) — `agent.recall`/`recall_in` and the `ContextBundle`
        it returns.
 

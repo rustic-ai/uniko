@@ -3,17 +3,18 @@
 //! Plain uni-db, no models and no uniko code: every vector is written by hand.
 //!
 //! 1. `multivector_filter_*`: `uni.vector.query` over a `List(Vector)` column
-//!    with a `_vid IN (…)` filter. On unflushed rows it returns a vid that is
-//!    NOT in the filter and drops one that is. After `flush()` it is correct.
-//! 2. `sparse_filter_*`: `uni.sparse.query` rejects any non-null filter, and
-//!    the sparse arm of `uni.search` drops the filter without saying so.
+//!    with a `_vid IN (…)` filter. Before uni-db 5.3, on unflushed rows it
+//!    returned a vid NOT in the filter and dropped one that was
+//!    (rustic-ai/uni-db#343).
+//! 2. `sparse_filter_*`: before uni-db 5.3, `uni.sparse.query` rejected any
+//!    non-null filter, and the sparse arm of `uni.search` dropped it without
+//!    saying so (rustic-ai/uni-db#344).
 //!
-//! The failing cases are `#[ignore]`d until uni-db fixes them
-//! (rustic-ai/uni-db#343, #344); the flushed and dense controls run always.
+//! Both are fixed in uni-db 5.3, so every case runs as a regression guard.
 //!
 //! Run:
-//!   cargo nextest run -p uniko-store --test unidb_filtered_search_repro \
-//!       --run-ignored all --no-capture
+//!   cargo nextest run -p uniko-store --test integration unidb_filtered_search_repro:: \
+//!       --no-capture
 
 use std::collections::HashMap;
 
@@ -125,7 +126,6 @@ async fn filtered_maxsim(db: &Uni, allowed: &[i64]) -> Vec<i64> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "fails until rustic-ai/uni-db#343 is fixed; run with --run-ignored all"]
 async fn multivector_filter_on_unflushed_rows() {
     let (db, vids) = multivector_db().await;
     let allowed: Vec<i64> = vids[..6].to_vec();
@@ -207,8 +207,7 @@ async fn doc_vids(db: &Uni) -> Vec<i64> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "fails until rustic-ai/uni-db#344 is fixed; run with --run-ignored all"]
-async fn sparse_filter_is_rejected() {
+async fn sparse_filter_is_applied() {
     let db = sparse_db().await;
     let vids = doc_vids(&db).await;
     let filter = format!("_vid IN ({},{})", vids[2], vids[3]);
@@ -260,8 +259,7 @@ async fn sparse_filter_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "fails until rustic-ai/uni-db#344 is fixed; run with --run-ignored all"]
-async fn sparse_arm_of_search_ignores_the_filter() {
+async fn sparse_arm_of_search_applies_the_filter() {
     let db = sparse_db().await;
     let vids = doc_vids(&db).await;
     let filter = format!("_vid IN ({},{})", vids[2], vids[3]);

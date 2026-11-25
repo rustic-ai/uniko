@@ -9,7 +9,8 @@ query that the caller is not entitled to see.
 !!! warning "Filtering is opt-in and fails open"
     The default read scope is `RecallScope::Unrestricted`, which applies **no** visibility
     filtering — recall returns everything it finds. Enforcement happens only when a viewer
-    identity is bound (`RecallScope::AsAgent`, or `ViewerScope::As(..)` on `RecallConfig`).
+    identity is bound (`RecallScope::AsAgent` / `RecallScope::As(..)` on the builder, or
+    `ViewerScope::As(..)` / `ViewerScope::AsParticipant(..)` on `RecallConfig`).
     If you rely on visibility as an access-control boundary, you must set it explicitly;
     treat the default as "single-tenant, trusted caller".
 
@@ -26,13 +27,15 @@ shared safely in one KnowledgeBase. The mechanism has three parts:
 3. **Filter** the assembled result bundle before it reaches the caller.
 
 Visibility is enforced for the two node types that carry free-form,
-person-specific claims — `Fact` and `Observation`. Other node types have no
-visibility scope and are never policy-checked.
+person-specific claims — `Fact` and `Observation` — and for `Message`s and their
+`Chunk`s when the turn was scoped with `Turn::visibility`. Other node types have
+no visibility scope and are never policy-checked.
 
 ## Visibility scopes
 
 Visibility lives on the node's optional `visibility` property
-(`DataType::String`, nullable on both the `Fact` and `Observation` labels).
+(`DataType::String`, nullable on the `Fact`, `Observation`, `Message`, and
+`Chunk` labels).
 A `null` or empty value means *public*. Four scope forms are recognised:
 
 | Scope string        | Admits                                                        |
@@ -127,24 +130,25 @@ use uniko_memory::policy::filter_bundle;
 
 let viewer = Viewer::new(&kb, "alice").await?;
 filter_bundle(&kb, &mut bundle, &viewer).await?;
-// `bundle.items` now contains only Facts/Observations Alice may see,
-// plus all non-policy node types untouched.
+// `bundle.items` now contains only the Facts/Observations/Messages/Chunks
+// Alice may see, plus all non-policy node types untouched.
 ```
 
 `filter_bundle` mutates the bundle in place:
 
-1. It collects the `node_id`s of items whose `kind` is `Fact` or
-   `Observation`. If there are none, it returns immediately.
+1. It collects the `node_id`s of items whose `kind` is `Fact`,
+   `Observation`, `Message`, or `Chunk`. If there are none, it returns
+   immediately.
 2. It batch-fetches their `visibility` properties in a single store call
    (`fetch_visibilities`), keeping the filter O(items).
 3. It retains each policy item only when `visibility_admits` accepts it for the
    viewer. Items with no fetched visibility are kept (treated as public).
-4. It recomputes `total_tokens` using the same `items.len() * 50` heuristic the
-   recall cascade uses.
+4. It recomputes `total_tokens` as the sum of the surviving items'
+   `token_count`.
 
 ```mermaid
 flowchart LR
-    A[ContextBundle] --> B{kind in Fact, Observation?}
+    A[ContextBundle] --> B{kind in Fact, Observation, Message, Chunk?}
     B -- no --> K[keep]
     B -- yes --> C[fetch_visibilities batch]
     C --> D{visibility_admits viewer?}
@@ -155,8 +159,10 @@ flowchart LR
 
 !!! note "Visibility applies to claims"
     Visibility scopes the two node types that carry person-specific claims — `Fact` and
-    `Observation`. Structural nodes (Messages, Chunks, Entities, Topics, Summaries, Goals,
-    Tasks, Episodes) carry no scope and pass through `filter_bundle` unchanged.
+    `Observation` — plus Messages and their Chunks scoped per turn. Structural nodes
+    (Entities, Topics, Summaries, Goals, Tasks, Episodes) carry no scope and pass through
+    `filter_bundle` unchanged. Session-level transcript and observation chunks aggregate
+    many turns, so they are built from public turns only.
 
 !!! tip "Enforce visibility outside recall"
     `visibility_admits` is public precisely so you can gate direct lookups —
@@ -166,9 +172,14 @@ flowchart LR
 
 ## Where the scope is written
 
-The `visibility` property is written by ingest and consolidation when a claim
-is produced, and read back only at recall assembly time — visibility is never
-queried unfiltered from outside the policy module. See
+The `visibility` property is written by ingest (from `Turn::visibility`) and
+consolidation (a Fact inherits its Observations' scope) when a claim is produced,
+or set afterwards with `Agent::set_visibility` and the typed `Visibility` enum.
+It is read back at recall assembly time and by the facade's by-id reads, both
+through the policy module — visibility is never queried unfiltered from outside
+it. Consolidation groups Observations by `(subject, predicate, scope)`, so a
+scoped Observation only ever builds, reinforces, or contradicts a Fact under the
+same scope. See
 [Recall](../pipelines/recall.md) for how the `ContextBundle` is assembled before filtering,
 and the [data model](data-model.md) for the full property set of the scoped
 `Fact` and `Observation` node types.

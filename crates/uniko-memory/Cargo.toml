@@ -11,6 +11,8 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Integration tests are modules of one binary (tests/integration.rs).
+autotests = false
 
 [dependencies]
 uniko-cortex = { workspace = true }
@@ -49,3 +51,7 @@ gpu-metal = ["uniko-store/gpu-metal"]
 # Local-LLM provider passthrough to uniko-store -> uni-db. Enabled by the
 # uniko-cuda / uniko-metal wheel variants (GPU LLM inference via candle).
 candle = ["uniko-store/candle"]
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"

@@ -1,0 +1,98 @@
+name: Cloud storage
+
+# A store kept in S3, end to end: what uniko relies on from uni-db (stores
+# under their prefix, remote-only opens, the writer lease), and a store's
+# whole lifecycle (open, write, recall, reopen, delete, inspect, migrate,
+# move to another host) through `remote_storage`, hybrid and remote-only. Runs against two S3
+# implementations, LocalStack and the AWS Emulator, after each merge to main
+# and on demand on any branch: Actions -> Cloud storage -> Run workflow.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  s3:
+    name: S3 (${{ matrix.service }})
+    # A debug build of the stack doesn't fit ubuntu-latest's disk.
+    runs-on: ubuntu-xlarge
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [localstack, aws-emulator]
+    env:
+      # One model cache for every test process, kept between runs.
+      UNI_CACHE_DIR: ${{ github.workspace }}/.uni_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # mold: `.cargo/config.toml` forces `-fuse-ld=mold` on Linux.
+          sudo apt-get install -y protobuf-compiler mold
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cloud-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache models
+        uses: actions/cache@v5
+        with:
+          path: .uni_cache
+          key: models-cloud-${{ hashFiles('crates/uniko-store/src/storage/mod.rs', 'crates/uniko-store/src/config.rs') }}
+          restore-keys: models-cloud-
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # Builds the test binaries before the service starts, so the service
+      # isn't left idle through a long build.
+      - name: Build the tests
+        run: |
+          cargo nextest run -p uniko-store --test integration --no-run
+          cargo nextest run -p uniko-memory --test integration --no-run
+
+      # Prints the endpoint, credentials and (for the AWS Emulator's HTTPS)
+      # the CA bundle the tests read; appended to the job's environment.
+      - name: Start ${{ matrix.service }}
+        run: scripts/s3/start.sh ${{ matrix.service }} >> "$GITHUB_ENV"
+
+      - name: uni-db object stores
+        run: cargo nextest run -p uniko-store --test integration -E 'test(unidb_object_store_repro::)'
+
+      - name: Store lifecycle
+        run: cargo nextest run -p uniko-memory --test integration -E 'test(cloud_e2e::)'
+
+      # The Python SDK over the same service. LocalStack only: the test
+      # skips an HTTPS service with a private CA.
+      - name: Install uv
+        if: matrix.service == 'localstack'
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Python
+        if: matrix.service == 'localstack'
+        working-directory: bindings/uniko-py
+        run: |
+          uv sync --locked
+          uv run maturin develop
+          uv run pytest python/tests/test_cloud_storage.py -v
+
+      - name: Service logs
+        if: failure()
+        run: docker logs uniko-s3-${{ matrix.service }} 2>&1 | tail -200

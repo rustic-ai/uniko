@@ -23,7 +23,7 @@
 //! Ignored by default: loads bge-m3 (~2GB). Run with:
 //!
 //! ```sh
-//! cargo nextest run -p uniko-extract --test colbert_query_embed \
+//! cargo nextest run -p uniko-extract --test integration colbert_query_embed:: \
 //!   --run-ignored all --no-capture
 //! ```
 

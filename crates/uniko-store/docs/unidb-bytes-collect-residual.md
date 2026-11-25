@@ -9,7 +9,7 @@
 > (verified on 3.0.1 and 3.2.0). `crates/uniko-store/tests/unidb_bytes_residual_repro.rs`
 > is no longer `#[ignore]`d and runs as a regression guard. The analysis below describes
 > the original 2.2.4 behaviour.
-**Repro test:** `crates/uniko-store/tests/unidb_bytes_residual_repro.rs` (`#[ignore]`d; run with `cargo nextest run -p uniko-store --test unidb_bytes_residual_repro --run-ignored all`).
+**Repro test:** `crates/uniko-store/tests/unidb_bytes_residual_repro.rs` (`#[ignore]`d; run with `cargo nextest run -p uniko-store --test integration unidb_bytes_residual_repro:: --run-ignored all`).
 
 ## Summary
 

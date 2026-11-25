@@ -174,7 +174,6 @@ impl KnowledgeBase {
             .embed(alias, texts)
             .await
             .map_err(|e| UnikoError::Embedding(e.to_string()))?;
-        self.mark_model_loaded(alias);
         Ok(vectors)
     }
 
@@ -204,7 +203,6 @@ impl KnowledgeBase {
             .embed_multivector(alias, texts)
             .await
             .map_err(|e| UnikoError::Embedding(e.to_string()))?;
-        self.mark_model_loaded(alias);
         Ok(vectors)
     }
 
@@ -227,7 +225,6 @@ impl KnowledgeBase {
             .generate(alias, messages, options)
             .await
             .map_err(|e| UnikoError::Llm(e.to_string()))?;
-        self.mark_model_loaded(alias);
         Ok(result.text)
     }
 
@@ -252,7 +249,6 @@ impl KnowledgeBase {
             .rerank(alias, query, docs)
             .await
             .map_err(|e| UnikoError::Search(e.to_string()))?;
-        self.mark_model_loaded(alias);
         Ok(scored.into_iter().map(|s| (s.index, s.score)).collect())
     }
 
@@ -310,10 +306,6 @@ impl KnowledgeBase {
             )));
         }
         let loaded = runtime.generator(alias).await;
-        match &loaded {
-            Ok(_) => self.mark_model_loaded(alias),
-            Err(e) => self.mark_model_failed(alias, &e.to_string()),
-        }
         loaded.map(|_| ()).map_err(|e| match e {
             E::Config(_)
             | E::AliasNotFound { .. }

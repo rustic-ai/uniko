@@ -15,7 +15,7 @@
 //! read — which is where the column weight shows up.
 //!
 //! Run:
-//!   cargo nextest run -p uniko-store --test hybrid_query_perf_repro \
+//!   cargo nextest run -p uniko-store --test integration hybrid_query_perf_repro:: \
 //!       --run-ignored all --no-capture
 //! Profile one config:
 //!   perf record -g -- cargo nextest run ... ; perf report

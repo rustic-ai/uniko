@@ -215,6 +215,9 @@ pub struct PyRecallItem {
     /// Where the chunk sits in its source (`/data/items[3-9]`, `rows 10-19`).
     #[pyo3(get)]
     address: Option<String>,
+    /// For a chunk derived from media: where in it the chunk came from.
+    #[pyo3(get)]
+    position: Option<Py<crate::media::PyMediaPosition>>,
 }
 
 impl PyRecallItem {
@@ -239,6 +242,7 @@ impl PyRecallItem {
                 token_count: item.token_count,
                 context: item.context.clone(),
                 address: item.address.clone(),
+                position: crate::media::PyMediaPosition::from_opt(py, item.position.as_ref())?,
             },
         )
     }
@@ -1304,6 +1308,41 @@ fn circuit_state_str(state: CircuitState) -> &'static str {
     }
 }
 
+/// What ``Agent.register`` did.
+#[pyclass(name = "Registration", module = "uniko", frozen)]
+pub struct PyRegistration {
+    /// The agent's participant id.
+    #[pyo3(get)]
+    participant_id: String,
+    /// ``"created"``, ``"upgraded"`` (from kind ``unknown``) or
+    /// ``"existing"``.
+    #[pyo3(get)]
+    outcome: &'static str,
+}
+
+impl PyRegistration {
+    /// Build the Python wrapper from a Rust [`Registration`].
+    pub fn from_rust(py: Python<'_>, reg: &uniko_api::tools::Registration) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                participant_id: reg.participant_id.clone(),
+                outcome: reg.outcome.as_str(),
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyRegistration {
+    fn __repr__(&self) -> String {
+        format!(
+            "Registration(participant_id='{}', outcome='{}')",
+            self.participant_id, self.outcome
+        )
+    }
+}
+
 /// One streaming-pipeline worker's health.
 #[pyclass(name = "WorkerHealth", module = "uniko", frozen)]
 pub struct PyWorkerHealth {
@@ -1330,6 +1369,15 @@ pub struct PyWorkerHealth {
     /// Degraded stages counted since start, keyed `stage:code`.
     #[pyo3(get)]
     degradations: std::collections::BTreeMap<String, u64>,
+    /// Items dead-lettered since start.
+    #[pyo3(get)]
+    dead_lettered: u64,
+    /// Dead-letter retries resubmitted since start.
+    #[pyo3(get)]
+    retries: u64,
+    /// Of those, the ones that succeeded.
+    #[pyo3(get)]
+    retries_succeeded: u64,
 }
 
 impl PyWorkerHealth {
@@ -1344,6 +1392,9 @@ impl PyWorkerHealth {
                 items_failed: health.items_failed,
                 avg_latency_ms: health.avg_latency_ms,
                 degradations: health.degradations.clone(),
+                dead_lettered: health.dead_lettered,
+                retries: health.retries,
+                retries_succeeded: health.retries_succeeded,
             },
         )
     }
@@ -1703,6 +1754,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRecallSource>()?;
     m.add_class::<PyRecallItem>()?;
     m.add_class::<PyDiagnostic>()?;
+    m.add_class::<PyRegistration>()?;
     m.add_class::<PyContextBundle>()?;
     m.add_class::<PyAnswer>()?;
     m.add_class::<PyObserveResult>()?;

@@ -47,14 +47,15 @@ pub enum Requirement {
     /// An extractor must be registered for this modality.
     Extractor(Modality),
     /// The alias must load with one of the non-CPU execution providers it
-    /// asks for among its active providers.
+    /// asks for among the providers its sessions attached.
     ///
-    /// uni-xervo reports the providers requested and compiled into this
-    /// build, not the ones that attached (rustic-ai/uni-xervo#64). So this
-    /// catches a build without the accelerator, but not a GPU build on a
-    /// host whose GPU is missing or broken. Only local ONNX embedding,
-    /// hybrid-embedding and reranking models report providers; any other
-    /// alias fails as `not_supported`.
+    /// The attached providers are what uni-xervo reports after loading. A
+    /// provider that is compiled in but fails to register (its library or
+    /// driver missing), or whose output disagrees with CPU at load, is left
+    /// out, so a GPU build on a host without a usable GPU fails this. Every
+    /// `local/onnx` model reports its providers except document
+    /// extraction; any other alias (a remote model, whisper.cpp) fails as
+    /// `not_supported`.
     Accelerated(String),
 }
 
@@ -102,11 +103,7 @@ fn modality_name(m: Modality) -> String {
 
 /// Whether `alias`'s model reports its execution providers.
 fn reports_providers(entry: &ModelEntry) -> bool {
-    entry.provider_id == "local/onnx"
-        && matches!(
-            entry.task,
-            ModelTask::Embed | ModelTask::EmbedHybrid | ModelTask::Rerank
-        )
+    entry.provider_id == "local/onnx" && entry.task != ModelTask::DocumentExtract
 }
 
 pub(crate) fn compiled(feature: &str) -> bool {
@@ -129,6 +126,8 @@ pub(super) struct Context<'a> {
     pub entries: &'a [ModelEntry],
     pub extractors: &'a ModalityRegistry,
     pub answer_alias: Option<&'a str>,
+    /// Verify required remote aliases after they load.
+    pub verify_remote: bool,
 }
 
 /// The static step: catalog, features and extractors only.
@@ -232,13 +231,22 @@ fn plan(requirements: &[Requirement], cx: &Context<'_>) -> (Vec<ReadinessFailure
                     None => Err(fail(ReadinessCode::NotInCatalog).with_alias(alias)),
                 },
             },
-            Requirement::Extractor(m) => {
-                if cx.extractors.modalities().contains(m) {
-                    Ok(())
-                } else {
-                    Err(fail(ReadinessCode::NoExtractor))
+            Requirement::Extractor(m) => match cx.extractors.get(*m) {
+                None => Err(fail(ReadinessCode::NoExtractor)),
+                // A model-backed extractor is ready when its models load.
+                Some(extractor) => {
+                    let aliases = extractor.model_aliases();
+                    match aliases.iter().find(|a| !in_catalog(a)) {
+                        Some(missing) => {
+                            Err(fail(ReadinessCode::NotInCatalog).with_alias(missing.clone()))
+                        }
+                        None => {
+                            need.aliases.extend(aliases);
+                            Ok(())
+                        }
+                    }
                 }
-            }
+            },
         };
         match outcome {
             Ok(()) => needs.push(need),
@@ -283,9 +291,32 @@ pub(super) async fn check(
     }
     // A timeout too large to add (e.g. `Duration::MAX`) means no deadline.
     let deadline = timeout.and_then(|t| tokio::time::Instant::now().checked_add(t));
-    let unfinished = kb.prefetch_aliases(&aliases, timeout).await;
+    let mut unfinished = kb.prefetch_aliases(&aliases, timeout).await;
+    let mut status = kb.model_status().await.unwrap_or_default();
+    // An alias another caller started loading after ours finished reads as
+    // `Loading`. Wait for that load once more (a load waits on the one in
+    // progress), within what is left of the deadline.
+    let loading: Vec<&str> = aliases
+        .iter()
+        .copied()
+        .filter(|a| {
+            status
+                .iter()
+                .any(|s| s.alias == *a && s.state == ModelState::Loading)
+        })
+        .collect();
+    if !loading.is_empty() {
+        let remaining =
+            deadline.map(|at| at.saturating_duration_since(tokio::time::Instant::now()));
+        unfinished.extend(kb.prefetch_aliases(&loading, remaining).await);
+        status = kb.model_status().await.unwrap_or_default();
+    }
 
-    let status = kb.model_status().await.unwrap_or_default();
+    let verification = if cx.verify_remote {
+        verify_loaded(kb, &aliases, &status, deadline).await
+    } else {
+        Verification::default()
+    };
     for need in &needs {
         let mut met = true;
         for alias in &need.aliases {
@@ -300,10 +331,19 @@ pub(super) async fn check(
                     ModelState::Loaded if need.accelerated && !accelerated(model) => {
                         Some(failure(ReadinessCode::NotAccelerated))
                     }
-                    ModelState::Loaded => None,
+                    ModelState::Loaded
+                        if verification.timed_out && model.provider_id.starts_with("remote/") =>
+                    {
+                        Some(failure(ReadinessCode::TimedOut))
+                    }
+                    ModelState::Loaded => verification.failed.get(alias).map(|reason| {
+                        failure(ReadinessCode::VerificationFailed).with_error(reason.clone())
+                    }),
                     ModelState::Failed(error) => {
                         Some(failure(ReadinessCode::LoadFailed).with_error(error.clone()))
                     }
+                    // Still loading for another caller after the wait above.
+                    ModelState::Loading => Some(failure(ReadinessCode::TimedOut)),
                     // Loading finished but nothing recorded it.
                     _ => Some(failure(ReadinessCode::LoadFailed)),
                 },
@@ -329,6 +369,50 @@ pub(super) async fn check(
         }
     }
     failures
+}
+
+/// What verifying the loaded aliases found.
+#[derive(Default)]
+struct Verification {
+    /// Each alias whose check failed, with the reason.
+    failed: std::collections::HashMap<String, String>,
+    /// The deadline ran out before the checks finished.
+    timed_out: bool,
+}
+
+/// Verify those of `aliases` that loaded and are served by a remote
+/// provider, within `deadline`. Local aliases need no check.
+async fn verify_loaded(
+    kb: &KnowledgeBase,
+    aliases: &[&str],
+    status: &[uniko_store::ModelStatus],
+    deadline: Option<tokio::time::Instant>,
+) -> Verification {
+    let loaded: Vec<&str> = aliases
+        .iter()
+        .copied()
+        .filter(|alias| {
+            status.iter().any(|s| {
+                s.alias == *alias
+                    && s.state == ModelState::Loaded
+                    && s.provider_id.starts_with("remote/")
+            })
+        })
+        .collect();
+    if loaded.is_empty() {
+        return Verification::default();
+    }
+    let remaining = deadline.map(|at| at.saturating_duration_since(tokio::time::Instant::now()));
+    match kb.verify_aliases(&loaded, remaining).await {
+        Some(failed) => Verification {
+            failed: failed.into_iter().collect(),
+            timed_out: false,
+        },
+        None => Verification {
+            failed: Default::default(),
+            timed_out: true,
+        },
+    }
 }
 
 /// Whether the NLP pipeline starts. `plan` only asks on `onnx` builds.
@@ -381,6 +465,7 @@ impl Uniko {
             entries: &entries,
             extractors: &self.extractors,
             answer_alias: self.llm_alias.as_deref(),
+            verify_remote: self.verify_remote,
         };
         check(&self.kb, requirements, &cx, timeout).await
     }
@@ -394,7 +479,7 @@ mod tests {
     use uniko_store::config::UnikoConfig;
     use uniko_store::{ModelState, PrefetchPolicy, ReadinessCode, ReadinessFailure, UnikoError};
 
-    use super::Requirement;
+    use super::{ModelEntry, ModelTask, Requirement, reports_providers};
     use crate::Uniko;
 
     fn not_ready(result: Result<Uniko, UnikoError>) -> Vec<ReadinessFailure> {
@@ -570,8 +655,8 @@ mod tests {
         assert_eq!(failures[0].code, ReadinessCode::LoadFailed);
     }
 
-    /// Only local ONNX embed, hybrid and rerank models report providers,
-    /// so `Accelerated` on anything else is refused before the store opens.
+    /// A remote model reports no execution providers, so `Accelerated` on
+    /// one is refused before the store opens.
     #[tokio::test]
     async fn accelerated_is_refused_for_models_that_do_not_report_providers() {
         let failures = not_ready(
@@ -581,23 +666,202 @@ mod tests {
                     "stub",
                     "http://127.0.0.1:9/v1",
                 ))
-                .require([
-                    Requirement::accelerated(uniko_store::schema::NLP_ALIAS),
-                    Requirement::accelerated("gen/a"),
-                ])
+                .require([Requirement::accelerated("gen/a")])
                 .build()
                 .await,
         );
         assert_eq!(
             codes(&failures),
-            vec![
-                (
-                    "accelerated:nlp/default".into(),
-                    ReadinessCode::NotSupported
-                ),
-                ("accelerated:gen/a".into(), ReadinessCode::NotSupported),
-            ]
+            vec![("accelerated:gen/a".into(), ReadinessCode::NotSupported)]
         );
+    }
+
+    /// A local HTTP server answering every request with `status`, counting
+    /// the requests it gets. Returns its `/v1` base URL.
+    async fn stub_server(status: u16) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let reply = format!(
+                        "HTTP/1.1 {status} X\r\ncontent-length: 2\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{{}}"
+                    );
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}/v1"), hits)
+    }
+
+    fn remote_generator(url: &str) -> crate::UnikoBuilder {
+        Uniko::builder()
+            .llm(crate::LlmSpec::llamacpp("gen/a", "stub", url))
+            .prefetch(PrefetchPolicy::Lazy)
+            .require([Requirement::alias("gen/a")])
+    }
+
+    /// Without `verify_remote`, a remote alias is ready once configured:
+    /// nothing contacts it.
+    #[tokio::test]
+    async fn remote_aliases_are_not_contacted_unless_asked() {
+        let (url, hits) = stub_server(503).await;
+        let memory = remote_generator(&url).build().await.unwrap();
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        memory.shutdown().await.unwrap();
+    }
+
+    /// With `verify_remote`, an endpoint that is down or refuses fails as
+    /// `verification_failed`, naming why.
+    #[tokio::test]
+    async fn verify_remote_reports_an_unusable_endpoint() {
+        let (url, _) = stub_server(503).await;
+        let failures = not_ready(remote_generator(&url).verify_remote(true).build().await);
+        assert_eq!(
+            codes(&failures),
+            vec![("alias:gen/a".into(), ReadinessCode::VerificationFailed)]
+        );
+        let reason = failures[0].error.as_deref().unwrap_or_default();
+        assert!(reason.starts_with("unavailable"), "{reason}");
+
+        // Nothing listens on port 9.
+        let failures = not_ready(
+            remote_generator("http://127.0.0.1:9/v1")
+                .verify_remote(true)
+                .build()
+                .await,
+        );
+        let reason = failures[0].error.as_deref().unwrap_or_default();
+        assert_eq!(failures[0].code, ReadinessCode::VerificationFailed);
+        assert!(reason.starts_with("unreachable"), "{reason}");
+    }
+
+    /// A healthy endpoint passes, and later checks on the instance verify
+    /// it again.
+    #[tokio::test]
+    async fn verify_remote_passes_a_healthy_endpoint_and_rechecks() {
+        use std::sync::atomic::Ordering;
+
+        let (url, hits) = stub_server(200).await;
+        let memory = remote_generator(&url)
+            .verify_remote(true)
+            .build()
+            .await
+            .unwrap();
+        let after_build = hits.load(Ordering::SeqCst);
+        assert!(after_build >= 1);
+        let failures = memory
+            .check_readiness(&[Requirement::alias("gen/a")], None)
+            .await;
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(hits.load(Ordering::SeqCst) > after_build);
+        memory.shutdown().await.unwrap();
+    }
+
+    /// A server that accepts connections and never answers.
+    async fn silent_server() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        format!("http://{addr}/v1")
+    }
+
+    /// A check still waiting when the readiness timeout runs out is
+    /// `timed_out`, and `build` returns promptly rather than after the
+    /// check's own (up to 30 s) limit.
+    #[tokio::test]
+    async fn a_verification_cut_off_by_the_timeout_is_timed_out() {
+        let url = silent_server().await;
+        let started = std::time::Instant::now();
+        let failures = not_ready(
+            remote_generator(&url)
+                .verify_remote(true)
+                .readiness_timeout(Duration::from_millis(300))
+                .build()
+                .await,
+        );
+        assert_eq!(
+            codes(&failures),
+            vec![("alias:gen/a".into(), ReadinessCode::TimedOut)]
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A local model needs no check: `verify_remote` leaves it ready.
+    #[tokio::test]
+    async fn verify_remote_passes_local_models_without_a_request() {
+        let mut config = UnikoConfig::default();
+        config.reranker.enabled = false;
+        let built = Uniko::builder()
+            .raw_config(config)
+            .prefetch(PrefetchPolicy::Lazy)
+            .verify_remote(true)
+            .require([Requirement::Embedder])
+            .build()
+            .await;
+        match built {
+            Ok(memory) => memory.shutdown().await.unwrap(),
+            Err(UnikoError::NotReady(failures)) if embedder_unavailable(&failures) => {}
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// Every local ONNX task reports its providers (uni-xervo 0.20), NLP
+    /// and OCR included; document extraction and remote models do not.
+    #[test]
+    fn every_local_onnx_task_but_document_extraction_reports_providers() {
+        let entry = |provider: &str, task| {
+            ModelEntry::from(&uniko_store::xervo::ModelAliasSpec {
+                alias: "a".into(),
+                task,
+                provider_id: provider.into(),
+                model_id: "m".into(),
+                revision: None,
+                warmup: uniko_store::xervo::WarmupPolicy::Lazy,
+                required: false,
+                timeout: None,
+                load_timeout: None,
+                retry: None,
+                options: serde_json::Value::Null,
+            })
+        };
+        for task in [
+            ModelTask::Embed,
+            ModelTask::EmbedHybrid,
+            ModelTask::EmbedSparse,
+            ModelTask::EmbedMultiVector,
+            ModelTask::Rerank,
+            ModelTask::Nlp,
+            ModelTask::Ocr,
+        ] {
+            assert!(reports_providers(&entry("local/onnx", task)), "{task:?}");
+        }
+        assert!(!reports_providers(&entry(
+            "local/onnx",
+            ModelTask::DocumentExtract
+        )));
+        assert!(!reports_providers(&entry(
+            "remote/openai",
+            ModelTask::Embed
+        )));
     }
 
     /// With requirements, the required models load first and the prefetch
@@ -634,8 +898,7 @@ mod tests {
     #[tokio::test]
     async fn a_cpu_fallback_fails_an_accelerated_requirement() {
         if gpu_compiled() {
-            eprintln!("skipping: a GPU build may really have the accelerator");
-            return;
+            return an_accelerated_requirement_matches_the_attached_providers().await;
         }
         let with_eps = |eps: &[&str]| {
             let mut config = UnikoConfig::default();
@@ -673,6 +936,100 @@ mod tests {
                 ReadinessCode::NotAccelerated
             )]
         );
+    }
+
+    /// NLP and OCR models report the execution providers their sessions
+    /// attached, like the embedder (uni-xervo#65). Loads both models, so it
+    /// runs only with `EXPENSIVE_TESTS=1`.
+    #[tokio::test]
+    async fn nlp_and_ocr_models_report_their_execution_providers() {
+        if !matches!(
+            std::env::var("EXPENSIVE_TESTS").as_deref(),
+            Ok("1" | "true" | "yes")
+        ) {
+            eprintln!("skipping: set EXPENSIVE_TESTS=1 to load the NLP and OCR models");
+            return;
+        }
+        let mut config = UnikoConfig::default();
+        config.ocr.enabled = true;
+        let memory = Uniko::builder()
+            .raw_config(config)
+            .prefetch(PrefetchPolicy::Lazy)
+            .require([
+                Requirement::Alias(uniko_store::schema::NLP_ALIAS.to_string()),
+                Requirement::Alias(uniko_store::schema::OCR_ALIAS.to_string()),
+            ])
+            .build()
+            .await
+            .expect("both models load");
+        let models = memory.capabilities().await.models.unwrap_or_default();
+        for alias in [
+            uniko_store::schema::NLP_ALIAS,
+            uniko_store::schema::OCR_ALIAS,
+        ] {
+            let m = models
+                .iter()
+                .find(|m| m.alias == alias)
+                .unwrap_or_else(|| panic!("{alias} is in the catalog"));
+            let eps = m
+                .active_execution_providers
+                .as_ref()
+                .unwrap_or_else(|| panic!("{alias} reports its providers: {m:?}"));
+            assert!(!eps.is_empty(), "{alias}: {m:?}");
+        }
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// On a GPU build an accelerated requirement passes exactly when the
+    /// accelerator attached: on a host whose GPU works, the build succeeds
+    /// and the model reports that provider; on one where the session falls
+    /// back to CPU it fails as `not_accelerated`. Either way the requirement
+    /// agrees with what the session really runs on. A model that fails to
+    /// load at all (no model cache, or a broken provider) skips the test.
+    async fn an_accelerated_requirement_matches_the_attached_providers() {
+        let metal = uniko_store::COMPILED_FEATURES
+            .iter()
+            .any(|(name, on)| *name == "gpu-metal" && *on);
+        let ep = if metal { "coreml" } else { "cuda" };
+        let mut config = UnikoConfig::default();
+        config.embedding.execution_providers = Some(vec![ep.to_string(), "cpu".to_string()]);
+        let built = Uniko::builder()
+            .raw_config(config)
+            .prefetch(PrefetchPolicy::Lazy)
+            .require([Requirement::accelerated(uniko_store::schema::EMBED_ALIAS)])
+            .build()
+            .await;
+        match built {
+            Ok(memory) => {
+                let models = memory.capabilities().await.models.unwrap_or_default();
+                let embed = models
+                    .iter()
+                    .find(|m| m.alias == uniko_store::schema::EMBED_ALIAS)
+                    .expect("the embedder is in the catalog");
+                assert!(
+                    embed
+                        .active_execution_providers
+                        .as_ref()
+                        .is_some_and(|eps| eps.iter().any(|e| e == ep)),
+                    "the requirement passed, so {ep} must be attached: {embed:?}"
+                );
+                memory.shutdown().await.expect("shutdown");
+            }
+            Err(e) => {
+                let failures = not_ready(Err(e));
+                if embedder_unavailable(&failures) {
+                    return;
+                }
+                assert_eq!(
+                    codes(&failures),
+                    vec![(
+                        "accelerated:embed/default".into(),
+                        ReadinessCode::NotAccelerated
+                    )],
+                    "with no usable {ep}, the requirement fails as not_accelerated"
+                );
+            }
+        }
     }
 
     /// A model still loading when the timeout runs out is `timed_out`, the

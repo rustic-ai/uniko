@@ -82,10 +82,12 @@ trigger. Per-item isolation is the rule everywhere in the pipeline: one bad cycl
 never kills the worker.
 
 !!! note "Tune how often heavy reasoning runs"
-    P4 runs on every consolidation trigger. The heavier passes (P5, P6) plus decay and
-    session maintenance run on a configurable **cortex gate**: `maybe_run_cortex_sweep`
-    fires the sweep every `cortex_cycle_every_n_consolidations` cycles, subject to a minimum
-    wall-clock gap of `cortex_min_interval_secs`. This decouples cheap fact derivation from
+    P4 runs on every consolidation trigger. The heavier passes (P5, P6) plus decay, rule
+    execution, rule-confidence decay, and session maintenance run on a configurable
+    **cortex gate**: `maybe_run_cortex_sweep` fires the sweep every
+    `cortex_cycle_every_n_consolidations` cycles (default 4), and each pass except decay is
+    further held to a minimum wall-clock gap of `cortex_min_interval_secs` (default 600s) —
+    per agent for P5 and rule execution, globally for P6, rule decay, and sessions. This decouples cheap fact derivation from
     heavy reasoning — tune it to your workload, or set
     `cortex_cycle_every_n_consolidations = 0` to disable the sweep.
 
@@ -291,8 +293,10 @@ that must all be present.
     [Reasoning with Locy](../guides/reasoning-with-locy.md) for the full picture.
     `episode_pattern_detector` and `contradiction_detector` are also registered and
     run automatically each cortex sweep via `run_active_rules` (each backed by a Rust
-    consumer). `relevance_decay` runs in Rust (`prune_decayed_episodes`), not as a
-    Locy rule — uni-db can't yet plan its `duration.inDays(...)` arithmetic. The
+    consumer). `relevance_decay` is a Locy rule too — the single source of the decay
+    formula — but the worker's decay sweep runs it (`consume_relevance_decay`) rather
+    than `run_active_rules`, because it needs the half-life and threshold config and
+    must delete the Episodes it yields, which an additive `DERIVE` cannot. The
     precondition matcher is a `key=value` evaluator, not a full Locy WHERE engine.
 
 ---
@@ -350,7 +354,8 @@ feature — falls back silently to the deterministic name and never blocks a swe
 ## Cycle outputs and observability
 
 Every successful P4 cycle returns `CycleStats` and writes a `ConsolidationCycle`
-audit node with `PROCESSED`, `CREATED`, and `INVOLVED` edges. The worker emits
+audit node with `PROCESSED` (Observations), `CREATED`, `REINFORCED`, and
+`INVALIDATED` (Facts), and `APPLIED_RULE` edges; an empty set writes no edges. The worker emits
 metrics around each pass:
 
 | Metric | Pass |

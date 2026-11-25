@@ -5,7 +5,7 @@
 //! because the `nlp` module that hosts the extractor is itself gated
 //! — without ONNX the symbols don't exist.
 //!
-//! Run: cargo nextest run -p uniko-extract --features onnx --test observation_extraction_test --nocapture
+//! Run: cargo nextest run -p uniko-extract --features onnx --test integration observation_extraction_test:: --nocapture
 
 #![cfg(feature = "onnx")]
 

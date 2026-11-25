@@ -71,6 +71,7 @@ pub struct ToolCall {
     category: Option<String>,
     source_id: Option<String>,
     revision_id: Option<String>,
+    performer: Option<String>,
 }
 
 impl ToolCall {
@@ -92,6 +93,7 @@ impl ToolCall {
             category: None,
             source_id: None,
             revision_id: None,
+            performer: None,
         }
     }
 
@@ -112,6 +114,34 @@ impl ToolCall {
     pub fn call_id(mut self, call_id: impl Into<String>) -> Self {
         self.call_id = Some(call_id.into());
         self
+    }
+
+    /// The participant that performed the call, when it is not the
+    /// default.
+    ///
+    /// By default a call inside a [`Turn`](super::Turn) is performed by the
+    /// turn's sender, and one recorded with
+    /// [`Session::observe_tool`](super::Session::observe_tool) by the
+    /// session's agent. Set this to record, say, a user's turn whose tool
+    /// call the reporting agent made: the turn keeps its sender and the
+    /// call is `PERFORMED_BY` this participant. A participant that doesn't
+    /// exist yet is created as kind `unknown`; naming a performer never
+    /// changes a participant's kind (only `register` makes an agent).
+    ///
+    /// Recording the same call id again with a different performer, explicit
+    /// or by default, is refused as an
+    /// [`IdConflict`](uniko_store::UnikoError::IdConflict).
+    #[must_use]
+    pub fn performer(mut self, participant_id: impl Into<String>) -> Self {
+        self.performer = Some(participant_id.into());
+        self
+    }
+
+    /// The explicit performer, when one was set with
+    /// [`performer`](Self::performer).
+    #[must_use]
+    pub fn performer_id(&self) -> Option<&str> {
+        self.performer.as_deref()
     }
 
     /// The arguments the tool was called with.
@@ -283,6 +313,9 @@ pub(crate) struct ToolPrepCtx<'a> {
     pub session_id: &'a str,
     /// The turn that made the call, for the unit path.
     pub turn_message_id: Option<&'a str>,
+    /// Who performs the call unless it names a performer: the turn's
+    /// sender on the unit path, the session's agent otherwise.
+    pub default_performer: &'a str,
     /// Tokens at or under which the result is also kept on the Action.
     pub inline_threshold: usize,
 }
@@ -301,7 +334,16 @@ pub(crate) async fn prepare_tool_call(
         .or_else(|| call.triggered_by.clone());
 
     let rendered = call.output.as_ref().map(render_output);
-    let hash = rendered.as_ref().map(|(bytes, _, _)| payload_hash(bytes));
+    let output_hash = rendered.as_ref().map(|(bytes, _, _)| payload_hash(bytes));
+    // The replay key is the result alone. The performer is compared on its
+    // own when a call id is seen again (`write_tool_calls_in_tx`), against
+    // the performer this call resolves to, so the check doesn't depend on
+    // which context's default the performer happens to be.
+    let performer_id = call
+        .performer
+        .clone()
+        .filter(|p| p != ctx.default_performer);
+    let hash = output_hash.clone();
     let action_id = call.call_id.clone().unwrap_or_else(|| {
         uniko_store::id::stable_hex64("call", |h| {
             for part in [
@@ -313,7 +355,7 @@ pub(crate) async fn prepare_tool_call(
                     .as_ref()
                     .map(JsonValue::to_string)
                     .unwrap_or_default(),
-                hash.as_deref().unwrap_or(""),
+                output_hash.as_deref().unwrap_or(""),
             ] {
                 h.update(part.as_bytes());
                 h.update(b"\x00");
@@ -388,5 +430,6 @@ pub(crate) async fn prepare_tool_call(
             .visibility
             .filter(|v| *v != Visibility::Public)
             .map(|v| v.as_property()),
+        performer_id,
     })
 }

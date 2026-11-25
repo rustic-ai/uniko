@@ -1,7 +1,6 @@
 //! # uniko-cortex — Layer 5: Higher Reasoning
 //!
-//! Procedure promotion, topic detection, MCTS planning, rule induction,
-//! working memory traversal, and NL-to-Cypher translation.
+//! Procedure promotion and topic detection.
 //!
 //! Depends on `uniko-store` only.  "Layer 5" is cognitive altitude, not
 //! build order: in the dependency graph this crate is a sibling of

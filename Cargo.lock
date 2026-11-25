@@ -3337,9 +3337,9 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -9900,9 +9900,9 @@ checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "uni-algo"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c48fc3cb1f7efc7882bc7bd1e1c33b0484708d21e3d720d84c16ebf8d29eeda3"
+checksum = "665a13bdfa60ad919329507c5db8cb2f75d37ee741bfe1480dba18d7eed06da7"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -9922,9 +9922,9 @@ dependencies = [
 
 [[package]]
 name = "uni-btic"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c5ce345c4b9e65bc18965f2eda89040e788c3a69fb16da9f9333fe2ce1565e"
+checksum = "7a81230c69f40c8eddeaf02176b37054dcb0986bdbbc1161b1345979256c0f3f"
 dependencies = [
  "chrono",
  "serde",
@@ -9933,9 +9933,9 @@ dependencies = [
 
 [[package]]
 name = "uni-bulk"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80f9d50ee80baa85391f2d0f95d8dda695e9cf41c46a0c2d958bef6d30d1ed21"
+checksum = "0bc6d75d6b82a798cbd6b4930848c75fb32113536eeab3f52eb0a4aff43c0f1f"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -9957,9 +9957,9 @@ dependencies = [
 
 [[package]]
 name = "uni-common"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd384515267267b3e6db7066809a3f2758341462b560c1e99c4e6e9694b122ac"
+checksum = "820796f0f52f28b7c6c54e5da8afa4c37bd474659ed22cbd07430c4d3fb61f21"
 dependencies = [
  "anyhow",
  "arrow-schema",
@@ -9982,9 +9982,9 @@ dependencies = [
 
 [[package]]
 name = "uni-crdt"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37b89257f83691da895a3a4440c23c31fb0a5624f25d8fb3e8b58ced4a0f1f81"
+checksum = "26a84aaeab417dca9ffd74a7f70941d74bbba6a3f9adf9cd248ec2490340bb21"
 dependencies = [
  "rmp-serde",
  "rustc-hash",
@@ -9998,9 +9998,9 @@ dependencies = [
 
 [[package]]
 name = "uni-cypher"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f6e2dea9a97018fc6e355cfdc5b70486030007d794a0987da789a15ab5db77a"
+checksum = "cf06fc7391c8f3617a06f3956782029ccbf9646a3a0bcc16b3f8ec350fb47ff9"
 dependencies = [
  "pest",
  "pest_derive",
@@ -10012,9 +10012,9 @@ dependencies = [
 
 [[package]]
 name = "uni-db"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a12b7497084104b02eeb74557148f51d542d87452c86a14170d08ff712a8ff60"
+checksum = "fc61afb9a9c114d52b497208ca9026b1b2e73c3302a7d5d3df4c562b316e1818"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10070,9 +10070,9 @@ dependencies = [
 
 [[package]]
 name = "uni-fork"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "226590712283fff1e9bf8c03e6947d11853a396d68ae1d011ad219f3d9be8451"
+checksum = "0ad9634b8fdd9826c0736766b45f07091edf38f91fe530f6a2824a6877b90876"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10088,9 +10088,9 @@ dependencies = [
 
 [[package]]
 name = "uni-locy"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e0c88f00b228564b07884d9d26d996b84c67632c0ecb16425ec681566b389f9"
+checksum = "e3867fda7798f63183d4bb51b7ae5a42dc49a920fab8d795ecdb214a21f0258c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10105,9 +10105,9 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c89519dd0f3fa5157a5184984d730abdfaf5c4d9a82d442b817e3c7168b6c4f"
+checksum = "ac19ed98f679162fe48ea3d0cf1572de6465bc5da085a9ee5056d76503325d74"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -10140,9 +10140,9 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-apoc-core"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8c68f252b8324f088a274294cee494df3e9ba69106c2b2df3fc0aacc5fa312c"
+checksum = "1dd6ab49c5ba8aec5e6611d3a9b3d514a5fb550841b66c056cc4c71f6fac2b96"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10162,9 +10162,9 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-builtin"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e23656568393d2d8bc181630167c44ceb1ccec3a4d9bf07862f6cfc69450d12"
+checksum = "5ad2e683f24a8fdd7f7fc261c097f9cc869e1cad8b5c4757eefa68705e7ca5aa"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10191,9 +10191,9 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-custom"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bdb171b6d60fa19813b137a474ceed95fe30fcf4e01f5d2bed54c3119c8d748"
+checksum = "f471ced61193ba3eb1c951a902577972e650a849537428698c828910183ab273"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10214,9 +10214,9 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-host"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa952dfe607243a35b2042fb4906fe47f2de82155c170d7803970ce2945e8c44"
+checksum = "5ec86d52e2f1d500a41c42afd731be19af1b157967b6a474061c367775c913f6"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10252,9 +10252,9 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-rhai"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8857a0c85569c43a125397869e515c23338ecfb6d3a84119fb4fc4003375aabe"
+checksum = "d12b9220a7ba9850b0c54d9cc57c4a6c1a957ebf1bc1c623c5c504879e51d34a"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10278,9 +10278,9 @@ dependencies = [
 
 [[package]]
 name = "uni-query"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9024724923de77f70c53188d652821376c965258c77e033bc66113f34be7a2ca"
+checksum = "268c4a824fda2b884fe51baaa9a5b419835b3ee43d4ed898e55f71cbb854c995"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10324,13 +10324,14 @@ dependencies = [
  "uni-sparse-vector",
  "uni-store",
  "uni-xervo",
+ "url",
 ]
 
 [[package]]
 name = "uni-query-functions"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94928fc5a723dc0004e7c1094e98641d943515d0bb78a20dac87f7b0af38278b"
+checksum = "48584fb7eb0c16fd9d1888b145d5a83a22640225ecbe82ac9038d706e88cc7ba"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10365,9 +10366,9 @@ dependencies = [
 
 [[package]]
 name = "uni-sidecar"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa1d95f78d0118011b38babc24252e703a27a65dbfdb3bcc045ab7ff48f01627"
+checksum = "7a086aa121f2e58dfebabdbcbbe6ff264865889a2b04afd6ad1434eb1c6fc875"
 dependencies = [
  "serde",
  "serde_json",
@@ -10376,9 +10377,9 @@ dependencies = [
 
 [[package]]
 name = "uni-sparse-vector"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e3b183c81ccf75e0b6cbe706ef3e67ba2b96613024817723ebb78ce386a167a"
+checksum = "f751230d5e2f42d7391d4d7ef6f556d1df224b5e5072c9412347fc5037499003"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -10386,9 +10387,9 @@ dependencies = [
 
 [[package]]
 name = "uni-store"
-version = "5.2.1"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15ec1f8596ceff339c0dd82cbba5e22f708e30582b749ed79bf414ea575b364f"
+checksum = "015a86e694fdc72deca8adc06676a2c057ee25132ea1d9faa390c794ac913808"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -10396,6 +10397,10 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-types",
  "base64 0.22.1",
  "blake3",
  "bytes",
@@ -10416,6 +10421,7 @@ dependencies = [
  "serde_json",
  "sha3",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
@@ -10430,9 +10436,9 @@ dependencies = [
 
 [[package]]
 name = "uni-xervo"
-version = "0.19.2"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a754c6566e43c332b4c6c832f8d90aa364c8a0159ba6fb9b78cce3d26b9047f"
+checksum = "83395d1380abbbc735e7aed4d31a88c1ceb2a53fa3a698b1c9183a582f03eb96"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10461,9 +10467,9 @@ dependencies = [
 
 [[package]]
 name = "uni-xervo-pdf"
-version = "0.19.2"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f403d07cc6c99f518803a4d56bd919e7e73dd6ad4adabab99246bc6287ba2305"
+checksum = "98803f1967259bb82fd053d740b81913410ea9d8b2c679303a125ce979fdc6e1"
 dependencies = [
  "async-trait",
  "hayro",
@@ -10535,7 +10541,7 @@ checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 
 [[package]]
 name = "uniko-api"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "uniko-cortex",
  "uniko-memory",
@@ -10543,7 +10549,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-bench"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10569,7 +10575,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-cortex"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "serde",
@@ -10583,7 +10589,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-cuda"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -10596,7 +10602,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-extract"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10633,7 +10639,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-memory"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10656,7 +10662,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-metal"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -10669,7 +10675,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-pipes"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10689,7 +10695,7 @@ dependencies = [
 
 [[package]]
 name = "uniko-py"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "pyo3",
@@ -10702,10 +10708,11 @@ dependencies = [
 
 [[package]]
 name = "uniko-store"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures",
  "hex",
  "object_store 0.13.2",
  "proptest",
@@ -10718,6 +10725,7 @@ dependencies = [
  "tracing",
  "uni-db",
  "uni-xervo",
+ "url",
  "uuid",
 ]
 
@@ -10765,9 +10773,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

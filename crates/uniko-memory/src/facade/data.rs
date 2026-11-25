@@ -64,6 +64,57 @@ pub struct ArtifactView {
     pub attached_to_message: Option<String>,
 }
 
+/// The original media a text artifact was derived from; see
+/// [`Data::media_sources`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct MediaSourceView {
+    /// The source artifact's external id. With
+    /// [`bytes_retained`](Self::bytes_retained), pass it to
+    /// [`Data::artifact_bytes`] for the original bytes.
+    pub artifact_id: String,
+    /// `image`, `audio` or `video`.
+    pub modality: Option<String>,
+    /// MIME type.
+    pub mime: Option<String>,
+    /// SHA-256 hex of the original bytes.
+    pub hash: String,
+    /// Byte length.
+    pub size: Option<i64>,
+    /// Source path, when one was known.
+    pub path: Option<String>,
+    /// Audio duration in milliseconds, from a WAV header.
+    pub duration_ms: Option<i64>,
+    /// Audio sample rate in Hz, from a WAV header.
+    pub sample_rate: Option<i32>,
+    /// Audio channel count, from a WAV header.
+    pub channels: Option<i32>,
+    /// How the text was derived: `ocr`, `caption`, `transcript`,
+    /// `document_extract`, `multimodal` (several kinds), or `extract` (a
+    /// callback's plain text). `None` when you passed the source's own id.
+    pub derivation_kind: Option<String>,
+    /// Whether the original bytes are stored.
+    pub bytes_retained: bool,
+}
+
+impl From<uniko_store::repository::media::MediaSource> for MediaSourceView {
+    fn from(m: uniko_store::repository::media::MediaSource) -> Self {
+        Self {
+            artifact_id: m.artifact_id,
+            modality: m.modality,
+            mime: m.mime,
+            hash: m.hash,
+            size: m.size,
+            path: m.path,
+            duration_ms: m.header.duration_ms,
+            sample_rate: m.header.sample_rate,
+            channels: m.header.channels,
+            derivation_kind: m.derivation_kind,
+            bytes_retained: m.bytes_retained,
+        }
+    }
+}
+
 /// Addressed (by-id) retrieval over an agent's store.
 ///
 /// Borrows the [`Agent`]; obtain one with [`Agent::data`](crate::Agent::data).
@@ -179,6 +230,39 @@ impl<'a> Data<'a> {
     /// artifact none of whose chunks the reader may see is not readable at
     /// all.
     pub(crate) async fn artifact_access(
+        &self,
+        artifact_nid: NodeId,
+        chunk_nids: &[NodeId],
+    ) -> Result<ArtifactAccess, UnikoError> {
+        // A media source has no chunks or context of its own: it is as
+        // readable as the text derived from it. Its bytes would reveal
+        // whatever any of that text withholds, so every derived artifact
+        // must be wholly readable.
+        // A media source never has chunks, so an artifact with any is not
+        // one and needs no extra lookup.
+        let derived = if chunk_nids.is_empty() {
+            self.kb().artifacts_derived_from(artifact_nid).await?
+        } else {
+            Vec::new()
+        };
+        if !derived.is_empty() {
+            let mut whole = true;
+            for (nid, chunks) in &derived {
+                let access = self.direct_access(*nid, chunks).await?;
+                whole &= access.readable && access.whole;
+            }
+            return Ok(ArtifactAccess {
+                readable: whole,
+                chunks: HashSet::new(),
+                whole,
+            });
+        }
+        self.direct_access(artifact_nid, chunk_nids).await
+    }
+
+    /// [`artifact_access`](Self::artifact_access) for an artifact that is
+    /// not a media source.
+    async fn direct_access(
         &self,
         artifact_nid: NodeId,
         chunk_nids: &[NodeId],
@@ -338,6 +422,71 @@ impl<'a> Data<'a> {
             return Ok(None);
         }
         Ok(Some(self.kb().fetch_blob(&content_id).await?))
+    }
+
+    /// The original media an artifact's text was derived from: the image,
+    /// recording or video an extractor read, when it was ingested with a
+    /// [`MediaRetention`](crate::MediaRetention) other than `None`.
+    ///
+    /// Pass the id of a derived artifact (a recall hit's `artifact_id`, or
+    /// an ingest result's) to trace it back to its source; passing a media
+    /// source's own id returns that source. Each source's bytes, when
+    /// [`bytes_retained`](MediaSourceView::bytes_retained), are read with
+    /// [`artifact_bytes`](Self::artifact_bytes) on its `artifact_id`.
+    ///
+    /// Returns an empty list when the artifact is unknown, has no recorded
+    /// source, or the agent's viewer may not read it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnikoError`] when a graph query fails.
+    pub async fn media_sources(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Vec<MediaSourceView>, UnikoError> {
+        let params = str_param("id", artifact_id);
+        let rows = self
+            .kb()
+            .query_cypher(
+                "MATCH (a:Artifact {artifact_id: $id}) \
+                 OPTIONAL MATCH (a)-[:HAS_CHUNK]->(c:Chunk) \
+                 RETURN id(a) AS nid, collect(id(c)) AS chunks",
+                &params,
+            )
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(Vec::new());
+        };
+        let Some(artifact_nid) = cell_int(row, "nid") else {
+            return Ok(Vec::new());
+        };
+        let chunk_nids: Vec<NodeId> = match row.get("chunks") {
+            Some(Value::List(items)) => items
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Int(n) => Some(*n),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !self
+            .artifact_access(artifact_nid, &chunk_nids)
+            .await?
+            .readable
+        {
+            return Ok(Vec::new());
+        }
+        // Each source is as visible as everything derived from it, not just
+        // the artifact asked about: another artifact derived from the same
+        // media may be hidden from this viewer.
+        let mut out = Vec::new();
+        for source in self.kb().media_sources(artifact_id).await? {
+            if self.artifact_access(source.node_id, &[]).await?.readable {
+                out.push(MediaSourceView::from(source));
+            }
+        }
+        Ok(out)
     }
 
     /// Collect a single `v`-aliased external-id column into a `Vec`.

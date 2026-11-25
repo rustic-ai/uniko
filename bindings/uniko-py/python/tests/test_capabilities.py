@@ -49,7 +49,9 @@ async def test_typed_capabilities() -> None:
     assert isinstance(caps, Capabilities)
     _check(caps.model_dump())
     assert caps.models is not None
-    assert all(m.state in {"not_loaded", "loaded", "failed"} for m in caps.models)
+    assert all(
+        m.state in {"not_loaded", "loading", "loaded", "failed"} for m in caps.models
+    )
 
 
 def test_a_failed_model_validates_with_its_error() -> None:

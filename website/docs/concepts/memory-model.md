@@ -30,14 +30,14 @@ the schema's **26 node types** appears in exactly one family below:
 | Working | Active goal context (computed, not stored) | `Goal`, `Task` |
 | Episodic | What happened — communication, operations, experience | `Message`, `Action`, `Episode` |
 | Semantic | What we know — extracted and consolidated knowledge | `Entity`, `Observation`, `Fact`, `Topic`, `Summary` |
-| Procedural | What works — proven patterns and formal logic | `Procedure`, `Rule` |
+| Procedural | What works — proven patterns and formal logic | `Procedure`, `Rule`, `Pattern` |
 | Meta | How knowledge is managed — consolidation and operational tracking | `ConsolidationCycle`, `KnowledgeBaseStats`, `DeadLetter`[^infra] |
 | Support | The connective tissue everything hangs from | `Participant`, `Session`, `Source`, `Artifact`, `ArtifactContent`, `Chunk`, `Page`, `Block`, `Organization`, `Team` |
 
 [^infra]: A few nodes are included here for completeness but are bookkeeping
     rather than cognitive families in their own right: `DeadLetter` captures
     failed pipeline items and `KnowledgeBaseStats` is a KB-level singleton
-    counter (both grouped under Meta for their management role), while
+    metadata node (both grouped under Meta for their management role), while
     `ArtifactContent`, `Page`, and `Block` are document-IR plumbing under
     Support. `Summary` sits in Semantic to match its schema layer — it is
     consolidated knowledge derived from messages, not connective tissue.
@@ -149,7 +149,8 @@ records it verbatim before it derives anything from it.
 
     Note this is a different sweep from fact consolidation, whose input unit is the
     `Observation`: a cycle pulls unprocessed Observations, groups them by
-    `(subject, predicate)`, and records `PROCESSED` edges for idempotency.
+    `(subject, predicate)` within each visibility scope, and records `PROCESSED`
+    edges for idempotency.
 
 ---
 
@@ -210,9 +211,12 @@ captures reusable competence proven by experience.
 - **`Rule`** — a Locy logic rule for formal reasoning, with `source` (Locy
   source code), a natural-language description, and a `source_type` of
   `stdlib`, `authored`, or `induced`. Rules carry precision/recall/confidence
-  scores and a lifecycle (active → demoted → pruned, or superseded). The schema reserves
+  scores and a lifecycle (candidate → active → demoted → pruned, or superseded). The schema reserves
   `DERIVED_BY` for recording which rule produced a Fact, though no code path
   writes that edge yet.
+- **`Pattern`** — a recurring episode pattern (grouped by action type and
+  outcome) surfaced by the `episode_pattern_detector` stdlib Locy rule, with a
+  `support` count and `mean_importance`.
 
 !!! note "Rules run inside the database"
     Rules and procedures are first-class schema nodes with full provenance edges, and
@@ -234,8 +238,9 @@ not a black box — it leaves a record you can query.
   `APPLIED_RULE`…) let you answer "why does this fact exist?" and "what
   happened in the last cycle?"
 - **`KnowledgeBaseStats`** — a singleton metadata node carrying KB-level state
-  such as which modalities have content and the persisted storage
-  configuration, so a mismatched reopen can hard-error rather than corrupt.
+  such as which modalities have content, the persisted blob-storage
+  configuration and embedding identity (so a mismatched reopen can hard-error
+  rather than corrupt), and any in-place migration still in progress.
 
 The recall cascade — uniko's layered retrieval engine — is also part of
 meta-memory: it governs *how* the other families are searched, querying the

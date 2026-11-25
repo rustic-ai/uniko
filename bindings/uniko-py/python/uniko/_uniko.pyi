@@ -7,6 +7,7 @@ the async method returns an awaitable driven by ``asyncio``; its ``*_sync``
 twin blocks the calling thread and returns the resolved value directly.
 """
 
+import builtins
 import datetime
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Awaitable, Literal, final
@@ -14,11 +15,16 @@ from typing import Any, Awaitable, Literal, final
 from uniko.models.config import UnikoConfigModel
 from uniko.types import (
     CircuitState,
+    DeadLetterStatus,
     GoalPhase,
+    MigrationName,
+    MigrationProgressEvent,
     IngestKind,
     RecallKind,
     RecallSourceKind,
+    RegistrationOutcome,
     TaskPhase,
+    VerdictName,
     WorkerStatus,
 )
 
@@ -51,6 +57,20 @@ class DegradedError(UnikoError):
     """A stage fell back or failed during a strict operation."""
 
     diagnostics: list[dict[str, Any]]
+
+class IncompatibleStoreError(ConfigError):
+    """The store can't be opened with this config as is.
+
+    ``differences`` holds one dict per difference, shaped like
+    ``StoreDifference``: ``field``, ``stored``, ``requested``, ``verdict``
+    and ``migration``. ``compatible`` and ``migrations`` are as on
+    ``StoreReport``; ``migrations`` is empty when any difference is
+    incompatible.
+    """
+
+    differences: list[dict[str, Any]]
+    compatible: bool
+    migrations: list[MigrationName]
 
 class ReadinessError(UnikoError):
     """A required model or stage is unavailable."""
@@ -86,6 +106,7 @@ class RecallItem:
     token_count: int
     context: str | None
     address: str | None
+    position: MediaPosition | None
     def __repr__(self) -> str: ...
 
 @final
@@ -301,6 +322,104 @@ class ExtractRequest:
     def __repr__(self) -> str: ...
 
 @final
+class Segment:
+    text: str
+    kind: str
+    page: int | None
+    start_ms: int | None
+    end_ms: int | None
+    bbox: tuple[float, float, float, float] | None
+    confidence: float | None
+    speaker: str | None
+    def __new__(
+        cls,
+        text: str,
+        kind: str = "text",
+        *,
+        page: int | None = None,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        bbox: tuple[float, float, float, float] | None = None,
+        confidence: float | None = None,
+        speaker: str | None = None,
+    ) -> Segment: ...
+    def __repr__(self) -> str: ...
+
+@final
+class ModelProvenance:
+    alias: str
+    model_id: str
+    task: str
+    def __new__(cls, alias: str, model_id: str, task: str) -> ModelProvenance: ...
+    def __repr__(self) -> str: ...
+
+@final
+class Extraction:
+    segments: list[Segment]
+    model: ModelProvenance | None
+    def __new__(
+        cls, segments: list[Segment], model: ModelProvenance | None = None
+    ) -> Extraction: ...
+    def __repr__(self) -> str: ...
+
+@final
+class VideoFrame:
+    timestamp_ms: int
+    data: bytes
+    mime: str
+    def __new__(cls, timestamp_ms: int, data: bytes, mime: str) -> VideoFrame: ...
+    def __repr__(self) -> str: ...
+
+@final
+class VideoParts:
+    frames: list[VideoFrame]
+    audio: bytes | None
+    def __new__(
+        cls, frames: list[VideoFrame], audio: bytes | None = None
+    ) -> VideoParts: ...
+    def __repr__(self) -> str: ...
+
+@final
+class SegmentPosition:
+    start: int
+    end: int
+    page: int | None
+    time_start_ms: int | None
+    time_end_ms: int | None
+    bbox: tuple[float, float, float, float] | None
+    confidence: float | None
+    speaker: str | None
+    def __repr__(self) -> str: ...
+
+@final
+class MediaPosition:
+    modality: str
+    source_model_version: str | None
+    page: int | None
+    time_start_ms: int | None
+    time_end_ms: int | None
+    bbox: tuple[float, float, float, float] | None
+    confidence: float | None
+    speaker: str | None
+    segments: list[SegmentPosition]
+    def __repr__(self) -> str: ...
+
+@final
+class MediaSourceView:
+    artifact_id: str
+    modality: str | None
+    mime: str | None
+    hash: str
+    size: int | None
+    path: str | None
+    duration_ms: int | None
+    sample_rate: int | None
+    channels: int | None
+    derivation_kind: str | None
+    bytes_retained: bool
+    def __repr__(self) -> str: ...
+
+@final
 class RuleView:
     name: str
     source_type: str
@@ -335,6 +454,127 @@ class WorkerHealth:
     items_failed: int
     avg_latency_ms: float
     degradations: dict[str, int]
+    dead_lettered: int
+    retries: int
+    retries_succeeded: int
+    def __repr__(self) -> str: ...
+
+@final
+class StoredEmbedding:
+    model_id: str | None
+    dimensions: int | None
+    sparse_dimensions: int | None
+    multivector_dimensions: int | None
+    algorithm: str | None
+    metric: str | None
+    embed_alias: str | None
+    document_prefix: str | None
+    query_prefix: str | None
+    batch_size: int | None
+    @property
+    def is_hybrid(self) -> bool: ...
+    def __repr__(self) -> str: ...
+
+@final
+class StoreInfo:
+    exists: bool
+    embedding: StoredEmbedding
+    hybrid_backfill_pending: int | None
+    migration_in_progress: MigrationName | None
+    def __repr__(self) -> str: ...
+
+@final
+class StoreDifference:
+    field: str
+    stored: str
+    requested: str
+    verdict: VerdictName
+    migration: MigrationName | None
+    def __repr__(self) -> str: ...
+
+@final
+class StoreReport:
+    info: StoreInfo
+    differences: builtins.list[StoreDifference]
+    compatible: bool
+    migrations: builtins.list[MigrationName]
+    def __repr__(self) -> str: ...
+
+@final
+class MigrationReport:
+    migration: MigrationName
+    rows_backfilled: int
+    rows_unfilled: int
+    completed: bool
+    elapsed_secs: float
+    migration_in_progress: MigrationName | None
+    def __repr__(self) -> str: ...
+
+@final
+class Registration:
+    participant_id: str
+    outcome: RegistrationOutcome
+    def __repr__(self) -> str: ...
+
+@final
+class DeadLetter:
+    id: str
+    step: str
+    error: str
+    error_kind: str | None
+    retriable: bool
+    status: DeadLetterStatus
+    retry_count: int
+    max_retries: int
+    ingest_type: str | None
+    agent_id: str | None
+    replayable: bool
+    created_at: datetime.datetime | None
+    updated_at: datetime.datetime | None
+    next_retry_at: datetime.datetime | None
+    resolved_at: datetime.datetime | None
+    resolution: str | None
+    def __repr__(self) -> str: ...
+
+@final
+class DeadLetterCounts:
+    pending: int
+    retrying: int
+    exhausted: int
+    resolved: int
+    legacy: int
+    def __repr__(self) -> str: ...
+
+@final
+class RetryRefusal:
+    id: str
+    reason: str
+    def __repr__(self) -> str: ...
+
+@final
+class RetryReport:
+    retried: builtins.list[str]
+    refused: builtins.list[RetryRefusal]
+    def __repr__(self) -> str: ...
+
+@final
+class DeadLetters:
+    def list(
+        self, *, status: DeadLetterStatus | None = None, limit: int | None = None
+    ) -> Awaitable[builtins.list[DeadLetter]]: ...
+    def list_sync(
+        self, *, status: DeadLetterStatus | None = None, limit: int | None = None
+    ) -> builtins.list[DeadLetter]: ...
+    def get(self, id: str) -> Awaitable[DeadLetter | None]: ...
+    def get_sync(self, id: str) -> DeadLetter | None: ...
+    def counts(self) -> Awaitable[DeadLetterCounts]: ...
+    def counts_sync(self) -> DeadLetterCounts: ...
+    def retry(self, id: str, *, force: bool = False) -> Awaitable[None]: ...
+    def retry_sync(self, id: str, *, force: bool = False) -> None: ...
+    def retry_pending(self, limit: int = 100) -> Awaitable[RetryReport]: ...
+    def retry_pending_sync(self, limit: int = 100) -> RetryReport: ...
+    def resolve(self, id: str, note: str | None = None) -> Awaitable[bool]: ...
+    def resolve_sync(self, id: str, note: str | None = None) -> bool: ...
     def __repr__(self) -> str: ...
 
 @final
@@ -443,7 +683,12 @@ class Turn:
 @final
 class ToolCall:
     def __new__(cls, tool_name: str) -> ToolCall: ...
+    @property
+    def tool_name(self) -> str: ...
+    @property
+    def performer_id(self) -> str | None: ...
     def call_id(self, call_id: str) -> ToolCall: ...
+    def performer(self, participant_id: str) -> ToolCall: ...
     def arguments(self, arguments: Any) -> ToolCall: ...
     def json_output(self, value: Any) -> ToolCall: ...
     def text_output(self, text: str) -> ToolCall: ...
@@ -551,6 +796,7 @@ class SearchHit:
     chunk_id: str
     chunk_index: int
     address: str | None
+    position: MediaPosition | None
     start: int
     end: int
     text: str
@@ -616,6 +862,8 @@ class Data:
     def message_sync(self, message_id: str) -> MessageView | None: ...
     def artifact(self, artifact_id: str) -> Awaitable[ArtifactView | None]: ...
     def artifact_sync(self, artifact_id: str) -> ArtifactView | None: ...
+    def media_sources(self, artifact_id: str) -> Awaitable[list[MediaSourceView]]: ...
+    def media_sources_sync(self, artifact_id: str) -> list[MediaSourceView]: ...
     def artifact_bytes(self, artifact_id: str) -> Awaitable[bytes | None]: ...
     def artifact_bytes_sync(self, artifact_id: str) -> bytes | None: ...
     def __repr__(self) -> str: ...
@@ -834,6 +1082,8 @@ class Session:
 class Agent:
     @property
     def agent_id(self) -> str: ...
+    def register(self, *, name: str | None = None) -> Awaitable[Registration]: ...
+    def register_sync(self, *, name: str | None = None) -> Registration: ...
     def recall(self, query: str) -> Awaitable[ContextBundle]: ...
     def recall_sync(self, query: str) -> ContextBundle: ...
     def answer(self, question: str) -> Awaitable[Answer]: ...
@@ -1066,11 +1316,30 @@ class UnikoBuilder:
     ) -> UnikoBuilder: ...
     def require(self, requirements: list[Requirement]) -> UnikoBuilder: ...
     def readiness_timeout(self, seconds: float | None) -> UnikoBuilder: ...
+    def verify_remote(self, on: bool) -> UnikoBuilder: ...
     def streaming(self, on: bool) -> UnikoBuilder: ...
     def scope_to_agent(self) -> UnikoBuilder: ...
     def scope(self, viewer: Viewer | None) -> UnikoBuilder: ...
     def extractor(
-        self, modality: str, extract: Callable[[ExtractRequest], str]
+        self,
+        modality: str,
+        extract: Callable[[ExtractRequest], str | Extraction | list[Extraction]],
+        *,
+        retention: str = "none",
+    ) -> UnikoBuilder: ...
+    def model_extractor(
+        self,
+        modality: str,
+        *,
+        ocr: str | None = None,
+        caption: str | None = None,
+        caption_prompt: str | None = None,
+        max_caption_tokens: int | None = None,
+        document: str | None = None,
+        transcribe: str | None = None,
+        language: str | None = None,
+        composer: Callable[[ExtractRequest], VideoParts] | None = None,
+        retention: str = "none",
     ) -> UnikoBuilder: ...
     def build(self) -> Awaitable[Uniko]: ...
     def build_sync(self) -> Uniko: ...
@@ -1120,9 +1389,61 @@ class Uniko:
     def in_memory_sync() -> Uniko: ...
     @staticmethod
     def builder() -> UnikoBuilder: ...
+    @staticmethod
+    def inspect_store(
+        path: str,
+        config: Mapping[str, Any] | UnikoConfigModel | None = None,
+        *,
+        embedding: str | Mapping[str, Any] | None = None,
+    ) -> Awaitable[StoreReport]: ...
+    @staticmethod
+    def inspect_store_sync(
+        path: str,
+        config: Mapping[str, Any] | UnikoConfigModel | None = None,
+        *,
+        embedding: str | Mapping[str, Any] | None = None,
+    ) -> StoreReport: ...
+    @staticmethod
+    def migrate_store(
+        path: str,
+        migration: MigrationName,
+        config: Mapping[str, Any] | UnikoConfigModel | None = None,
+        *,
+        embedding: str | Mapping[str, Any] | None = None,
+        progress: Callable[[MigrationProgressEvent], object] | None = None,
+    ) -> Awaitable[MigrationReport]:
+        """Migrate the store at ``path`` in place.
+
+        ``progress`` is called with a ``MigrationProgressEvent`` dict per
+        phase and batch. It can't cancel the migration: an exception it
+        raises (``KeyboardInterrupt`` and ``SystemExit`` included) or a panic
+        it sets off is printed to stderr and ignored. An ``async def``
+        callback is not awaited. The callback must not call other ``_sync``
+        uniko methods.
+        """
+    @staticmethod
+    def migrate_store_sync(
+        path: str,
+        migration: MigrationName,
+        config: Mapping[str, Any] | UnikoConfigModel | None = None,
+        *,
+        embedding: str | Mapping[str, Any] | None = None,
+        progress: Callable[[MigrationProgressEvent], object] | None = None,
+    ) -> MigrationReport:
+        """Blocking variant of ``migrate_store``.
+
+        The same ``progress`` rules apply: exceptions and panics in the
+        callback are printed to stderr and ignored, the callback can't cancel
+        the migration, an ``async def`` callback is not awaited, and the
+        callback must not call other ``_sync`` uniko methods.
+        """
+    def store_info(self) -> Awaitable[StoreInfo]: ...
+    def store_info_sync(self) -> StoreInfo: ...
     def agent(self, agent_id: str) -> Agent: ...
     def config(self) -> dict[str, Any]: ...
     def health(self) -> PipelineHealth | None: ...
+    @property
+    def dead_letters(self) -> DeadLetters: ...
     def add_team_member(self, participant_id: str, team_id: str) -> Awaitable[bool]: ...
     def add_team_member_sync(self, participant_id: str, team_id: str) -> bool: ...
     def remove_team_member(
@@ -1190,6 +1511,12 @@ __all__ = [
     "SummarizeReport",
     "PipelineHealth",
     "WorkerHealth",
+    "DeadLetter",
+    "DeadLetters",
+    "Registration",
+    "DeadLetterCounts",
+    "RetryReport",
+    "RetryRefusal",
     "ConsolidationReport",
     "PromotionReport",
     "TopicReport",
@@ -1198,6 +1525,14 @@ __all__ = [
     "RuleView",
     "MatchedProcedure",
     "ExtractRequest",
+    "Segment",
+    "ModelProvenance",
+    "Extraction",
+    "VideoFrame",
+    "VideoParts",
+    "MediaSourceView",
+    "MediaPosition",
+    "SegmentPosition",
     "Viewer",
     "MessageView",
     "ArtifactView",
@@ -1215,4 +1550,10 @@ __all__ = [
     "UnsupportedError",
     "ReadinessError",
     "DegradedError",
+    "IncompatibleStoreError",
+    "StoreReport",
+    "StoreInfo",
+    "StoredEmbedding",
+    "StoreDifference",
+    "MigrationReport",
 ]

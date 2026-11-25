@@ -65,27 +65,27 @@ all while running fully in-process on consumer hardware. See the
 
 ## Install
 
-uniko is a Rust library. Requires **Rust >= 1.91** (edition 2024). Add the crates you need
+uniko is a Rust library. Requires **Rust >= 1.95** (edition 2024). Add the crates you need
 from crates.io:
 
 ```toml
 [dependencies]
 # The facade re-exports the whole surface; `onnx` turns on local NLP + embedding.
-uniko-api = { version = "0.2.0", features = ["onnx"] }
+uniko-api = { version = "0.6.0", features = ["onnx"] }
 ```
 
 Or depend on a layer directly — all six crates are published:
 
 ```toml
 [dependencies]
-uniko-memory  = "0.2.0"  # recall cascade, consolidation, orchestration
-uniko-cortex  = "0.2.0"  # procedure promotion, topic detection
-uniko-extract = "0.2.0"  # NER / observations / chunking / atomic ingest
-uniko-pipes   = "0.2.0"  # pipeline infrastructure
-uniko-store   = "0.2.0"  # graph storage / search over uni-db
+uniko-memory  = "0.6.0"  # recall cascade, consolidation, orchestration
+uniko-cortex  = "0.6.0"  # procedure promotion, topic detection
+uniko-extract = "0.6.0"  # NER / observations / chunking / atomic ingest
+uniko-pipes   = "0.6.0"  # pipeline infrastructure
+uniko-store   = "0.6.0"  # graph storage / search over uni-db
 ```
 
-The `uni-db` dependency (`^3` — the latest 3.x) is pulled in transitively from
+The `uni-db` dependency (`^6.0` — the latest 6.x) is pulled in transitively from
 crates.io — there is nothing external to install or run.
 
 ### Python
@@ -132,6 +132,10 @@ async fn demo() -> uniko_store::Result<()> {
         addressed_to: None,
         timestamp: Utc::now(),
         metadata: HashMap::new(),
+        category: None,
+        source_id: None,
+        revision_id: None,
+        visibility: None, // `None` is public
     };
     ingest_message_atomic(&kb, &msg, &mut session_ctx).await?;
 
@@ -179,7 +183,7 @@ overlay at `uniko.models`. Prebuilt wheels ship on PyPI; see the
 [Python SDK docs](https://rustic-ai.github.io/uniko/python/).
 
 **Not yet available** (do not depend on these): an HTTP / MCP server, a CLI, and Phase 4–6
-features (multimodal ingest, rule induction, MCTS planning, cross-agent sharing). See the docs
+features (rule induction, MCTS planning, cross-agent sharing). See the docs
 for the honest roadmap.
 
 ## License

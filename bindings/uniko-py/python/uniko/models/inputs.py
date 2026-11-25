@@ -189,6 +189,7 @@ class ToolCallSpec(BaseModel):
 
     tool_name: str = Field(min_length=1)
     call_id: Optional[str] = None
+    performer: Optional[str] = Field(default=None, min_length=1)
     arguments: Optional[Any] = None
     json_output: Optional[Any] = None
     text_output: Optional[str] = None
@@ -224,6 +225,7 @@ class ToolCallSpec(BaseModel):
             "triggered_by",
             "after",
             "visibility",
+            "performer",
         ):
             value = getattr(self, name)
             if value is not None:
@@ -345,6 +347,7 @@ __all__ = [
     "ScopeSpec",
     "IngestSourceSpec",
     "TurnSpec",
+    "ToolCallSpec",
     "LlmSpecModel",
     "LlmSpecAdapter",
     "llm_to_native",

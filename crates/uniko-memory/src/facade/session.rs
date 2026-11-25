@@ -235,6 +235,7 @@ impl Session {
                 extractors: &self.extractors,
                 session_id: &session_id,
                 turn_message_id: Some(&message_id),
+                default_performer: &turn.sender_id,
                 inline_threshold: self.kb.config().action_output_artifact_threshold,
             };
             let mut tools = Vec::with_capacity(calls.len());
@@ -425,10 +426,15 @@ impl Session {
     /// [`Turn::tool_call`] when the turn that made the call is recorded too,
     /// so the two commit together.
     ///
+    /// The session's agent is recorded as an agent even when the call names
+    /// another performer, as for any write through an agent's handle (goals
+    /// do the same): it is the one that logged the call.
+    ///
     /// # Errors
     ///
     /// Returns [`UnikoError::IdConflict`](uniko_store::UnikoError::IdConflict)
-    /// when the call id was already recorded with a different result, or
+    /// when the call id was already recorded with a different result or
+    /// performer, or
     /// [`UnikoError`] on any preparation or write failure.
     pub async fn observe_tool(
         &self,
@@ -453,6 +459,7 @@ impl Session {
             extractors: &self.extractors,
             session_id: &self.ctx.session_id,
             turn_message_id: None,
+            default_performer: &self.agent_id,
             inline_threshold: self.kb.config().action_output_artifact_threshold,
         };
         let prepared = super::tool::prepare_tool_call(&tool_ctx, call).await?;
@@ -479,8 +486,10 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Returns [`UnikoError`] when a referenced message or prior action is
-    /// missing, or a write fails.
+    /// Returns [`UnikoError::IdConflict`](uniko_store::UnikoError::IdConflict)
+    /// when the action id was already recorded with a different output or by
+    /// another agent, or [`UnikoError`] when a referenced message or prior
+    /// action is missing, or a write fails.
     pub async fn record_action(
         &self,
         mut params: crate::action::RecordActionParams,
@@ -571,8 +580,9 @@ impl Session {
     /// Hard-delete a document Artifact and its structure subtree.
     ///
     /// Removes the Artifact, its Pages, Blocks, and Chunks. The deduped,
-    /// content-addressed `:ArtifactContent` blob is left in place.
-    /// Idempotent on an unknown id.
+    /// content-addressed `:ArtifactContent` blob is left in place. When it
+    /// was the last artifact derived from a recorded media source, that
+    /// source and its stored bytes go too. Idempotent on an unknown id.
     ///
     /// # Errors
     ///
@@ -686,7 +696,9 @@ pub struct Turn {
 }
 
 impl Turn {
-    /// A text turn from `sender_id` carrying `content`, stamped now.
+    /// A text turn from `sender_id` carrying `content`, stamped now. An empty
+    /// or blank `sender_id` is refused when the turn is recorded, with
+    /// [`UnikoError::Config`](uniko_store::UnikoError::Config).
     pub fn new(sender_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             message_id: None,

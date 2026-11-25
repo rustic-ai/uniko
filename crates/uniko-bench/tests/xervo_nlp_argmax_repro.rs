@@ -25,7 +25,7 @@
 //! Run with:
 //! ```bash
 //! cargo test -p uniko-bench --no-default-features \
-//!   --test xervo_nlp_argmax_repro -- --ignored --nocapture
+//!   --test integration xervo_nlp_argmax_repro:: -- --ignored --nocapture
 //! ```
 
 use uni_db::ModelAliasSpec;

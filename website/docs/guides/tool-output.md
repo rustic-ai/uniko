@@ -60,13 +60,43 @@ transaction as the turn: if the turn fails, neither is written.
 A call recorded apart from any turn uses `Session::observe_tool` (`session.observe_tool` in Python),
 naming its triggering message with `triggered_by` when there is one.
 
+### Who performed the call
+
+A call inside a turn is performed by the turn's sender, and one recorded with `observe_tool` by the
+session's agent. When someone else made the call, name them with `.performer(...)`. For example, a
+user's turn can carry a call the reporting agent made:
+
+```rust
+let call = ToolCall::new("search").call_id("call").text_output("Evidence").performer("reporter");
+session.commit_unit(vec![Turn::new("user", "Question").id("question").tool_call(call)]).await?;
+// Message -[:SENT_BY]-> user;  Action -[:PERFORMED_BY]-> reporter
+```
+
+The turn keeps its sender. A performer that doesn't exist yet is created as kind `unknown`; naming a
+performer never changes anyone's kind, so a person named as a performer stays a person. Mark an agent
+with `register`. Recording the same call id again is a replay only with the same result and the same
+performer, compared as resolved: the one named, or else the context's default (the turn's sender, or
+the session's agent for `observe_tool`). Anything else is refused with `UnikoError::IdConflict`,
+rather than replaying with the old `PERFORMED_BY` edge. So naming the default performer explicitly is
+the same as naming none, in any context. `observe_tool` still records the session's agent as an
+agent, as the one that logged the call.
+
+Two consequences of comparing the performer:
+
+- A call with no `call_id` gets an id derived from its session, triggering message, tool,
+  arguments and result, not from its performer. So two agents recording an identical id-less call in
+  one session conflict, where the second used to replay silently under the first's edge. Give each a
+  `call_id` to record both.
+- Replaying a call whose performer has since been deleted is a conflict too: the stored edge is
+  gone, so it can't match.
+
 What gets written:
 
 | Node / edge | What it holds |
 |---|---|
 | `Action` | `action_type = "tool_call"`, `tool_name`, `input` (the arguments), `status`, `error`, timing, and `payload_hash` |
 | `TRIGGERED_BY` → `Message` | the turn that made the call |
-| `IN_SESSION` → `Session`, `PERFORMED_BY` → `Participant` | the session, and the turn's sender |
+| `IN_SESSION` → `Session`, `PERFORMED_BY` → `Participant` | the session, and the turn's sender (or the call's `performer`) |
 | `NEXT_ACTION` | from the session's previous call (or the one named with `after`) |
 | `PRODUCED` → `Artifact {kind: "tool_output"}` | the result, verbatim, with its chunks |
 

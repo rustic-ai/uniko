@@ -168,7 +168,62 @@ pub async fn ingest_turns_atomic(
     }
 
     if absent.is_empty() {
-        // Whole-unit replay. Advance the chain head to the unit's LAST turn:
+        // Whole-unit replay, but only of the same unit: every tool call must
+        // already be recorded with the same result (its payload hash) and
+        // the same performer. A call that changed, or one the stored unit
+        // never had, is a conflict, not a silent replay.
+        let mut replayed_calls: Vec<Vec<super::tool::ToolCallOutcome>> =
+            Vec::with_capacity(unit.len());
+        for turn in unit {
+            let mut outcomes = Vec::with_capacity(turn.tools.len());
+            for call in &turn.tools {
+                let stored = kb
+                    .get_node_by_ext_id("Action", "action_id", &call.action_id)
+                    .await?;
+                let Some((nid, props)) = stored else {
+                    return Err(UnikoError::id_conflict(
+                        "Action",
+                        "action_id",
+                        &call.action_id,
+                    ));
+                };
+                let stored_hash = match props.get("payload_hash") {
+                    Some(uniko_store::Value::String(h)) => Some(h.as_str()),
+                    _ => None,
+                };
+                // The performer this call resolves to: the one it names, or
+                // the turn's sender.
+                let expected = kb
+                    .get_node_by_ext_id(
+                        "Participant",
+                        "participant_id",
+                        call.performer_id
+                            .as_deref()
+                            .unwrap_or(&turn.message.sender_id),
+                    )
+                    .await?
+                    .map(|(n, _)| n);
+                let performed_by = kb.action_performer(nid).await?;
+                if stored_hash != call.payload_hash.as_deref()
+                    || expected.is_none()
+                    || performed_by != expected
+                {
+                    return Err(UnikoError::id_conflict(
+                        "Action",
+                        "action_id",
+                        &call.action_id,
+                    ));
+                }
+                outcomes.push(super::tool::ToolCallOutcome {
+                    action_id: call.action_id.clone(),
+                    action_node: nid,
+                    payload: None,
+                    was_replay: true,
+                });
+            }
+            replayed_calls.push(outcomes);
+        }
+        // Advance the chain head to the unit's LAST turn:
         // its NEXT edge already exists on disk, so a following unit chaining
         // off it is correct. (The single-message path leaves the head stale,
         // which costs the *next* turn its NEXT edge.)
@@ -193,7 +248,7 @@ pub async fn ingest_turns_atomic(
         return Ok(UnitIngestResult {
             turns,
             attachments: unit.iter().map(|_| Vec::new()).collect(),
-            tool_calls: unit.iter().map(|_| Vec::new()).collect(),
+            tool_calls: replayed_calls,
             was_replay: true,
             attempts: 0,
         });
@@ -218,6 +273,13 @@ pub async fn ingest_turns_atomic(
             super::message::ensure_session_and_sender(kb, &turn.message, session_ctx).await?;
         session_nid = snid;
         sender_nids.insert(turn.message.sender_id.clone(), pnid);
+    }
+    // Explicit tool-call performers, set up the same way as senders.
+    let mut performer_nids: HashMap<String, NodeId> = HashMap::new();
+    for turn in unit {
+        for (id, nid) in super::tool::ensure_performers(kb, &turn.tools).await? {
+            performer_nids.insert(id, nid);
+        }
     }
 
     // ── P3. Recipients, per turn, over a PROGRESSIVE participant view. ──
@@ -438,8 +500,15 @@ pub async fn ingest_turns_atomic(
                     triggered_by_nid: Some(message_nids[i]),
                 };
                 tool_outcomes.push(
-                    super::tool::write_tool_calls_in_tx(kb, &tx, &turn.tools, ctx, &mut seen)
-                        .await?,
+                    super::tool::write_tool_calls_in_tx(
+                        kb,
+                        &tx,
+                        &turn.tools,
+                        ctx,
+                        &performer_nids,
+                        &mut seen,
+                    )
+                    .await?,
                 );
             }
             if std::env::var_os(FAIL_AFTER_TOOLS_ENV).is_some() {

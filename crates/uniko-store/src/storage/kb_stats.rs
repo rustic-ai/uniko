@@ -60,14 +60,20 @@ impl KnowledgeBase {
     /// backend serialized into the `blob_storage` map.
     ///
     /// On reopen: reads the persisted `blob_storage.kind` and embedding
-    /// identity. If either disagrees with the current config, returns
-    /// [`UnikoError::Config`] — there is no implicit migration. A row
-    /// with no embedding identity (a store from before it was recorded)
-    /// gets the current one written.
+    /// identity. A different backend returns [`UnikoError::Config`]; there
+    /// is no implicit migration. A different embedding model or dimension
+    /// size is normally refused before this runs: the open path's
+    /// compatibility check returns [`UnikoError::IncompatibleStore`] before
+    /// the schema is applied. This comparison is the backstop for a
+    /// `schema_path` config, which skips that check, and returns
+    /// [`UnikoError::Config`]. A row with no embedding identity (a store
+    /// from before it was recorded), or an incomplete one, gets the full
+    /// current identity written.
     ///
     /// # Errors
     ///
-    /// Returns [`UnikoError::Config`] on backend or embedding mismatch or
+    /// Returns [`UnikoError::Config`] on a backend mismatch, or on an
+    /// embedding mismatch that reached it under a `schema_path` config, or
     /// [`UnikoError::Storage`] on database failure.
     pub async fn init_kb_stats(&self) -> Result<()> {
         let session = self.db.session();
@@ -90,6 +96,7 @@ impl KnowledgeBase {
         });
 
         let persisted_embedding = row.and_then(|r| decode_embedding_identity(r.value("embedding")));
+        let persisted_full = row.and_then(|r| r.value("embedding").cloned());
 
         let want_kind = self.config.blob_storage.kind();
 
@@ -105,10 +112,21 @@ impl KnowledgeBase {
             }
         }
 
+        // The open path's compatibility check has already refused a store
+        // this config can't serve; this is the backstop for a `schema_path`
+        // config, which skips it.
         let want = EmbeddingIdentity::of(self);
         match persisted_embedding {
             None => self.write_embedding_identity().await,
-            Some(have) if have == want => Ok(()),
+            // Same model: bring the record up to date (a store from before
+            // the full identity was kept, or one a migration just changed).
+            Some(have) if have == want => {
+                if persisted_full.as_ref() == Some(&EmbeddingIdentity::encode_full(self)) {
+                    Ok(())
+                } else {
+                    self.write_embedding_identity().await
+                }
+            }
             Some(have) => Err(UnikoError::Config(format!(
                 "embedding mismatch on KB reopen: the store was built with \
                  model_id={} ({} dimensions), config has model_id={} ({} \
@@ -129,7 +147,7 @@ impl KnowledgeBase {
              SET s.embedding = $emb, s.updated_at = $now",
         )
         .param("sid", Value::String(STATS_ID.to_string()))
-        .param("emb", EmbeddingIdentity::of(self).encode())
+        .param("emb", EmbeddingIdentity::encode_full(self))
         .param("now", datetime_value(Utc::now()))
         .fetch_all()
         .await?;
@@ -154,7 +172,7 @@ impl KnowledgeBase {
         tx.query_with(cypher)
             .param("sid", Value::String(STATS_ID.to_string()))
             .param("bs", encode_blob_storage(&self.config.blob_storage))
-            .param("emb", EmbeddingIdentity::of(self).encode())
+            .param("emb", EmbeddingIdentity::encode_full(self))
             .param("mp", empty_modality_presence())
             .param("now", datetime_value(Utc::now()))
             .fetch_all()
@@ -282,10 +300,8 @@ impl KnowledgeBase {
     }
 }
 
-/// Serialize a [`BlobStorage`] into the `:KnowledgeBaseStats.blob_storage`
-/// map shape. Only `kind` is required for the mismatch check; the
-/// remaining fields are persisted as informational metadata.
-/// The embedding model a store's vectors were made with.
+/// The embedding model a store's vectors were made with: the part of the
+/// stored identity the reopen check compares.
 #[derive(Debug, PartialEq, Eq)]
 struct EmbeddingIdentity {
     model_id: String,
@@ -300,11 +316,10 @@ impl EmbeddingIdentity {
         }
     }
 
-    fn encode(&self) -> Value {
-        let mut m: HashMap<String, Value> = HashMap::new();
-        m.insert("model_id".into(), Value::String(self.model_id.clone()));
-        m.insert("dimensions".into(), Value::Int(self.dimensions));
-        Value::Map(m)
+    /// The record written to the stats row: the model, its dimensions and
+    /// every other setting that shapes the stored vectors and indexes.
+    fn encode_full(kb: &KnowledgeBase) -> Value {
+        super::compatibility::identity_map(&kb.config)
     }
 }
 
@@ -326,6 +341,9 @@ fn decode_embedding_identity(value: Option<&Value>) -> Option<EmbeddingIdentity>
     })
 }
 
+/// Serialize a [`BlobStorage`] into the `:KnowledgeBaseStats.blob_storage`
+/// map shape. Only `kind` is required for the mismatch check; the
+/// remaining fields are persisted as informational metadata.
 fn encode_blob_storage(bs: &BlobStorage) -> Value {
     let mut m: HashMap<String, Value> = HashMap::new();
     m.insert("kind".into(), Value::String(bs.kind().to_string()));

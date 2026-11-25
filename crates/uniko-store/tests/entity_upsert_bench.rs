@@ -16,7 +16,7 @@
 //! matched entities don't re-embed), so it's omitted here to isolate the
 //! MERGE-vs-manual difference the #69 fix is about.
 //!
-//! Run: cargo nextest run -p uniko-store --test entity_upsert_bench \
+//! Run: cargo nextest run -p uniko-store --test integration entity_upsert_bench:: \
 //!        --run-ignored all --no-capture
 
 use std::collections::HashMap;

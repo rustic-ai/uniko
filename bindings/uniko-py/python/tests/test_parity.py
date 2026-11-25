@@ -28,6 +28,7 @@ HANDLES = {
     "Data": typed.TypedData,
     "Sources": typed.TypedSources,
     "Goals": typed.TypedGoals,
+    "DeadLetters": typed.TypedDeadLetters,
 }
 
 # Native methods deliberately without a typed counterpart, with the reason.
@@ -36,7 +37,15 @@ TYPED_EXCEPTIONS: dict[str, set[str]] = {}
 
 # Native classes built by the caller rather than returned, so they need no
 # output model even though their public members are all fields.
-INPUT_CLASSES = {"Viewer", "ExtractRequest"}
+INPUT_CLASSES = {
+    "Viewer",
+    "ExtractRequest",
+    "Segment",
+    "ModelProvenance",
+    "Extraction",
+    "VideoFrame",
+    "VideoParts",
+}
 
 # Opaque native handles passed back to the native layer, not read as data.
 OPAQUE_CLASSES = {"SharedRuntime", "Requirement"}
@@ -102,7 +111,10 @@ def test_every_native_result_class_has_a_model() -> None:
 @pytest.mark.parametrize("name", output_class_names())
 def test_result_models_cover_every_native_field(name: str) -> None:
     native = native_fields(getattr(_uniko, name))
-    model = set(getattr(outputs, name).model_fields)
+    cls = getattr(outputs, name)
+    # A ``@computed_field`` (e.g. ``StoredEmbedding.is_hybrid``) mirrors a
+    # native derived getter: it is derived on the model, not stored.
+    model = set(cls.model_fields) | set(cls.model_computed_fields)
     missing = native - model - MODEL_EXCEPTIONS.get(name, set())
     assert not missing, f"outputs.{name} lacks {sorted(missing)}"
 

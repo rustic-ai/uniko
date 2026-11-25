@@ -460,7 +460,7 @@ fn default_nlp_max_batch_size() -> usize {
 ///
 /// When `enabled`, recall fuses RRF candidates and then re-scores the
 /// top `top_n` items with a cross-encoder via uni-db's `local/onnx`
-/// provider.  Disabled by default to keep CPU-only CI cheap.
+/// provider.  Enabled by default; set `enabled: false` to skip it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RerankerConfig {
     /// Whether to register and invoke the reranker.
@@ -541,6 +541,9 @@ impl Default for RerankerConfig {
     }
 }
 
+/// uni-xervo's default for [`OcrConfig::max_image_width`], in pixels.
+pub const DEFAULT_OCR_MAX_IMAGE_WIDTH: u32 = 3200;
+
 /// Pipeline-OCR model selection for tiered PDF extraction.
 ///
 /// When `enabled`, an `ocr/default` [`OcrModel`] alias is registered with
@@ -565,8 +568,15 @@ pub struct OcrConfig {
     pub det_artifact: String,
     /// Recognizer input height in pixels.
     pub image_height: u32,
-    /// Recognizer input width in pixels.
+    /// The narrowest a recognizer batch is, in pixels. Each text line keeps
+    /// its aspect ratio at `image_height` and is right-padded, so a long
+    /// line is read in full rather than squeezed to this width.
     pub image_width: u32,
+    /// The widest a text line is resized to, in pixels; a longer line is
+    /// squeezed to fit. `None` keeps uni-xervo's default
+    /// ([`DEFAULT_OCR_MAX_IMAGE_WIDTH`]). Must be at least `image_width`.
+    #[serde(default)]
+    pub max_image_width: Option<u32>,
     /// Recognizer normalization: `"imagenet"` or `"siglip"`. Defaults to
     /// `"siglip"`, which is what the PP-OCRv5 export expects.
     pub normalization: String,
@@ -587,6 +597,7 @@ impl Default for OcrConfig {
             det_artifact: "detection/v5/det.onnx".to_string(),
             image_height: 48,
             image_width: 320,
+            max_image_width: None,
             normalization: "siglip".to_string(),
             execution_providers: None,
         }
@@ -710,6 +721,167 @@ impl VectorMetricChoice {
     }
 }
 
+// ── Remote storage ────────────────────────────────────────────────
+
+/// An object store holding a store's data: its graph tables, indexes and
+/// schema.
+///
+/// Opened with a local store path, the store is *hybrid*: its data in the
+/// bucket, its write-ahead log and id allocator in that directory. Opened
+/// with the URL itself as the path, it is *remote-only*: everything in the
+/// bucket, so any host can open it with nothing local. Either way one
+/// writer holds the store at a time (uni-db's lease in the bucket).
+///
+/// The URL's scheme picks the provider: `s3://bucket[/prefix]` for S3 and
+/// S3-compatible services (MinIO, LocalStack, R2), `gs://bucket[/prefix]`
+/// for Google Cloud Storage, `az://container[/prefix]` for Azure Blob
+/// Storage. A setting for another provider than the URL's is refused.
+/// A setting left `None` (or
+/// `virtual_hosted_style` left off) is filled by uni-db from the provider's
+/// usual environment variables when the store opens, in the order the
+/// provider's SDKs use: for S3 `AWS_REGION` (or `AWS_DEFAULT_REGION`),
+/// `AWS_ENDPOINT_URL_S3` before `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`,
+/// `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+/// `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`, then a named `AWS_PROFILE`; for GCS
+/// `GOOGLE_SERVICE_ACCOUNT`, `GOOGLE_SERVICE_ACCOUNT_KEY` and
+/// application-default credentials (`GOOGLE_APPLICATION_CREDENTIALS`);
+/// for Azure `AZURE_STORAGE_ACCOUNT` (or `AZURE_STORAGE_ACCOUNT_NAME`),
+/// `AZURE_STORAGE_ACCESS_KEY` (or `AZURE_STORAGE_ACCOUNT_KEY`),
+/// `AZURE_STORAGE_SAS_KEY` and the other `AZURE_*` variables `object_store`
+/// reads. A setting given here wins over all of them. An `http://` endpoint is
+/// allowed, for local services.
+///
+/// `Debug` hides the secrets.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteStorage {
+    /// `s3://bucket[/prefix]`, `gs://bucket[/prefix]` or
+    /// `az://container[/prefix]`.
+    pub url: String,
+    /// S3: the region.
+    pub region: Option<String>,
+    /// S3: a custom endpoint, for an S3-compatible service.
+    pub endpoint: Option<String>,
+    /// S3: the access key id.
+    pub access_key_id: Option<String>,
+    /// S3: the secret access key.
+    pub secret_access_key: Option<String>,
+    /// S3: a session token, for temporary credentials.
+    pub session_token: Option<String>,
+    /// S3: address the bucket as `bucket.host` instead of `host/bucket`.
+    /// Off by default, which S3-compatible services need.
+    pub virtual_hosted_style: bool,
+    /// GCS: a service-account key file.
+    pub service_account_path: Option<String>,
+    /// GCS: a service-account key, as JSON.
+    pub service_account_key: Option<String>,
+    /// Azure: the storage account the container is in.
+    pub account: Option<String>,
+    /// Azure: the storage account's access key.
+    pub access_key: Option<String>,
+    /// Azure: a shared access signature (SAS) token, instead of a key.
+    pub sas_token: Option<String>,
+    /// Hybrid only: when this host's local write-ahead log is stale (it
+    /// holds commits from before another host opened the store), move it
+    /// aside to `wal_set_aside/` in the local directory and open the store
+    /// as the bucket has it. Off by default: the open fails instead, so the
+    /// unflushed commits aren't dropped unnoticed. Nothing is deleted.
+    pub set_aside_stale_wal: bool,
+}
+
+impl std::fmt::Debug for RemoteStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hide = |v: &Option<String>| v.as_ref().map(|_| "<hidden>");
+        f.debug_struct("RemoteStorage")
+            .field("url", &self.url)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &hide(&self.secret_access_key))
+            .field("session_token", &hide(&self.session_token))
+            .field("virtual_hosted_style", &self.virtual_hosted_style)
+            .field("service_account_path", &self.service_account_path)
+            .field("service_account_key", &hide(&self.service_account_key))
+            .field("account", &self.account)
+            .field("access_key", &hide(&self.access_key))
+            .field("sas_token", &hide(&self.sas_token))
+            .field("set_aside_stale_wal", &self.set_aside_stale_wal)
+            .finish()
+    }
+}
+
+impl RemoteStorage {
+    /// A store at `url` (`s3://`, `gs://` or `az://`), settings from the
+    /// environment.
+    #[must_use]
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            ..Self::default()
+        }
+    }
+
+    /// An S3 (or S3-compatible) store at `url`, settings from the
+    /// environment. The same as [`new`](Self::new), which takes any
+    /// supported URL.
+    #[must_use]
+    pub fn s3(url: impl Into<String>) -> Self {
+        Self::new(url)
+    }
+
+    /// An Azure Blob Storage store at `az://container[/prefix]` in
+    /// `account`, credentials from the environment until
+    /// [`with_access_key`](Self::with_access_key) or
+    /// [`with_sas_token`](Self::with_sas_token) sets them.
+    #[must_use]
+    pub fn azure(url: impl Into<String>, account: impl Into<String>) -> Self {
+        Self {
+            account: Some(account.into()),
+            ..Self::new(url)
+        }
+    }
+
+    /// Azure: authenticate with the storage account's access key.
+    #[must_use]
+    pub fn with_access_key(mut self, access_key: impl Into<String>) -> Self {
+        self.access_key = Some(access_key.into());
+        self
+    }
+
+    /// Azure: authenticate with a shared access signature token.
+    #[must_use]
+    pub fn with_sas_token(mut self, sas_token: impl Into<String>) -> Self {
+        self.sas_token = Some(sas_token.into());
+        self
+    }
+
+    /// Point at an S3-compatible service.
+    #[must_use]
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Set the region.
+    #[must_use]
+    pub fn with_region(mut self, region: impl Into<String>) -> Self {
+        self.region = Some(region.into());
+        self
+    }
+
+    /// Set static credentials.
+    #[must_use]
+    pub fn with_credentials(
+        mut self,
+        access_key_id: impl Into<String>,
+        secret_access_key: impl Into<String>,
+    ) -> Self {
+        self.access_key_id = Some(access_key_id.into());
+        self.secret_access_key = Some(secret_access_key.into());
+        self
+    }
+}
+
 // ── Main config ───────────────────────────────────────────────────
 
 /// Configuration for all uniko runtime parameters.
@@ -737,7 +909,7 @@ pub struct UnikoConfig {
     // Embedding + vector index
     /// Embedding model selection (controls dimensions and model ID).
     pub embedding: EmbeddingConfig,
-    /// Cross-encoder reranker selection (disabled by default).
+    /// Cross-encoder reranker selection (enabled by default).
     #[serde(default)]
     pub reranker: RerankerConfig,
     /// NLP cascade selection (model id + ONNX artifact).
@@ -758,6 +930,12 @@ pub struct UnikoConfig {
     #[serde(default)]
     pub blob_storage: BlobStorage,
 
+    /// Keep the store's data in an object store instead of under the local
+    /// path. The path given to `open` then holds only the store's write-ahead
+    /// log and id allocator. `None` (the default) keeps everything local.
+    #[serde(default)]
+    pub remote_storage: Option<RemoteStorage>,
+
     // Pipeline capacities
     /// Bounded channel capacity for the ingest worker.
     pub ingest_queue_capacity: usize,
@@ -775,6 +953,20 @@ pub struct UnikoConfig {
     pub circuit_failure_threshold: u32,
     /// Milliseconds the circuit breaker stays open before probing.
     pub circuit_recovery_ms: u64,
+
+    // Dead letters
+    /// Retries a dead-lettered streaming item gets before it is marked
+    /// `exhausted`. Applies to explicit retries and to automatic ones.
+    pub dead_letter_max_retries: u32,
+    /// Retry dead-lettered items in the background on a backoff schedule.
+    /// Off by default: retries then run only when the host asks for them.
+    /// Only failures that can succeed on a retry are retried automatically.
+    pub dead_letter_auto_retry: bool,
+    /// Wait before a dead letter's first retry, in milliseconds. Each later
+    /// retry waits twice as long, up to `dead_letter_retry_max_backoff_ms`.
+    pub dead_letter_retry_backoff_ms: u64,
+    /// Longest wait between retries of one dead letter, in milliseconds.
+    pub dead_letter_retry_max_backoff_ms: u64,
 
     // Chunking thresholds
     /// Token count above which messages are chunked.
@@ -965,12 +1157,17 @@ impl Default for UnikoConfig {
             },
             vector_metric: VectorMetricChoice::Cosine,
             blob_storage: BlobStorage::default(),
+            remote_storage: None,
             ingest_queue_capacity: 200,
             consolidation_queue_capacity: 32,
             consolidation_threshold: 20,
             consolidation_interval_secs: 900,
             circuit_failure_threshold: 5,
             circuit_recovery_ms: 60_000,
+            dead_letter_max_retries: 3,
+            dead_letter_auto_retry: false,
+            dead_letter_retry_backoff_ms: 30_000,
+            dead_letter_retry_max_backoff_ms: 3_600_000,
             message_chunk_threshold: 1024,
             action_output_artifact_threshold: 256,
             max_chunk_tokens: 256,
@@ -1025,6 +1222,28 @@ impl UnikoConfig {
     ///
     /// Returns `Err(UnikoError::Config)` if any constraint is violated.
     pub fn validate(&self) -> Result<()> {
+        if self.ocr.enabled {
+            let max = self
+                .ocr
+                .max_image_width
+                .unwrap_or(DEFAULT_OCR_MAX_IMAGE_WIDTH);
+            if self.ocr.image_width == 0 || self.ocr.image_height == 0 {
+                return Err(UnikoError::Config(
+                    "ocr.image_width and ocr.image_height must be positive".into(),
+                ));
+            }
+            if max < self.ocr.image_width {
+                return Err(UnikoError::Config(format!(
+                    "ocr.max_image_width ({max}) must be at least ocr.image_width ({})",
+                    self.ocr.image_width,
+                )));
+            }
+        }
+
+        if let Some(remote) = &self.remote_storage {
+            crate::storage::remote::ResolvedRemote::resolve(remote)?;
+        }
+
         if self.embedding.dimensions == 0 {
             return Err(UnikoError::Config(
                 "embedding.dimensions must be positive".into(),
@@ -1105,6 +1324,16 @@ impl UnikoConfig {
             ));
         }
 
+        if self.dead_letter_retry_backoff_ms == 0
+            || self.dead_letter_retry_max_backoff_ms < self.dead_letter_retry_backoff_ms
+        {
+            return Err(UnikoError::Config(
+                "dead_letter_retry_backoff_ms must be positive and at most \
+                 dead_letter_retry_max_backoff_ms"
+                    .into(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -1113,11 +1342,78 @@ impl UnikoConfig {
 mod tests {
     use super::*;
 
+    /// OCR widths are checked at `validate`, not at the first OCR load,
+    /// and only when OCR is on.
+    #[test]
+    fn ocr_widths_are_validated_when_ocr_is_enabled() {
+        let ocr = |image_width, max_image_width, enabled| UnikoConfig {
+            ocr: OcrConfig {
+                enabled,
+                image_width,
+                max_image_width,
+                ..OcrConfig::default()
+            },
+            ..UnikoConfig::default()
+        };
+        assert!(ocr(320, None, true).validate().is_ok());
+        assert!(ocr(640, Some(640), true).validate().is_ok());
+        let err = ocr(640, Some(320), true).validate().unwrap_err();
+        assert!(err.to_string().contains("max_image_width"), "{err}");
+        // Past uni-xervo's default cap with no explicit maximum.
+        assert!(ocr(4000, None, true).validate().is_err());
+        assert!(ocr(0, None, true).validate().is_err());
+        assert!(ocr(4000, None, false).validate().is_ok());
+    }
+
+    /// `max_image_width` reaches the OCR alias only when set, so uni-xervo
+    /// keeps its own default otherwise.
+    #[test]
+    fn ocr_max_image_width_reaches_the_catalog_only_when_set() {
+        let options = |max| {
+            let config = UnikoConfig {
+                ocr: OcrConfig {
+                    enabled: true,
+                    max_image_width: max,
+                    ..OcrConfig::default()
+                },
+                ..UnikoConfig::default()
+            };
+            crate::storage::embed_catalog(&config)
+                .into_iter()
+                .find(|s| s.alias == crate::schema::OCR_ALIAS)
+                .expect("OCR alias registered")
+                .options
+        };
+        assert!(options(None).get("max_image_width").is_none());
+        assert_eq!(options(Some(1600))["max_image_width"], 1600);
+    }
+
     /// `remote/llamacpp` requires `base_url`, `embedding_dimensions`
     /// and `max_input_tokens`, and rejects unknown keys — so the
     /// constructor must emit exactly those three, with
     /// `embedding_dimensions` agreeing with the struct's `dimensions`
     /// (the column width recall indexes against).
+    #[test]
+    fn dead_letter_backoff_must_be_positive_and_ordered() {
+        for (base, max) in [(0, 10), (100, 50)] {
+            let c = UnikoConfig {
+                dead_letter_retry_backoff_ms: base,
+                dead_letter_retry_max_backoff_ms: max,
+                ..UnikoConfig::default()
+            };
+            assert!(
+                matches!(c.validate(), Err(UnikoError::Config(_))),
+                "backoff {base}..{max} accepted"
+            );
+        }
+        let ok = UnikoConfig {
+            dead_letter_retry_backoff_ms: 10,
+            dead_letter_retry_max_backoff_ms: 10,
+            ..UnikoConfig::default()
+        };
+        assert!(ok.validate().is_ok());
+    }
+
     #[test]
     fn llamacpp_embedding_emits_the_required_options() {
         let cfg = EmbeddingConfig::llamacpp("bge-small", "http://127.0.0.1:8080/v1", 384, 512);

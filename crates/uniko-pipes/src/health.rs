@@ -40,6 +40,13 @@ pub struct WorkerHealth {
     /// Streaming ingest returns no per-call result, so this is where its
     /// stage diagnostics surface.
     pub degradations: BTreeMap<String, u64>,
+    /// Items dead-lettered since the pipeline started (a failed retry of an
+    /// existing letter is not counted again).
+    pub dead_lettered: u64,
+    /// Dead-letter retries resubmitted since the pipeline started.
+    pub retries: u64,
+    /// Of those, the ones that succeeded.
+    pub retries_succeeded: u64,
 }
 
 /// Aggregated health of the entire pipeline.
@@ -67,6 +74,9 @@ pub struct HealthTracker {
     last_processed_at: Option<Instant>,
     avg_latency_ms: f64,
     degradations: BTreeMap<String, u64>,
+    dead_lettered: u64,
+    retries: u64,
+    retries_succeeded: u64,
 }
 
 /// EMA smoothing factor — higher values weight recent samples more.
@@ -85,7 +95,25 @@ impl HealthTracker {
             last_processed_at: None,
             avg_latency_ms: 0.0,
             degradations: BTreeMap::new(),
+            dead_lettered: 0,
+            retries: 0,
+            retries_succeeded: 0,
         }
+    }
+
+    /// Count an item newly stored as a dead letter.
+    pub fn record_dead_letter(&mut self) {
+        self.dead_lettered += 1;
+    }
+
+    /// Count a dead-letter retry resubmitted.
+    pub fn record_retry(&mut self) {
+        self.retries += 1;
+    }
+
+    /// Count a dead-letter retry that succeeded.
+    pub fn record_retry_success(&mut self) {
+        self.retries_succeeded += 1;
     }
 
     /// Record a successful item processing.
@@ -137,6 +165,9 @@ impl HealthTracker {
             items_failed: self.items_failed,
             avg_latency_ms: self.avg_latency_ms,
             degradations: self.degradations.clone(),
+            dead_lettered: self.dead_lettered,
+            retries: self.retries,
+            retries_succeeded: self.retries_succeeded,
         }
     }
 }

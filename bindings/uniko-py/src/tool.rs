@@ -54,11 +54,35 @@ impl PyToolCall {
         }
     }
 
+    /// The tool's name.
+    #[getter]
+    fn tool_name(&self) -> PyResult<String> {
+        Ok(self.snapshot()?.tool_name().to_string())
+    }
+
+    /// The explicit performer set with ``performer()``, or ``None`` for the
+    /// default (the turn's sender, or the session's agent).
+    #[getter]
+    fn performer_id(&self) -> PyResult<Option<String>> {
+        Ok(self.snapshot()?.performer_id().map(str::to_string))
+    }
+
     /// The host's own id for this call. Recording the same id again with
     /// the same result is a no-op; with a different result it raises
     /// `IdConflictError`.
     fn call_id<'py>(slf: PyRef<'py, Self>, call_id: String) -> PyRef<'py, Self> {
         slf.map(|c| c.call_id(call_id));
+        slf
+    }
+
+    /// The participant that performed the call, when it isn't the default:
+    /// the turn's sender inside a ``Turn``, or the session's agent for
+    /// ``Session.observe_tool``. The turn keeps its own sender. A performer
+    /// that doesn't exist yet is created as kind ``unknown``; naming one never
+    /// changes its kind (``register`` makes an agent). The same call id with a
+    /// different performer, named or by default, raises ``IdConflictError``.
+    fn performer<'py>(slf: PyRef<'py, Self>, participant_id: String) -> PyRef<'py, Self> {
+        slf.map(|c| c.performer(participant_id));
         slf
     }
 

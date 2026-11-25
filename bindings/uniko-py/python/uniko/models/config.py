@@ -93,6 +93,7 @@ class OcrConfigModel(BaseModel):
     det_artifact: str = "detection/v5/det.onnx"
     image_height: int = 48
     image_width: int = 320
+    max_image_width: Optional[int] = None
     normalization: str = "siglip"
     execution_providers: Optional[list[str]] = None
 
@@ -126,6 +127,12 @@ class UnikoConfigModel(BaseModel):
     vector_algorithm: dict[str, Any] = Field(default_factory=_default_vector_algorithm)
     vector_metric: str = "Cosine"
     blob_storage: dict[str, Any] = Field(default_factory=_default_blob_storage)
+    # Keep the store's data in an object store: ``{"url": "s3://bucket",
+    # "endpoint": ..., "region": ..., ...}``, ``gs://bucket`` or
+    # ``{"url": "az://container", "account": ..., "access_key": ...}``;
+    # unset settings come from the AWS_* / GOOGLE_* / AZURE_* environment.
+    # The store path then holds only its write-ahead log and ids.
+    remote_storage: Optional[dict[str, Any]] = None
 
     # Streaming pipeline.
     ingest_queue_capacity: int = 200
@@ -134,6 +141,12 @@ class UnikoConfigModel(BaseModel):
     consolidation_interval_secs: int = 900
     circuit_failure_threshold: int = 5
     circuit_recovery_ms: int = 60_000
+
+    # Dead letters.
+    dead_letter_max_retries: int = 3
+    dead_letter_auto_retry: bool = False
+    dead_letter_retry_backoff_ms: int = 30_000
+    dead_letter_retry_max_backoff_ms: int = 3_600_000
 
     # Chunking.
     message_chunk_threshold: int = 1024

@@ -22,15 +22,18 @@ native method has no counterpart here.
 
 from __future__ import annotations
 
+import builtins
 import datetime
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Optional
 
+from ..types import DeadLetterStatus, MigrationName, MigrationProgressEvent
 from .config import UnikoConfigModel
 from .outputs import (
     AbductionResult,
     Answer,
     ArtifactView,
+    MediaSourceView,
     Capabilities,
     ContextBundle,
     DeletionReport,
@@ -46,6 +49,13 @@ from .outputs import (
     FactUpsert,
     MatchedProcedure,
     PipelineHealth,
+    DeadLetter,
+    Registration,
+    StoreInfo,
+    StoreReport,
+    MigrationReport,
+    DeadLetterCounts,
+    RetryReport,
     RuleView,
     SummarizeReport,
     TaskView,
@@ -89,6 +99,14 @@ class TypedData:
         a = self._inner.artifact_sync(artifact_id)
         return ArtifactView.from_native(a) if a is not None else None
 
+    async def media_sources(self, artifact_id: str) -> builtins.list[MediaSourceView]:
+        rows = await self._inner.media_sources(artifact_id)
+        return [MediaSourceView.from_native(r) for r in rows]
+
+    def media_sources_sync(self, artifact_id: str) -> builtins.list[MediaSourceView]:
+        rows = self._inner.media_sources_sync(artifact_id)
+        return [MediaSourceView.from_native(r) for r in rows]
+
     async def artifact_bytes(self, artifact_id: str) -> Optional[bytes]:
         return await self._inner.artifact_bytes(artifact_id)
 
@@ -97,6 +115,57 @@ class TypedData:
 
 
 # ── Sources ────────────────────────────────────────────────────────────────
+
+
+class TypedDeadLetters:
+    """Typed wrapper over the native ``DeadLetters`` handle."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def list(
+        self, *, status: Optional[DeadLetterStatus] = None, limit: Optional[int] = None
+    ) -> builtins.list[DeadLetter]:
+        rows = await self._inner.list(status=status, limit=limit)
+        return [DeadLetter.from_native(r) for r in rows]
+
+    def list_sync(
+        self, *, status: Optional[DeadLetterStatus] = None, limit: Optional[int] = None
+    ) -> builtins.list[DeadLetter]:
+        rows = self._inner.list_sync(status=status, limit=limit)
+        return [DeadLetter.from_native(r) for r in rows]
+
+    async def get(self, id: str) -> Optional[DeadLetter]:
+        native = await self._inner.get(id)
+        return None if native is None else DeadLetter.from_native(native)
+
+    def get_sync(self, id: str) -> Optional[DeadLetter]:
+        native = self._inner.get_sync(id)
+        return None if native is None else DeadLetter.from_native(native)
+
+    async def counts(self) -> DeadLetterCounts:
+        return DeadLetterCounts.from_native(await self._inner.counts())
+
+    def counts_sync(self) -> DeadLetterCounts:
+        return DeadLetterCounts.from_native(self._inner.counts_sync())
+
+    async def retry(self, id: str, *, force: bool = False) -> None:
+        await self._inner.retry(id, force=force)
+
+    def retry_sync(self, id: str, *, force: bool = False) -> None:
+        self._inner.retry_sync(id, force=force)
+
+    async def retry_pending(self, limit: int = 100) -> RetryReport:
+        return RetryReport.from_native(await self._inner.retry_pending(limit))
+
+    def retry_pending_sync(self, limit: int = 100) -> RetryReport:
+        return RetryReport.from_native(self._inner.retry_pending_sync(limit))
+
+    async def resolve(self, id: str, note: Optional[str] = None) -> bool:
+        return await self._inner.resolve(id, note)
+
+    def resolve_sync(self, id: str, note: Optional[str] = None) -> bool:
+        return self._inner.resolve_sync(id, note)
 
 
 class TypedSources:
@@ -472,6 +541,12 @@ class TypedAgent:
     def session(self, session_id: str) -> TypedSession:
         return TypedSession(self._inner.session(session_id))
 
+    async def register(self, *, name: str | None = None) -> Registration:
+        return Registration.from_native(await self._inner.register(name=name))
+
+    def register_sync(self, *, name: str | None = None) -> Registration:
+        return Registration.from_native(self._inner.register_sync(name=name))
+
     async def recall(self, query: str) -> ContextBundle:
         return ContextBundle.from_native(await self._inner.recall(query))
 
@@ -814,6 +889,11 @@ class TypedUnikoBuilder:
         self._inner = self._inner.readiness_timeout(seconds)
         return self
 
+    def verify_remote(self, on: bool) -> "TypedUnikoBuilder":
+        """Also check required remote models' endpoints and credentials."""
+        self._inner = self._inner.verify_remote(on)
+        return self
+
     async def build_runtime(self) -> Any:
         """A native ``SharedRuntime`` for this builder's models."""
         return await self._inner.build_runtime()
@@ -829,9 +909,45 @@ class TypedUnikoBuilder:
         self._inner = self._inner.scope_to_agent()
         return self
 
-    def extractor(self, modality: str, extract: Any) -> "TypedUnikoBuilder":
-        """Index ``modality`` sources as the text ``extract(request)`` returns."""
-        self._inner = self._inner.extractor(modality, extract)
+    def extractor(
+        self, modality: str, extract: Any, *, retention: str = "none"
+    ) -> "TypedUnikoBuilder":
+        """Index ``modality`` sources as the text (a ``str``), the
+        ``Extraction``, or the list of ``Extraction``s that ``extract(request)``
+        returns. ``retention`` is
+        ``"none"``, ``"identity"`` or ``"bytes"``."""
+        self._inner = self._inner.extractor(modality, extract, retention=retention)
+        return self
+
+    def model_extractor(
+        self,
+        modality: str,
+        *,
+        ocr: Optional[str] = None,
+        caption: Optional[str] = None,
+        caption_prompt: Optional[str] = None,
+        max_caption_tokens: Optional[int] = None,
+        document: Optional[str] = None,
+        transcribe: Optional[str] = None,
+        language: Optional[str] = None,
+        composer: Any = None,
+        retention: str = "none",
+    ) -> "TypedUnikoBuilder":
+        """Index ``modality`` sources with OCR, caption, document or
+        transcription models from the catalog, by alias. A video needs a
+        ``composer`` returning ``VideoParts``."""
+        self._inner = self._inner.model_extractor(
+            modality,
+            ocr=ocr,
+            caption=caption,
+            caption_prompt=caption_prompt,
+            max_caption_tokens=max_caption_tokens,
+            document=document,
+            transcribe=transcribe,
+            language=language,
+            composer=composer,
+            retention=retention,
+        )
         return self
 
     def scope(self, viewer: Any) -> "TypedUnikoBuilder":
@@ -883,6 +999,62 @@ class TypedUniko:
 
         return TypedUnikoBuilder(_uniko.Uniko.builder())
 
+    @staticmethod
+    async def inspect_store(
+        path: str, config: Any = None, *, embedding: Any = None
+    ) -> StoreReport:
+        from uniko import _uniko
+
+        native = await _uniko.Uniko.inspect_store(path, config, embedding=embedding)
+        return StoreReport.from_native(native)
+
+    @staticmethod
+    def inspect_store_sync(
+        path: str, config: Any = None, *, embedding: Any = None
+    ) -> StoreReport:
+        from uniko import _uniko
+
+        native = _uniko.Uniko.inspect_store_sync(path, config, embedding=embedding)
+        return StoreReport.from_native(native)
+
+    @staticmethod
+    async def migrate_store(
+        path: str,
+        migration: MigrationName,
+        config: Any = None,
+        *,
+        embedding: Any = None,
+        progress: Optional[Callable[[MigrationProgressEvent], object]] = None,
+    ) -> MigrationReport:
+        from uniko import _uniko
+
+        native = await _uniko.Uniko.migrate_store(
+            path, migration, config, embedding=embedding, progress=progress
+        )
+        return MigrationReport.from_native(native)
+
+    @staticmethod
+    def migrate_store_sync(
+        path: str,
+        migration: MigrationName,
+        config: Any = None,
+        *,
+        embedding: Any = None,
+        progress: Optional[Callable[[MigrationProgressEvent], object]] = None,
+    ) -> MigrationReport:
+        from uniko import _uniko
+
+        native = _uniko.Uniko.migrate_store_sync(
+            path, migration, config, embedding=embedding, progress=progress
+        )
+        return MigrationReport.from_native(native)
+
+    async def store_info(self) -> StoreInfo:
+        return StoreInfo.from_native(await self._inner.store_info())
+
+    def store_info_sync(self) -> StoreInfo:
+        return StoreInfo.from_native(self._inner.store_info_sync())
+
     def agent(self, agent_id: str) -> TypedAgent:
         return TypedAgent(self._inner.agent(agent_id))
 
@@ -892,6 +1064,10 @@ class TypedUniko:
     def health(self) -> Optional[PipelineHealth]:
         native = self._inner.health()
         return None if native is None else PipelineHealth.from_native(native)
+
+    @property
+    def dead_letters(self) -> TypedDeadLetters:
+        return TypedDeadLetters(self._inner.dead_letters)
 
     async def add_team_member(self, participant_id: str, team_id: str) -> bool:
         return await self._inner.add_team_member(participant_id, team_id)
@@ -973,4 +1149,5 @@ __all__ = [
     "TypedSession",
     "TypedData",
     "TypedGoals",
+    "TypedDeadLetters",
 ]

@@ -7,11 +7,207 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-24
+
+### Breaking
+
+- **uniko requires uni-db 6.0** (was 5.3.0). uniko re-exports uni-db types
+  (`Value`, `Transaction`, `ModelAliasSpec`, `ModelTask`, `TemporalValue`,
+  …), so code that names them moves to uni-db 6 with it.
+- **The minimum Rust version is 1.95** (was 1.91), the highest any
+  dependency declares.
+- **`UnikoError` has three new variants,** `NotReady`, `Degraded` and
+  `IncompatibleStore`, so an exhaustive `match` needs arms for them. In
+  Python they are `ReadinessError`, `DegradedError` and
+  `IncompatibleStoreError` (a `ConfigError` subclass).
+- **A store takes one writer at a time.** A second open of a store this
+  process already has open fails at once with `Config`; share the first
+  instance (its clones, agents and sessions use the same store). Another
+  process opening it waits a few seconds, then fails with `Config` naming
+  the holder: uni-db now holds a local store by an OS lock on `writer.lock`
+  and a store in an object store by a lease. Two handles on one store used
+  to open without error and silently diverge.
+- **Reopening a store with a config it can't serve fails before anything
+  changes,** with `IncompatibleStore`, which lists each difference and
+  whether it needs a fresh store or an in-place migration. A different
+  model or dimensions used to fail only after the new schema was applied,
+  with uni-db's raw error; a dense store opened with a hybrid embedder had
+  columns added and indexes rebuilt before being refused; and a changed
+  vector metric or index algorithm silently rebuilt every vector index.
+- **`UnikoBuilder::llm` adds a model** instead of replacing the previous
+  one, and an `answer_alias` that is missing or isn't a generation model
+  fails `build()`.
+- **Opening over a shared runtime checks it serves the store's models,**
+  with the same provider, model, revision and options, and fails if not.
+  `open_with_runtime` never checked, so a store could embed with another
+  model than its config named.
+- **`CycleStats` and `TripleSource` are `#[non_exhaustive]`.**
+- **Image, audio and video ingested through a session are attached to
+  it,** like documents.
+- **Ingest no longer rewrites a participant it has seen before.** It used
+  to reset kind and name on every first sighting in a unit, turning a
+  registered agent back into `unknown`; it now updates only `last_seen`.
+- **Dead letters keep their payload and move through states.** Rows
+  written by an earlier release list as `legacy` and can only be resolved.
+- `build_shared_runtime`, `open_with_runtime` and `note_model_loaded` are
+  deprecated. `note_model_loaded` does nothing: load state comes from the
+  model runtime.
+
+### Upgrading
+
+- **The first writable open of an existing store rewrites its DATETIME-indexed
+  tables.** uni-db upgrades each of the indexes above in place: it backfills the
+  key column over the label's table, builds the index, and rebuilds the label's
+  other indexes, which the rewrite drops, including the vector and full-text
+  indexes on Message and Observation. On a large store the open takes as long as
+  those rebuilds. A failed upgrade is logged and leaves the index as it was; the
+  store still opens. `inspect_store` opens read-only and doesn't trigger it.
+
+### Added
+
+- **Azure Blob Storage for `remote_storage`.** An `az://container[/prefix]` URL keeps a
+  store in an Azure container, hybrid or remote-only, like `s3://` and `gs://`.
+  `RemoteStorage::azure(url, account)` names the storage account, and
+  `with_access_key` or `with_sas_token` the credentials (in Python, the `account`,
+  `access_key` and `sas_token` keys). Unset settings come from the `AZURE_*`
+  environment. `Uniko.config()` redacts the key and token.
+- **Stores in an object store.** `UnikoConfig::remote_storage` keeps a
+  store's data in S3 (or an S3-compatible service) or GCS. With a local
+  path the store is hybrid: data in the bucket, write-ahead log and ids
+  locally. With the store's own `s3://` or `gs://` URL as the path it is
+  remote-only, with nothing local, so any host can open it. Settings fall
+  back to the usual `AWS_*` and `GOOGLE_*` variables, resolved by uni-db in the
+  providers' own order (`AWS_ENDPOINT_URL_S3` before `AWS_ENDPOINT_URL`,
+  `AWS_PROFILE`, application-default credentials).
+  Stores can share a bucket under different prefixes, and
+  `set_aside_stale_wal` recovers a hybrid host that crashed and came back
+  after another host opened the store. Tested against LocalStack and the
+  AWS Emulator, not yet against AWS S3 or GCS. A `Cloud storage` CI
+  workflow runs the end-to-end tests after each merge to `main`.
+- **Store compatibility and in-place migration.** `Uniko::inspect_store`
+  (and `KnowledgeBase::inspect`) reports what a store was built with and
+  how a config compares, without applying a schema or loading a model.
+  `Uniko::migrate_store` runs `enable_hybrid` (adds the sparse and ColBERT
+  columns over the same model and backfills existing chunks and
+  observations, resumably) or `rebuild_vector_indexes` (a new algorithm,
+  metric, query prefix or batch size), with a progress callback.
+  `store_info` reports an open store.
+- **Model-backed media extractors.** `ModelExtractor` runs catalog models
+  by alias for OCR, captions (on providers that pass images: OpenAI,
+  Azure OpenAI, llama.cpp) and document extraction; video takes a host
+  composer that splits it into frames and a WAV track. Extractors may
+  return an `Extraction` of `Segment`s, and chunks keep page, time range,
+  regions, confidence, speaker and model version, surfaced as
+  `RecallItem.position` and `SearchHit.position`. `MediaRetention` keeps the
+  original media as a source linked by `DERIVED_FROM`, and
+  `Data::media_sources` traces text back to it. Transcription through a
+  catalog model is refused for now: uni-db doesn't register uni-xervo's
+  whisper.cpp provider (rustic-ai/uni-db#351).
+- **Startup readiness.** `UnikoBuilder::require` takes requirements (an
+  alias, the embedder, reranker, NLP, OCR, the answer model, an extractor,
+  an accelerated alias) and `build()` fails with `NotReady` listing each
+  unmet one with a stable code. `verify_remote(true)` also checks that
+  required remote aliases are reachable and accept their credential.
+  `Uniko::check_readiness` runs the same check on a live instance.
+- **Capabilities and model load state.** `Uniko::capabilities` reports
+  compiled features, registered extractors, the answer alias, OCR and each
+  model's load state (not loaded, loading, loaded, failed) with the
+  execution providers that actually attached.
+- **Shared model runtimes and prefetch policies.** `SharedRuntime` lets
+  several instances share one set of loaded models
+  (`UnikoBuilder::runtime`, `build_runtime`), and `PrefetchPolicy` picks
+  when models load: `Eager` (the default), `Lazy` or `Background`.
+- **Recall and ingest diagnostics.** Results carry what each best-effort
+  stage did (applied, skipped, fallback, failed) with a stable code, never
+  query or content text. `strict` in `RecallConfig` and `RecallOverrides`
+  turns a degraded stage into `Degraded`.
+- **Dead-letter retries.** `Uniko::dead_letters` lists, counts, retries and
+  resolves failed streaming items, which now keep their payload. An opt-in
+  scheduler (`dead_letter_auto_retry`) retries due letters with backoff.
+- **Any generation provider.** `LlmSpec::new(alias, provider, model)`
+  covers every compiled generation provider, and `answer_alias` picks the
+  answering model, including one from the catalog file.
+- `Agent::register` records an agent as a participant; goals and tasks
+  ensure it themselves, so a fresh store no longer fails with "Participant
+  not found" before the agent's first turn.
+- `ToolCall::performer` names who performed a tool call, for a host
+  recording a call made on a user's behalf.
+- `Goals::create_view` and `create_task_view` return the stored view,
+  with the generated id; `Goals::task(id)` looks a task up.
+- `Agent::consolidate_with` and `ConsolidateOptions` reach LLM triple
+  refinement; `CycleStats` reports requested, refined and failed
+  refinements.
+- `KnowledgeBase::model_entries` lists the store's model aliases.
+- Every Python wheel includes PDF OCR (about 2.6 MiB); it still runs only
+  with `ocr.enabled`. `ocr.max_image_width` is configurable.
+- Python mirrors all of the above.
+
+### Changed
+
+- **`UNIKO_QUERY_TIMEOUT_SECS`** raises uni-db's 30-second query timeout, for a
+  store far from its bucket.
+- **A `remote_storage` setting for another provider is refused** instead of being
+  ignored: an `access_key` on an `s3://` store, a `region` on an `az://` one.
+- **ColBERT reranking scores candidates in uniko** (MaxSim with the
+  configured metric) instead of through a filtered multi-vector query,
+  which leaked rows outside the candidate set on unflushed data. A
+  candidate with no token vectors ranks just below the scored ones and is
+  reported as `unscored`.
+- A custom `observation_rules_path` that fails to load is retried at most
+  once a minute instead of on every message.
+- A build without `pdf-ocr` that sets `ocr.enabled` warns and records a
+  `pdf_extraction` fallback diagnostic, instead of silently skipping OCR.
+- The workspace builds one integration-test binary per crate (14 test
+  binaries, down from 57).
+
 ### Fixed
 
+- **`shutdown` returns a failed final flush.** uni-db's shutdown used to log a
+  failed final flush and return Ok, so a hybrid store whose flush timed out shut
+  down "successfully" with its last commits only in the local write-ahead log,
+  and another host opened it without them. uni-db 6.0 returns the failure
+  (rustic-ai/uni-db#354), after still releasing the writer lease, and uniko's
+  `shutdown` passes it on as a `Storage` error, for every store. Reopening from
+  the same local directory replays the commits.
+- **A flush to a slow bucket runs to the end.** uni-db abandoned a flush after
+  60 s in all; it now gives up after 60 s without a table commit, or 15 times
+  that in all (rustic-ai/uni-db#355). It also checks one table's existence
+  instead of listing every table, a round trip each on an object store.
+- **DATETIME indexes are built.** The BTree indexes on `Message.timestamp`,
+  `Session.started_at`, `Episode.timestamp`, `Action.started_at`,
+  `ConsolidationCycle.started_at`, `Observation.temporal_anchor`,
+  `Source.first_seen` and `Source.retired_at` never existed: uni-db stores
+  DATETIME as a struct column, which Lance's BTree refuses, and only logged it.
+  uni-db 6.0 indexes DATETIME through a hidden derived key column
+  (rustic-ai/uni-db#356), and range and equality filters on those properties
+  use it.
+- **OCR keeps the spaces between words and reads long lines in full**
+  (uni-xervo 0.20), so scanned PDFs are searchable.
+- **Concurrent loads of a cached model no longer fail** on a missing file
+  under `snapshots/` (uni-xervo 0.20 locks hf-hub cache downloads; the
+  root cause is huggingface/hf-hub#245).
+- Sources queued with `Session::submit_source` use the instance's
+  registered extractors; image, audio and video used to fail as
+  unsupported in the worker.
+- A scope that matches nothing returns no sparse hits; sparse recall used
+  to treat it as no filter.
+- Replaying a whole unit checks its tool calls, so a changed call is an
+  `IdConflict` instead of a silent replay.
+- Creating a membership participant no longer downgrades a registered
+  agent to `unknown`.
+- A goal or task whose embedding fails still returns its id, and
+  re-creating under an existing id no longer adds duplicate edges.
+- Python `query` returns sparse and binary vectors instead of `None`.
 - **The release workflow mints a fresh crates.io token for each publish
   attempt.** Trusted Publishing tokens expire after 30 minutes, and the
   0.5.1 publish, which got one token up front, lost it after four crates.
+
+### Security
+
+- **`url` 2.5.9** (RUSTSEC-2026-0592). `Url::origin()` in 2.5.8 recursed once
+  per nested `blob:` prefix, so a crafted URL overflowed the stack and aborted
+  the process. uniko parses its own store URLs with `url`, and Lance's object
+  store clients use it too.
 
 ## [0.5.1] - 2026-11-15
 
@@ -954,6 +1150,7 @@ pip install uniko-cuda    # NVIDIA CUDA, Linux x86_64
 pip install uniko-metal   # Apple Silicon, macOS arm64
 ```
 
+[0.6.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.6.0
 [0.5.1]: https://github.com/rustic-ai/uniko/releases/tag/v0.5.1
 [0.5.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.5.0
 [0.4.0]: https://github.com/rustic-ai/uniko/releases/tag/v0.4.0

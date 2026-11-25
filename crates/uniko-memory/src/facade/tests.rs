@@ -5992,6 +5992,99 @@ mod hybrid_regressions {
         config
     }
 
+    /// #66: a dense-only BGE-M3 store gains the hybrid columns in place.
+    /// The backfill fills them for existing rows, recall then uses them,
+    /// and a rerun after rows lost their sparse vectors resumes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enabling_hybrid_in_place_fills_the_new_columns() {
+        if !expensive() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        let mut dense = config(false);
+        dense.embedding.sparse_dimensions = None;
+        dense.embedding.multivector_dimensions = None;
+        dense.reranker.enabled = false;
+        let memory = Uniko::builder()
+            .path(&path)
+            .raw_config(dense)
+            .build()
+            .await
+            .expect("dense-only store");
+        seed(&memory).await;
+        memory.shutdown().await.unwrap();
+
+        let mut phases = Vec::new();
+        let report = Uniko::migrate_store(
+            &path,
+            config(true),
+            uniko_store::Migration::EnableHybrid,
+            |p| phases.push(p.phase.clone()),
+        )
+        .await
+        .expect("migrate");
+        assert!(report.completed, "{report:?}");
+        assert!(report.rows_backfilled >= DOCS.len() as u64, "{report:?}");
+        assert!(phases.iter().any(|p| p == "backfill"), "{phases:?}");
+
+        let memory = Uniko::builder()
+            .path(&path)
+            .raw_config(config(true))
+            .build()
+            .await
+            .expect("opens as hybrid");
+        let info = memory.store_info().await.unwrap();
+        assert!(info.embedding.is_hybrid());
+        assert_eq!(info.hybrid_backfill_pending, Some(0));
+        let kb = memory.agent("a").kb().clone();
+        assert_eq!(
+            super::count_query(
+                &kb,
+                "MATCH (c:Chunk) WHERE c.colbert_embedding IS NULL RETURN count(c) AS c"
+            )
+            .await,
+            0,
+            "every chunk has token vectors"
+        );
+        let bundle = memory.agent("a").recall(QUERY).await.unwrap();
+        for stage in [Stage::Sparse, Stage::Colbert] {
+            assert!(
+                bundle
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.stage == stage && d.status == StageStatus::Applied),
+                "{stage:?} not applied: {:?}",
+                bundle.diagnostics
+            );
+        }
+
+        // Lose two chunks' sparse vectors: a rerun picks up exactly those.
+        let tx = kb
+            .db() // ALLOW: test-only setup; the seal governs product code.
+            .session()
+            .tx()
+            .await
+            .unwrap();
+        tx.query("MATCH (c:Chunk) WITH c LIMIT 2 SET c.sparse_embedding = null")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        drop(kb);
+        memory.shutdown().await.unwrap();
+        let again = Uniko::migrate_store(
+            &path,
+            config(true),
+            uniko_store::Migration::EnableHybrid,
+            |_| {},
+        )
+        .await
+        .expect("resume");
+        assert_eq!(again.rows_backfilled, 2, "{again:?}");
+        assert_eq!(again.rows_unfilled, 0, "{again:?}");
+        assert!(again.completed);
+    }
+
     async fn seed(memory: &Uniko) {
         let alice = memory.agent("a").session("alice");
         for (id, text) in DOCS {
@@ -6088,11 +6181,10 @@ mod hybrid_regressions {
         memory.shutdown().await.unwrap();
     }
 
-    /// #70: scoped recall should use the sparse channel. uni-db 5.2.1
-    /// rejects a filtered `uni.sparse.query`, so today this reports
-    /// `sparse: failed / query_failed`.
+    /// #70: scoped recall uses the sparse channel. Before uni-db 5.3 a
+    /// filtered `uni.sparse.query` was rejected (rustic-ai/uni-db#344), so
+    /// this reported `sparse: failed / query_failed`.
     #[tokio::test]
-    #[ignore = "waits on rustic-ai/uni-db#344"]
     async fn scoped_recall_applies_the_sparse_channel() {
         if !expensive() {
             return;
@@ -6118,5 +6210,1223 @@ mod hybrid_regressions {
             "{sparse:?}"
         );
         assert!(bundle.items.iter().all(|i| i.content != BOB));
+    }
+}
+
+/// Agent registration (#67) and explicit tool-call performers (#68).
+mod registration_and_performer {
+    use super::*;
+    use crate::{AgentRegistration, EnsureOutcome, ToolCall};
+
+    async fn memory_or_skip() -> Option<Uniko> {
+        match Uniko::in_memory().await {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("skipping: in-memory instance unavailable: {e}");
+                None
+            }
+        }
+    }
+
+    async fn participants(kb: &KnowledgeBase, id: &str, kind: &str) -> i64 {
+        count_query(
+            kb,
+            &format!(
+                "MATCH (p:Participant {{participant_id: '{id}'}}) \
+                 WHERE p.kind = '{kind}' RETURN count(p) AS c"
+            ),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn an_empty_participant_id_is_refused() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        for id in ["", "  "] {
+            let r = memory.agent(id).register(AgentRegistration::new()).await;
+            assert!(matches!(r, Err(UnikoError::Config(_))), "{id:?}: {r:?}");
+        }
+        let mut session = memory.agent("reporter").session("s-empty");
+        let r = session
+            .commit_unit(vec![
+                Turn::new("user", "Q")
+                    .id("q-empty")
+                    .tool_call(ToolCall::new("search").call_id("c-empty").performer("")),
+            ])
+            .await;
+        assert!(matches!(r, Err(UnikoError::Config(_))), "{r:?}");
+        drop(session);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// Ingest names a participant after its id; registering it later with a
+    /// real name replaces that placeholder.
+    #[tokio::test]
+    async fn register_names_an_agent_ingest_saw_first() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        let mut session = agent.session("s-name");
+        match session
+            .observe(Turn::new("reporter", "First words.").id("m-name"))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => return eprintln!("skipping: models unavailable"),
+            Err(e) => panic!("observe failed: {e}"),
+        }
+        let reg = agent
+            .register(AgentRegistration::new().name("Reporter"))
+            .await
+            .unwrap();
+        assert_eq!(reg.outcome, EnsureOutcome::Upgraded);
+        assert_eq!(
+            count_query(
+                agent.kb(),
+                "MATCH (p:Participant {participant_id: 'reporter'}) \
+                 WHERE p.name = 'Reporter' RETURN count(p) AS c"
+            )
+            .await,
+            1
+        );
+        drop((session, agent));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn register_creates_an_agent_and_nothing_else() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        let first = agent
+            .register(AgentRegistration::new().name("Reporter"))
+            .await
+            .unwrap();
+        assert_eq!(first.participant_id, "reporter");
+        assert_eq!(first.outcome, EnsureOutcome::Created);
+        let again = agent.register(AgentRegistration::new()).await.unwrap();
+        assert_eq!(again.outcome, EnsureOutcome::Existing);
+
+        let kb = agent.kb();
+        assert_eq!(participants(kb, "reporter", "agent").await, 1);
+        assert_eq!(
+            count_query(
+                kb,
+                "MATCH (p:Participant {participant_id: 'reporter'}) \
+                 WHERE p.name = 'Reporter' RETURN count(p) AS c"
+            )
+            .await,
+            1
+        );
+        for label in ["Session", "Message", "Action"] {
+            assert_eq!(
+                count_query(kb, &format!("MATCH (n:{label}) RETURN count(n) AS c")).await,
+                0,
+                "register must not record a {label}"
+            );
+        }
+        drop(agent);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// A participant first seen through an org membership (kind `unknown`)
+    /// is upgraded, keeping its membership and name.
+    #[tokio::test]
+    async fn register_upgrades_an_unknown_participant_and_keeps_its_membership() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        assert!(memory.add_org_member("reporter", "acme").await.unwrap());
+        let agent = memory.agent("reporter");
+        let kb = agent.kb().clone();
+        assert_eq!(participants(&kb, "reporter", "unknown").await, 1);
+
+        let reg = agent
+            .register(AgentRegistration::new().name("Reporter"))
+            .await
+            .unwrap();
+        assert_eq!(reg.outcome, EnsureOutcome::Upgraded);
+        assert_eq!(participants(&kb, "reporter", "agent").await, 1);
+        let viewer = crate::Viewer::new(&kb, "reporter").await.unwrap();
+        assert!(viewer.orgs.contains("acme"), "membership kept");
+        drop((agent, kb, viewer));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// The agent's first turn after registration keeps kind `agent`: ingest
+    /// used to reset every participant it touched to `unknown`.
+    #[tokio::test]
+    async fn a_turn_after_registration_keeps_the_agent_kind() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        agent
+            .register(AgentRegistration::new().name("Reporter"))
+            .await
+            .unwrap();
+        let mut session = agent.session("s-kind");
+        match session
+            .observe(Turn::new("reporter", "Starting the report.").id("m-kind"))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable");
+                return;
+            }
+            Err(e) => panic!("observe failed: {e}"),
+        }
+        let kb = agent.kb();
+        assert_eq!(participants(kb, "reporter", "agent").await, 1);
+        assert_eq!(
+            count_query(
+                kb,
+                "MATCH (p:Participant {participant_id: 'reporter'}) \
+                 WHERE p.name = 'Reporter' AND p.last_seen IS NOT NULL \
+                 RETURN count(p) AS c"
+            )
+            .await,
+            1,
+            "the turn updates last_seen but keeps the registered name"
+        );
+        drop((session, agent));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn goals_and_tasks_work_on_a_fresh_store() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        let goal = agent
+            .goals()
+            .create_view(crate::CreateGoalParams {
+                goal_id: Some("g".into()),
+                title: "Goal".into(),
+                ..Default::default()
+            })
+            .await;
+        let goal = match goal {
+            Ok(g) => g,
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable");
+                return;
+            }
+            Err(e) => panic!("create_view failed: {e}"),
+        };
+        assert_eq!(goal.goal_id, "g");
+        agent
+            .goals()
+            .create_task(crate::CreateTaskParams {
+                goal_id: Some("g".into()),
+                title: "Task".into(),
+                ..Default::default()
+            })
+            .await
+            .expect("create_task on a fresh store");
+        assert_eq!(participants(agent.kb(), "reporter", "agent").await, 1);
+        drop(agent);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_registration_creates_one_participant() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        let outcomes = futures::future::join_all((0..8).map(|_| {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.register(AgentRegistration::new()).await })
+        }))
+        .await;
+        let created = outcomes
+            .into_iter()
+            .map(|r| r.unwrap().unwrap().outcome)
+            .filter(|o| *o == EnsureOutcome::Created)
+            .count();
+        assert_eq!(created, 1, "exactly one caller creates the participant");
+        assert_eq!(
+            count_query(
+                agent.kb(),
+                "MATCH (p:Participant {participant_id: 'reporter'}) RETURN count(p) AS c"
+            )
+            .await,
+            1
+        );
+        drop(agent);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// Adding an org member while the same id registers never leaves it
+    /// `unknown`: the membership path creates the participant through the
+    /// same never-downgrading upsert as registration.
+    #[tokio::test]
+    async fn an_org_membership_racing_registration_keeps_the_agent_kind() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let memory = std::sync::Arc::new(memory);
+        for i in 0..12 {
+            let id = format!("racer-{i}");
+            let agent = memory.agent(&id);
+            let m = memory.clone();
+            let member = id.clone();
+            let (reg, joined) = tokio::join!(
+                tokio::spawn(async move { agent.register(AgentRegistration::new()).await }),
+                tokio::spawn(async move { m.add_org_member(&member, "acme").await }),
+            );
+            reg.unwrap().unwrap();
+            joined.unwrap().unwrap();
+            let kb = memory.agent(&id).kb().clone();
+            assert_eq!(
+                participants(&kb, &id, "agent").await,
+                1,
+                "{id} stays an agent"
+            );
+            assert_eq!(participants(&kb, &id, "unknown").await, 0, "{id}");
+        }
+        let memory = std::sync::Arc::try_unwrap(memory).ok().expect("one owner");
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn registration_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        let Some(memory) = build_or_skip(Uniko::builder().path(&path)).await else {
+            return;
+        };
+        let reg = memory
+            .agent("reporter")
+            .register(AgentRegistration::new())
+            .await
+            .unwrap();
+        assert_eq!(reg.outcome, EnsureOutcome::Created);
+        memory.shutdown().await.expect("shutdown");
+
+        let Some(memory) = build_or_skip(Uniko::builder().path(&path)).await else {
+            return;
+        };
+        let agent = memory.agent("reporter");
+        assert_eq!(participants(agent.kb(), "reporter", "agent").await, 1);
+        let again = agent.register(AgentRegistration::new()).await.unwrap();
+        assert_eq!(again.outcome, EnsureOutcome::Existing);
+        drop(agent);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    fn reporter_call() -> ToolCall {
+        ToolCall::new("search")
+            .call_id("call")
+            .text_output("Evidence")
+            .performer("reporter")
+    }
+
+    async fn performed_by(kb: &KnowledgeBase, call_id: &str, who: &str) -> i64 {
+        count_query(
+            kb,
+            &format!(
+                "MATCH (:Action {{action_id: '{call_id}'}})-[r:PERFORMED_BY]->\
+                 (:Participant {{participant_id: '{who}'}}) RETURN count(r) AS c"
+            ),
+        )
+        .await
+    }
+
+    /// The issue's reproduction: a user turn in the reporter's session keeps
+    /// its sender while its embedded call is performed by the reporter, and
+    /// a replay after a reopen adds no edges.
+    #[tokio::test]
+    async fn an_embedded_call_can_name_its_performer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        let Some(memory) = build_or_skip(Uniko::builder().path(&path)).await else {
+            return;
+        };
+        let unit = || {
+            vec![
+                Turn::new("user", "Question")
+                    .id("question")
+                    .tool_call(reporter_call()),
+            ]
+        };
+        let mut session = memory.agent("reporter").session("research");
+        match session.commit_unit(unit()).await {
+            Ok(r) => assert!(!r.was_replay),
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable");
+                return;
+            }
+            Err(e) => panic!("commit_unit failed: {e}"),
+        }
+        let kb = memory.agent("reporter").kb().clone();
+        assert_eq!(performed_by(&kb, "call", "reporter").await, 1);
+        assert_eq!(performed_by(&kb, "call", "user").await, 0);
+        assert_eq!(
+            count_query(
+                &kb,
+                "MATCH (:Message {message_id: 'question'})-[:SENT_BY]->\
+                 (:Participant {participant_id: 'user'}) RETURN count(*) AS c"
+            )
+            .await,
+            1,
+            "the turn keeps its sender"
+        );
+        // Naming a performer never makes it an agent; only `register` does.
+        assert_eq!(participants(&kb, "reporter", "unknown").await, 1);
+        drop((session, kb));
+        memory.shutdown().await.expect("shutdown");
+
+        let Some(memory) = build_or_skip(Uniko::builder().path(&path)).await else {
+            return;
+        };
+        let mut session = memory.agent("reporter").session("research");
+        let replay = session.commit_unit(unit()).await.expect("replay");
+        assert!(replay.was_replay);
+        let kb = memory.agent("reporter").kb().clone();
+        assert_eq!(
+            count_query(
+                &kb,
+                "MATCH (:Action {action_id: 'call'})-[r:PERFORMED_BY]->() RETURN count(r) AS c"
+            )
+            .await,
+            1,
+            "replay adds no PERFORMED_BY edge"
+        );
+        drop((session, kb));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// Replaying a whole unit checks its tool calls too: the same turn with
+    /// its call now performed by someone else, carrying another result, or
+    /// a call the stored unit never had is a conflict, not a silent replay.
+    #[tokio::test]
+    async fn a_unit_replay_with_a_changed_call_is_a_conflict() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let unit = |call: ToolCall| vec![Turn::new("user", "Question").id("q").tool_call(call)];
+        let mut session = memory.agent("reporter").session("research");
+        match session.commit_unit(unit(reporter_call())).await {
+            Ok(r) => assert!(!r.was_replay),
+            Err(e) if is_model_unavailable(&e) => return eprintln!("skipping: models unavailable"),
+            Err(e) => panic!("commit_unit failed: {e}"),
+        }
+        let replay = session.commit_unit(unit(reporter_call())).await.unwrap();
+        assert!(replay.was_replay, "the identical unit replays");
+        // `auditor` exists, so its case reaches the comparison of the stored
+        // performer, not just the missing-participant check.
+        memory
+            .agent("auditor")
+            .register(AgentRegistration::new())
+            .await
+            .unwrap();
+
+        for changed in [
+            reporter_call().performer("auditor"),
+            ToolCall::new("search")
+                .call_id("call")
+                .text_output("Evidence"),
+            ToolCall::new("search")
+                .call_id("call")
+                .text_output("Other")
+                .performer("reporter"),
+            ToolCall::new("search")
+                .call_id("other-call")
+                .text_output("Evidence"),
+        ] {
+            let r = session.commit_unit(unit(changed)).await;
+            assert!(matches!(r, Err(UnikoError::IdConflict(_))), "{r:?}");
+        }
+        let kb = memory.agent("reporter").kb().clone();
+        assert_eq!(performed_by(&kb, "call", "reporter").await, 1);
+        assert_eq!(performed_by(&kb, "call", "auditor").await, 0);
+        drop((session, kb));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// The performer is compared as resolved, whatever context recorded the
+    /// call: the same performer named explicitly elsewhere replays, and a
+    /// default that resolves to someone else conflicts.
+    #[tokio::test]
+    async fn the_performer_check_does_not_depend_on_the_context() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let session = memory.agent("reporter").session("research");
+        match session
+            .observe_tool(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence"),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(e) if is_model_unavailable(&e) => return eprintln!("skipping: models unavailable"),
+            Err(e) => panic!("observe_tool failed: {e}"),
+        }
+        let mut turns = memory.agent("reporter").session("research");
+        let embedded =
+            |call: ToolCall, id: &str| vec![Turn::new("user", "Q").id(id).tool_call(call)];
+        // Performed by reporter by default, then named explicitly in a user's
+        // turn: the same performer, so a replay of the call.
+        let r = turns
+            .commit_unit(embedded(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence")
+                    .performer("reporter"),
+                "q-ctx-1",
+            ))
+            .await
+            .expect("the same performer is no conflict");
+        assert!(r.turns[0].tool_calls[0].was_replay);
+        // In a user's turn with no performer, the default is the user: not
+        // the stored performer, so a conflict.
+        let r = turns
+            .commit_unit(embedded(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence"),
+                "q-ctx-2",
+            ))
+            .await;
+        assert!(matches!(r, Err(UnikoError::IdConflict(_))), "{r:?}");
+        // The whole-unit replay path compares the same way: replaying the
+        // committed unit replays, and the same unit with the default (user)
+        // performer conflicts.
+        let replay = turns
+            .commit_unit(embedded(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence")
+                    .performer("reporter"),
+                "q-ctx-1",
+            ))
+            .await
+            .expect("the identical unit replays");
+        assert!(replay.was_replay);
+        let r = turns
+            .commit_unit(embedded(
+                ToolCall::new("search")
+                    .call_id("ctx")
+                    .text_output("Evidence"),
+                "q-ctx-1",
+            ))
+            .await;
+        assert!(matches!(r, Err(UnikoError::IdConflict(_))), "{r:?}");
+        drop((session, turns));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// Re-recording a call under another performer is refused, so the
+    /// stored PERFORMED_BY edge never silently disagrees with the caller.
+    #[tokio::test]
+    async fn the_same_call_with_another_performer_is_a_conflict() {
+        let Some(memory) = memory_or_skip().await else {
+            return;
+        };
+        let session = memory.agent("reporter").session("research");
+        match session
+            .observe_tool(reporter_call().performer("auditor"))
+            .await
+        {
+            Ok(r) => assert!(!r.was_replay),
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable");
+                return;
+            }
+            Err(e) => panic!("observe_tool failed: {e}"),
+        }
+        let kb = memory.agent("reporter").kb().clone();
+        assert_eq!(performed_by(&kb, "call", "auditor").await, 1);
+        assert_eq!(participants(&kb, "auditor", "unknown").await, 1);
+
+        let replay = session
+            .observe_tool(reporter_call().performer("auditor"))
+            .await
+            .expect("same performer replays");
+        assert!(replay.was_replay);
+        for call in [reporter_call(), reporter_call().performer("someone-else")] {
+            let err = session.observe_tool(call).await.unwrap_err();
+            assert!(
+                matches!(err, UnikoError::IdConflict { .. }),
+                "expected IdConflict, got {err:?}"
+            );
+        }
+        // Naming the default performer explicitly is the same call as naming
+        // none.
+        let plain = session
+            .observe_tool(
+                ToolCall::new("search")
+                    .call_id("plain")
+                    .text_output("Evidence"),
+            )
+            .await
+            .unwrap();
+        assert!(!plain.was_replay);
+        let explicit = session
+            .observe_tool(
+                ToolCall::new("search")
+                    .call_id("plain")
+                    .text_output("Evidence")
+                    .performer("reporter"),
+            )
+            .await
+            .unwrap();
+        assert!(explicit.was_replay);
+        assert_eq!(performed_by(&kb, "plain", "reporter").await, 1);
+        drop((session, kb));
+        memory.shutdown().await.expect("shutdown");
+    }
+}
+
+/// Dead-letter inspection, retry and recovery (#65).
+mod dead_letters {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use uniko_pipes::content::Mime;
+
+    use super::*;
+    use crate::{DeadLetterFilter, DeadLetterStatus, Modality, TextExtractor};
+
+    /// An image extractor that fails with `err` while `failing` is set.
+    pub(super) fn flaky(failing: Arc<AtomicBool>, err: fn() -> UnikoError) -> Arc<TextExtractor> {
+        Arc::new(TextExtractor::new(Modality::Image, move |_| {
+            if failing.load(Ordering::SeqCst) {
+                Err(err())
+            } else {
+                Ok("a red bicycle leaning on a wall".to_string())
+            }
+        }))
+    }
+
+    pub(super) fn offline() -> UnikoError {
+        UnikoError::Internal("captioner offline".into())
+    }
+
+    pub(super) fn image(id: &str) -> IngestSource {
+        IngestSource::bytes(vec![0x42; 16])
+            .with_mime(Mime::parse("image/png").expect("mime"))
+            .with_id(id)
+    }
+
+    fn config(max_retries: u32) -> UnikoConfig {
+        UnikoConfig {
+            dead_letter_max_retries: max_retries,
+            ..UnikoConfig::default()
+        }
+    }
+
+    /// A streaming instance; skips (returns `None`) only when a model is
+    /// unavailable, so a regression in the streaming build still fails.
+    pub(super) async fn streaming(
+        builder: crate::UnikoBuilder,
+        extractor: Arc<TextExtractor>,
+    ) -> Option<Uniko> {
+        match builder.streaming(true).extractor(extractor).build().await {
+            Ok(m) => Some(m),
+            Err(e) if is_model_unavailable(&e) => {
+                eprintln!("skipping: models unavailable: {e}");
+                None
+            }
+            Err(e) => panic!("streaming instance failed to build: {e}"),
+        }
+    }
+
+    /// Submit one image that fails, and return its dead letter's id.
+    async fn dead_letter_one(memory: &Uniko, id: &str) -> String {
+        let session = memory.agent("viewer").session("dl");
+        session.submit_source(image(id)).await.expect("submit");
+        session.flush().await.expect("flush");
+        let letters = memory
+            .dead_letters()
+            .list(&DeadLetterFilter::new())
+            .await
+            .unwrap();
+        let [letter] = letters.as_slice() else {
+            panic!("one dead letter expected, got {letters:?}");
+        };
+        letter.id.clone()
+    }
+
+    async fn flush(memory: &Uniko) {
+        memory.agent("viewer").session("dl").flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_is_retried_and_resolved() {
+        let failing = Arc::new(AtomicBool::new(true));
+        let Some(memory) = streaming(
+            Uniko::builder().in_memory(),
+            flaky(failing.clone(), offline),
+        )
+        .await
+        else {
+            return;
+        };
+        let id = dead_letter_one(&memory, "img-1").await;
+        let dl = memory.dead_letters();
+        let letter = dl.get(&id).await.unwrap().expect("letter");
+        assert_eq!(letter.status, DeadLetterStatus::Pending);
+        assert!(letter.retriable && letter.replayable);
+        assert_eq!(letter.error_kind.as_deref(), Some("internal"));
+        assert_eq!(letter.ingest_type.as_deref(), Some("source"));
+        assert_eq!((letter.retry_count, letter.max_retries), (0, 3));
+        assert!(
+            letter.next_retry_at.is_some(),
+            "the first retry is scheduled"
+        );
+        assert_eq!(dl.counts().await.unwrap().pending, 1);
+
+        failing.store(false, Ordering::SeqCst);
+        dl.retry(&id, false).await.expect("retry");
+        flush(&memory).await;
+
+        let letter = dl.get(&id).await.unwrap().unwrap();
+        assert_eq!(letter.status, DeadLetterStatus::Resolved);
+        assert_eq!(letter.resolution.as_deref(), Some("retried"));
+        assert_eq!(letter.retry_count, 1);
+        assert!(letter.resolved_at.is_some());
+        let agent = memory.agent("viewer");
+        assert!(
+            agent.data().artifact("img-1").await.unwrap().is_some(),
+            "the retried item is ingested"
+        );
+        assert_eq!(
+            count_query(
+                agent.kb(),
+                "MATCH (a:Artifact {artifact_id: 'img-1'}) RETURN count(a) AS c"
+            )
+            .await,
+            1
+        );
+        let health = memory.health().unwrap().ingest;
+        assert_eq!(
+            (
+                health.dead_lettered,
+                health.retries,
+                health.retries_succeeded
+            ),
+            (1, 1, 1)
+        );
+        let err = dl.retry(&id, false).await.unwrap_err();
+        assert!(matches!(err, UnikoError::Config(_)), "{err}");
+
+        drop((agent, dl));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn retries_stop_at_the_limit() {
+        let failing = Arc::new(AtomicBool::new(true));
+        let Some(memory) = streaming(
+            Uniko::builder().in_memory().raw_config(config(2)),
+            flaky(failing, offline),
+        )
+        .await
+        else {
+            return;
+        };
+        let id = dead_letter_one(&memory, "img-2").await;
+        let dl = memory.dead_letters();
+        for (attempt, expected) in [
+            (1, DeadLetterStatus::Pending),
+            (2, DeadLetterStatus::Exhausted),
+        ] {
+            dl.retry(&id, false).await.expect("retry");
+            flush(&memory).await;
+            let letter = dl.get(&id).await.unwrap().unwrap();
+            assert_eq!(letter.retry_count, attempt);
+            assert_eq!(letter.status, expected, "after retry {attempt}");
+        }
+        let err = dl.retry(&id, false).await.unwrap_err();
+        assert!(
+            matches!(&err, UnikoError::Config(m) if m.contains("all its retries")),
+            "{err}"
+        );
+        // `force` goes past the limit; failing again leaves it exhausted.
+        dl.retry(&id, true).await.expect("forced retry");
+        flush(&memory).await;
+        let letter = dl.get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (letter.retry_count, letter.status),
+            (3, DeadLetterStatus::Exhausted)
+        );
+        assert_eq!(memory.health().unwrap().ingest.dead_lettered, 1);
+        drop(dl);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_permanent_failure_is_not_retried_without_force() {
+        let Some(memory) = streaming(
+            Uniko::builder().in_memory(),
+            flaky(Arc::new(AtomicBool::new(true)), || {
+                UnikoError::Unsupported("no decoder for this image".into())
+            }),
+        )
+        .await
+        else {
+            return;
+        };
+        let id = dead_letter_one(&memory, "img-3").await;
+        let dl = memory.dead_letters();
+        let letter = dl.get(&id).await.unwrap().unwrap();
+        assert_eq!(letter.status, DeadLetterStatus::Exhausted);
+        assert!(!letter.retriable);
+        assert!(letter.next_retry_at.is_none());
+        let err = dl.retry(&id, false).await.unwrap_err();
+        assert!(
+            matches!(&err, UnikoError::Config(m) if m.contains("unsupported")),
+            "{err}"
+        );
+        assert!(dl.retry_pending(10).await.unwrap().retried.is_empty());
+        drop(dl);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn resolve_only_changes_the_letter() {
+        let Some(memory) = streaming(
+            Uniko::builder().in_memory(),
+            flaky(Arc::new(AtomicBool::new(true)), offline),
+        )
+        .await
+        else {
+            return;
+        };
+        let mut session = memory.agent("viewer").session("dl");
+        session
+            .observe(Turn::new("alice", "unrelated memory").id("m-keep"))
+            .await
+            .expect("observe");
+        drop(session);
+        let id = dead_letter_one(&memory, "img-4").await;
+        let dl = memory.dead_letters();
+        assert!(dl.resolve(&id, Some("image was corrupt")).await.unwrap());
+        assert!(!dl.resolve(&id, None).await.unwrap(), "already resolved");
+        assert!(!dl.resolve("no-such-letter", None).await.unwrap());
+        let letter = dl.get(&id).await.unwrap().unwrap();
+        assert_eq!(letter.status, DeadLetterStatus::Resolved);
+        assert_eq!(letter.resolution.as_deref(), Some("image was corrupt"));
+        let counts = dl.counts().await.unwrap();
+        assert_eq!((counts.pending, counts.resolved), (0, 1));
+        let agent = memory.agent("viewer");
+        assert_eq!(
+            count_query(
+                agent.kb(),
+                "MATCH (m:Message {message_id: 'm-keep'}) RETURN count(m) AS c"
+            )
+            .await,
+            1,
+            "other memory is untouched"
+        );
+        drop((agent, dl));
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// Letters survive a restart, and one left `retrying` by a stopped
+    /// process is retried again.
+    #[tokio::test]
+    async fn letters_survive_a_restart_and_interrupted_retries_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        let failing = Arc::new(AtomicBool::new(true));
+        let Some(memory) = streaming(
+            Uniko::builder().path(&path),
+            flaky(failing.clone(), offline),
+        )
+        .await
+        else {
+            return;
+        };
+        let id = dead_letter_one(&memory, "img-5").await;
+        // Claim a retry without resubmitting it: what a crash between the
+        // claim and the ingest leaves behind.
+        let kb = Arc::new(memory.agent("viewer").kb().clone());
+        uniko_pipes::dead_letter::DeadLetterQueue::new(kb.clone())
+            .begin_retry(&id, false)
+            .await
+            .expect("claim");
+        drop(kb);
+        memory.shutdown().await.expect("shutdown");
+
+        failing.store(false, Ordering::SeqCst);
+        let Some(memory) = streaming(Uniko::builder().path(&path), flaky(failing, offline)).await
+        else {
+            return;
+        };
+        let dl = memory.dead_letters();
+        assert!(dl.get(&id).await.unwrap().is_some(), "letter survives");
+        let report = dl.retry_pending(10).await.unwrap();
+        assert_eq!(report.retried, vec![id.clone()], "{report:?}");
+        flush(&memory).await;
+        let letter = dl.get(&id).await.unwrap().unwrap();
+        assert_eq!(letter.status, DeadLetterStatus::Resolved);
+        assert_eq!(
+            letter.retry_count, 2,
+            "the interrupted claim counts, so a payload that crashes the \
+             process can't retry forever"
+        );
+        drop(dl);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// A row written before payloads were kept lists as legacy and can only
+    /// be resolved.
+    #[tokio::test]
+    async fn a_legacy_letter_can_be_resolved_but_not_retried() {
+        let Some(memory) = streaming(
+            Uniko::builder().in_memory(),
+            flaky(Arc::new(AtomicBool::new(false)), offline),
+        )
+        .await
+        else {
+            return;
+        };
+        let kb = memory.agent("viewer").kb().clone();
+        let props = HashMap::from([
+            ("step".to_string(), Value::String("ingest".into())),
+            ("error".to_string(), Value::String("old failure".into())),
+            ("node_ref".to_string(), Value::Int(0)),
+            ("retry_count".to_string(), Value::Int(0)),
+            ("max_retries".to_string(), Value::Int(3)),
+        ]);
+        kb.create_node(labels::DEAD_LETTER, &props).await.unwrap();
+        drop(kb);
+        let dl = memory.dead_letters();
+        let letters = dl.list(&DeadLetterFilter::new()).await.unwrap();
+        let [letter] = letters.as_slice() else {
+            panic!("{letters:?}");
+        };
+        assert_eq!(letter.status, DeadLetterStatus::Legacy);
+        assert!(letter.id.starts_with("legacy:") && !letter.replayable);
+        assert_eq!(dl.counts().await.unwrap().legacy, 1);
+        // A status this version doesn't know is legacy too, in a filtered
+        // list as in the counts.
+        let mut pending = props.clone();
+        pending.insert("status".to_string(), Value::String("pending".into()));
+        memory
+            .agent("viewer")
+            .kb()
+            .create_node(labels::DEAD_LETTER, &pending)
+            .await
+            .unwrap();
+        let mut unknown = props.clone();
+        unknown.insert(
+            "status".to_string(),
+            Value::String("from-the-future".into()),
+        );
+        memory
+            .agent("viewer")
+            .kb()
+            .create_node(labels::DEAD_LETTER, &unknown)
+            .await
+            .unwrap();
+        let legacy = dl
+            .list(&DeadLetterFilter::new().status(DeadLetterStatus::Legacy))
+            .await
+            .unwrap();
+        assert_eq!(legacy.len(), 2, "{legacy:?}");
+        assert_eq!(dl.counts().await.unwrap().legacy, 2);
+        assert!(matches!(
+            dl.retry(&letter.id, true).await,
+            Err(UnikoError::Config(_))
+        ));
+        assert!(dl.resolve(&letter.id, None).await.unwrap());
+        drop(dl);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// Listing and resolving work without streaming; retrying does not.
+    #[tokio::test]
+    async fn retry_needs_streaming() {
+        let Ok(memory) = Uniko::in_memory().await else {
+            return;
+        };
+        let dl = memory.dead_letters();
+        assert!(dl.list(&DeadLetterFilter::new()).await.unwrap().is_empty());
+        let err = dl.retry("x", false).await.unwrap_err();
+        assert!(
+            matches!(&err, UnikoError::Config(m) if m.contains("streaming")),
+            "{err}"
+        );
+        drop(dl);
+        memory.shutdown().await.expect("shutdown");
+    }
+}
+
+/// The opt-in background retry scheduler (#65).
+mod dead_letter_scheduler {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use super::dead_letters::{flaky, image, offline, streaming as build};
+    use super::*;
+    use crate::{DeadLetter, DeadLetterFilter, DeadLetterStatus};
+
+    /// Auto-retry on, with a short backoff. The scheduler polls at most once
+    /// a second, so each pass is about a second apart.
+    fn auto(max_retries: u32, backoff_ms: u64) -> UnikoConfig {
+        UnikoConfig {
+            dead_letter_max_retries: max_retries,
+            dead_letter_auto_retry: true,
+            dead_letter_retry_backoff_ms: backoff_ms,
+            dead_letter_retry_max_backoff_ms: backoff_ms * 4,
+            ..UnikoConfig::default()
+        }
+    }
+
+    async fn submit_failing(memory: &Uniko, id: &str) -> String {
+        let session = memory.agent("viewer").session("dl");
+        session.submit_source(image(id)).await.expect("submit");
+        session.flush().await.expect("flush");
+        let letters = memory
+            .dead_letters()
+            .list(&DeadLetterFilter::new())
+            .await
+            .unwrap();
+        letters.first().expect("a dead letter").id.clone()
+    }
+
+    /// Poll the letter until `done` holds, failing after 30 s.
+    async fn wait_for(memory: &Uniko, id: &str, done: impl Fn(&DeadLetter) -> bool) -> DeadLetter {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let letter = memory
+                .dead_letters()
+                .get(id)
+                .await
+                .unwrap()
+                .expect("letter");
+            if done(&letter) {
+                return letter;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out; last state {letter:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_transient_failure_recovers_on_its_own() {
+        let failing = Arc::new(AtomicBool::new(true));
+        let Some(memory) = build(
+            Uniko::builder().in_memory().raw_config(auto(10, 50)),
+            flaky(failing.clone(), offline),
+        )
+        .await
+        else {
+            return;
+        };
+        let id = submit_failing(&memory, "img-a").await;
+        failing.store(false, Ordering::SeqCst);
+        let letter = wait_for(&memory, &id, |l| l.status == DeadLetterStatus::Resolved).await;
+        assert_eq!(letter.resolution.as_deref(), Some("retried"));
+        assert!(letter.retry_count >= 1);
+        // The scheduler's retry ingested the item.
+        memory.agent("viewer").session("dl").flush().await.unwrap();
+        assert!(
+            memory
+                .agent("viewer")
+                .data()
+                .artifact("img-a")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(memory.health().unwrap().ingest.retries_succeeded >= 1);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn automatic_retries_stop_at_the_limit() {
+        let Some(memory) = build(
+            Uniko::builder().in_memory().raw_config(auto(2, 30)),
+            flaky(Arc::new(AtomicBool::new(true)), offline),
+        )
+        .await
+        else {
+            return;
+        };
+        let id = submit_failing(&memory, "img-b").await;
+        let letter = wait_for(&memory, &id, |l| l.status == DeadLetterStatus::Exhausted).await;
+        assert_eq!(letter.retry_count, 2);
+        // Give the scheduler more passes: it must not go past the limit.
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        let letter = memory.dead_letters().get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (letter.retry_count, letter.status),
+            (2, DeadLetterStatus::Exhausted)
+        );
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_permanent_failure_is_never_retried_automatically() {
+        let Some(memory) = build(
+            Uniko::builder().in_memory().raw_config(auto(3, 30)),
+            flaky(Arc::new(AtomicBool::new(true)), || {
+                UnikoError::Unsupported("no decoder".into())
+            }),
+        )
+        .await
+        else {
+            return;
+        };
+        let id = submit_failing(&memory, "img-c").await;
+        // Several scheduler passes go by without touching it.
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        let letter = memory.dead_letters().get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (letter.retry_count, letter.status),
+            (0, DeadLetterStatus::Exhausted)
+        );
+        assert_eq!(memory.health().unwrap().ingest.retries, 0);
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// `flush` waits for submitted work, not for a retry that isn't due.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flush_does_not_wait_for_a_retry_that_is_not_due() {
+        let Some(memory) = build(
+            Uniko::builder().in_memory().raw_config(auto(3, 60_000)),
+            flaky(Arc::new(AtomicBool::new(true)), offline),
+        )
+        .await
+        else {
+            return;
+        };
+        let started = Instant::now();
+        let id = submit_failing(&memory, "img-d").await;
+        memory.agent("viewer").session("dl").flush().await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "flush waited for a future retry"
+        );
+        let letter = memory.dead_letters().get(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (letter.retry_count, letter.status),
+            (0, DeadLetterStatus::Pending)
+        );
+        memory.shutdown().await.expect("shutdown");
+    }
+
+    /// A letter dead-lettered by a run without auto-retry is picked up by a
+    /// later run that has it on: the schedule lives on the letter.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_schedule_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        let failing = Arc::new(AtomicBool::new(true));
+        let manual = UnikoConfig {
+            dead_letter_retry_backoff_ms: 50,
+            dead_letter_retry_max_backoff_ms: 200,
+            ..UnikoConfig::default()
+        };
+        let Some(memory) = build(
+            Uniko::builder().path(&path).raw_config(manual),
+            flaky(failing.clone(), offline),
+        )
+        .await
+        else {
+            return;
+        };
+        let id = submit_failing(&memory, "img-e").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            memory
+                .dead_letters()
+                .get(&id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            DeadLetterStatus::Pending,
+            "nothing retries it while auto-retry is off"
+        );
+        memory.shutdown().await.expect("shutdown");
+
+        failing.store(false, Ordering::SeqCst);
+        let Some(memory) = build(
+            Uniko::builder().path(&path).raw_config(auto(3, 50)),
+            flaky(failing, offline),
+        )
+        .await
+        else {
+            return;
+        };
+        wait_for(&memory, &id, |l| l.status == DeadLetterStatus::Resolved).await;
+        memory.shutdown().await.expect("shutdown");
+    }
+}
+
+/// Store compatibility through the facade (#66). Model-free.
+mod store_compatibility {
+    use uniko_store::config::{EmbeddingConfig, UnikoConfig};
+    use uniko_store::{UnikoError, Verdict};
+
+    use crate::{PrefetchPolicy, Uniko};
+
+    #[tokio::test]
+    async fn the_builder_refuses_an_incompatible_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        Uniko::builder()
+            .path(&path)
+            .prefetch(PrefetchPolicy::Lazy)
+            .build()
+            .await
+            .expect("create")
+            .shutdown()
+            .await
+            .unwrap();
+
+        let m3 = UnikoConfig {
+            embedding: EmbeddingConfig::bge_m3(),
+            ..UnikoConfig::default()
+        };
+        let report = Uniko::inspect_store(&path, &m3).await.unwrap();
+        assert!(report.info.exists && report.compatibility.has_incompatible());
+
+        let err = Uniko::builder()
+            .path(&path)
+            .prefetch(PrefetchPolicy::Lazy)
+            .raw_config(m3)
+            .build()
+            .await
+            .err()
+            .expect("refused");
+        match err {
+            UnikoError::IncompatibleStore(c) => assert!(
+                c.differences
+                    .iter()
+                    .any(|d| d.field == "dimensions" && d.verdict == Verdict::Incompatible)
+            ),
+            other => panic!("expected IncompatibleStore, got {other}"),
+        }
+
+        let memory = Uniko::builder()
+            .path(&path)
+            .prefetch(PrefetchPolicy::Lazy)
+            .build()
+            .await
+            .expect("the original config opens");
+        let info = memory.store_info().await.unwrap();
+        assert_eq!(info.embedding.dimensions, Some(384));
+        memory.shutdown().await.unwrap();
     }
 }

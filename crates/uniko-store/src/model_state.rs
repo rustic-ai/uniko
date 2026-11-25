@@ -1,114 +1,68 @@
 //! Per-alias model load state and the status report built on it.
 //!
-//! uni-xervo keeps its load state private (its handle cache and registry
-//! are not public), so the store records what it observes itself: the
-//! result of prefetching each alias, and the first successful call through
-//! [`KnowledgeBase::embed`], [`KnowledgeBase::generate`] and friends. A
-//! model loaded behind the store's back (uni-db auto-embedding on write,
-//! or NLP through [`KnowledgeBase::model_runtime`]) reads as
-//! [`ModelState::NotLoaded`] until one of those paths sees it.
+//! The state comes from the model runtime's own snapshot
+//! ([`ModelRuntime::aliases`](crate::ModelRuntime::aliases)), so every load
+//! counts, whichever path made it: prefetch, a call through the store,
+//! uni-db auto-embedding on write, or NLP and OCR through
+//! [`KnowledgeBase::model_runtime`].
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use serde::Serialize;
 use uni_db::{ModelAliasSpec, ModelTask};
+use uni_xervo::inspect::{AliasSnapshot, LoadState};
 
 use crate::storage::KnowledgeBase;
 
-/// Whether a model alias has loaded, as far as this store has seen.
+/// Whether a model alias has loaded, as the model runtime reports it.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", content = "error", rename_all = "snake_case")]
 pub enum ModelState {
-    /// Not prefetched and not yet used through the store.
+    /// No load has been attempted yet.
     NotLoaded,
-    /// Loaded by prefetch or by a successful call.
+    /// A load is in progress.
+    Loading,
+    /// Loaded and cached.
     Loaded,
-    /// Prefetch (or an explicit load check) failed with this error.
-    /// URLs in the message have their userinfo and query removed.
+    /// The last load failed (or timed out) with this error, and no later
+    /// load has succeeded. URLs in the message have their userinfo and
+    /// query removed.
     Failed(String),
 }
 
-/// Shared per-alias state table. Shared (not copied) between a store and
-/// the runtime it was opened over, so every store sees one load history.
-pub(crate) type ModelStates = Arc<RwLock<HashMap<String, ModelState>>>;
-
-/// A fresh state table holding every alias in `catalog` as not loaded.
-pub(crate) fn new_states(catalog: &[ModelAliasSpec]) -> ModelStates {
-    Arc::new(RwLock::new(
-        catalog
-            .iter()
-            .map(|s| (s.alias.clone(), ModelState::NotLoaded))
-            .collect(),
-    ))
-}
-
-/// Record `state` for `alias` when the alias is in the table.
-///
-/// Aliases outside the catalog are ignored: the table only describes the
-/// catalog. A poisoned lock is recovered, since the table holds no
-/// invariant a panicking writer could break.
-pub(crate) fn record(states: &ModelStates, alias: &str, state: ModelState) {
-    let mut table = states.write().unwrap_or_else(|p| p.into_inner());
-    if let Some(slot) = table.get_mut(alias) {
-        *slot = state;
+impl From<&LoadState> for ModelState {
+    fn from(state: &LoadState) -> Self {
+        match state {
+            LoadState::Loaded => Self::Loaded,
+            LoadState::Loading => Self::Loading,
+            LoadState::Failed { error, .. } => Self::Failed(redact_urls(error)),
+            // `Registered`, and any state a later uni-xervo adds.
+            _ => Self::NotLoaded,
+        }
     }
 }
 
-/// Record a failed load of `alias`, unless another path has loaded it in
-/// the meantime: a model that works must not read as failed.
-pub(crate) fn record_failure(states: &ModelStates, alias: &str, error: String) {
-    let mut table = states.write().unwrap_or_else(|p| p.into_inner());
-    if let Some(slot) = table.get_mut(alias)
-        && *slot != ModelState::Loaded
-    {
-        *slot = ModelState::Failed(error);
-    }
-}
-
-/// Mark `alias` loaded, taking the write lock only on the first success.
-pub(crate) fn mark_loaded(states: &ModelStates, alias: &str) {
-    let already = states
-        .read()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(alias)
-        .is_none_or(|s| *s == ModelState::Loaded);
-    if !already {
-        record(states, alias, ModelState::Loaded);
-    }
-}
-
-/// Load every alias in `catalog` through `prefetch`, one at a time,
-/// recording each result in `states`. A failure is logged and recorded,
-/// and the remaining aliases are still tried.
-pub(crate) async fn prefetch_each<F, Fut, E>(
-    catalog: &[ModelAliasSpec],
-    states: &ModelStates,
-    prefetch: F,
-) where
-    F: Fn(String) -> Fut,
-    Fut: std::future::Future<Output = Result<(), E>>,
-    E: std::fmt::Display,
-{
+/// Load every alias in `catalog` through `runtime`, one at a time. A
+/// failure is logged (the runtime records it) and the remaining aliases
+/// are still tried.
+pub(crate) async fn prefetch_each(
+    catalog: Arc<[ModelAliasSpec]>,
+    runtime: Arc<crate::ModelRuntime>,
+) {
     let started = std::time::Instant::now();
     let mut failed = 0usize;
-    for spec in catalog {
+    for spec in catalog.iter() {
         let alias_started = std::time::Instant::now();
-        match prefetch(spec.alias.clone()).await {
-            Ok(()) => record(states, &spec.alias, ModelState::Loaded),
-            Err(e) => {
-                failed += 1;
-                let error = redact_urls(&e.to_string());
-                tracing::warn!(
-                    alias = %spec.alias,
-                    provider = %spec.provider_id,
-                    error = %error,
-                    elapsed_ms = alias_started.elapsed().as_millis() as u64,
-                    "model prefetch failed; it may still load on first use"
-                );
-                record_failure(states, &spec.alias, error);
-            }
+        if let Err(e) = prefetch_one(&runtime, spec.alias.clone()).await {
+            failed += 1;
+            tracing::warn!(
+                alias = %spec.alias,
+                provider = %spec.provider_id,
+                error = %redact_urls(&e.to_string()),
+                elapsed_ms = alias_started.elapsed().as_millis() as u64,
+                "model prefetch failed; it may still load on first use"
+            );
         }
     }
     tracing::info!(
@@ -117,6 +71,16 @@ pub(crate) async fn prefetch_each<F, Fut, E>(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "model prefetch complete"
     );
+}
+
+/// Load one alias. Takes the alias by value so the future owns everything
+/// it borrows across the await, which keeps it `Send` for any lifetime.
+pub(crate) async fn prefetch_one(
+    runtime: &crate::ModelRuntime,
+    alias: String,
+) -> Result<(), uni_xervo::error::RuntimeError> {
+    let aliases = [alias.as_str()];
+    runtime.prefetch(&aliases).await
 }
 
 /// One catalog alias with its load state, safe to log or show.
@@ -137,121 +101,125 @@ pub struct ModelStatus {
     pub model_id: String,
     /// Pinned model revision, if the catalog names one.
     pub revision: Option<String>,
-    /// Whether the model has loaded, as far as the store has seen.
+    /// Whether the model has loaded, as the model runtime reports it.
     /// Serialized flat, as `"state"` plus `"error"` when it failed.
     #[serde(flatten)]
     pub state: ModelState,
     /// Name of the environment variable holding the API key, if any.
     pub api_key_env: Option<String>,
-    /// The provider endpoint, without userinfo or query.
+    /// Where a remote alias sends requests (its `base_url`, or the
+    /// provider's default endpoint), without userinfo or query.
     pub base_url: Option<String>,
     /// ONNX execution providers the catalog asked for, in priority order.
     pub requested_execution_providers: Option<Vec<String>>,
-    /// Execution providers the loaded session reports, when known.
+    /// Execution providers the loaded model's sessions attached, when known.
     ///
-    /// Only local ONNX embedding, hybrid-embedding and reranking models
-    /// report these, and only once loaded. uni-xervo reports the requested
-    /// providers minus any not compiled into this build, not the ones that
-    /// attached (rustic-ai/uni-xervo#64), so `["cuda", "cpu"]` here does not
-    /// prove the GPU is in use. `None` means unknown.
+    /// Every local ONNX model reports these once loaded: a provider that
+    /// was asked for but failed to register, or whose output disagreed with
+    /// CPU, is left out. Remote models report none. `None` means unknown.
     pub active_execution_providers: Option<Vec<String>>,
 }
 
 impl KnowledgeBase {
     /// Every catalog alias with its load state and redacted settings.
     ///
-    /// Does not load anything: a model that has not loaded reads as
-    /// [`ModelState::NotLoaded`]. For loaded local ONNX embedding and
-    /// reranking models, the active execution providers are read from the
-    /// already-cached handle.
+    /// Does not load anything: it reads the model runtime's snapshot, so a
+    /// model that has not loaded reads as [`ModelState::NotLoaded`]. For a
+    /// store opened with [`open_with_runtime`](Self::open_with_runtime),
+    /// which does not know its catalog, every alias of the runtime is
+    /// listed.
     ///
-    /// Returns `None` when the store does not know its catalog (one opened
-    /// with [`open_with_runtime`](Self::open_with_runtime)).
+    /// Returns `None` when the store has no model runtime.
     pub async fn model_status(&self) -> Option<Vec<ModelStatus>> {
-        let catalog = self.catalog.as_deref()?;
-        let states: HashMap<String, ModelState> = self
-            .model_states
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
-        let runtime = self.model_runtime();
-        let mut out = Vec::with_capacity(catalog.len());
-        for spec in catalog {
-            let state = states
-                .get(&spec.alias)
-                .cloned()
-                .unwrap_or(ModelState::NotLoaded);
-            let active = match (&state, &runtime) {
-                (ModelState::Loaded, Some(rt)) => active_eps(rt, spec).await,
-                _ => None,
-            };
-            out.push(ModelStatus {
-                alias: spec.alias.clone(),
-                task: spec.task,
-                provider_id: spec.provider_id.clone(),
-                model_id: spec.model_id.clone(),
-                revision: spec.revision.clone(),
-                state,
-                // Vertex AI names its credential variable `api_token_env`.
-                api_key_env: string_option(spec, "api_key_env")
-                    .or_else(|| string_option(spec, "api_token_env")),
-                base_url: string_option(spec, "base_url").map(|u| redact_url(&u)),
-                requested_execution_providers: spec
-                    .options
-                    .get("execution_providers")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_string))
-                            .collect()
-                    }),
-                active_execution_providers: active,
-            });
-        }
-        Some(out)
+        let runtime = self.model_runtime()?;
+        let snapshots = runtime.aliases().await;
+        let Some(catalog) = self.catalog.as_deref() else {
+            return Some(snapshots.iter().map(|snap| status(snap, None)).collect());
+        };
+        Some(
+            catalog
+                .iter()
+                .map(
+                    |spec| match snapshots.iter().find(|s| s.alias == spec.alias) {
+                        Some(snap) => status(snap, Some(spec)),
+                        None => not_in_runtime(spec),
+                    },
+                )
+                .collect(),
+        )
     }
 
-    /// Record that `alias` loaded, for code that loads a model through
-    /// [`model_runtime`](Self::model_runtime) rather than through
-    /// [`embed`](Self::embed), [`generate`](Self::generate) and friends
-    /// (which record it themselves). Clears an earlier `Failed`.
-    pub fn note_model_loaded(&self, alias: &str) {
-        mark_loaded(&self.model_states, alias);
-    }
+    /// Kept for callers written against uniko 0.5: the model runtime now
+    /// records every load itself, so this does nothing.
+    #[deprecated(note = "the model runtime records loads itself; this is a no-op")]
+    pub fn note_model_loaded(&self, _alias: &str) {}
 
-    pub(crate) fn mark_model_loaded(&self, alias: &str) {
-        mark_loaded(&self.model_states, alias);
-    }
-
-    pub(crate) fn mark_model_failed(&self, alias: &str, error: &str) {
-        record_failure(&self.model_states, alias, redact_urls(error));
+    /// The runtime's current state of `alias`, or `None` when the store has
+    /// no runtime or the alias is not in it.
+    pub(crate) async fn alias_state(&self, alias: &str) -> Option<ModelState> {
+        let snapshot = self.model_runtime()?.alias(alias).await?;
+        Some(ModelState::from(&snapshot.state))
     }
 }
 
-/// Active EPs off the cached handle of a loaded embed, hybrid-embed or
-/// rerank alias.
-async fn active_eps(rt: &crate::ModelRuntime, spec: &ModelAliasSpec) -> Option<Vec<String>> {
-    let eps = match spec.task {
-        ModelTask::Embed => rt
-            .embedding(&spec.alias)
-            .await
-            .ok()?
-            .active_execution_providers(),
-        ModelTask::Rerank => rt
-            .reranker(&spec.alias)
-            .await
-            .ok()?
-            .active_execution_providers(),
-        ModelTask::EmbedHybrid => rt
-            .hybrid_embedder(&spec.alias)
-            .await
-            .ok()?
-            .active_execution_providers(),
-        // uni-xervo's NLP and OCR models do not report their providers yet
-        // (rustic-ai/uni-xervo#65).
-        _ => return None,
+/// A status row from the runtime's snapshot, with the catalog spec (when
+/// the store knows it) filling in what the snapshot leaves out.
+fn status(snap: &AliasSnapshot, spec: Option<&ModelAliasSpec>) -> ModelStatus {
+    let state = ModelState::from(&snap.state);
+    let active = match state {
+        ModelState::Loaded => snap.execution_providers.clone(),
+        _ => None,
     };
-    (!eps.is_empty()).then_some(eps)
+    ModelStatus {
+        alias: snap.alias.clone(),
+        task: snap.task,
+        provider_id: snap.provider_id.clone(),
+        model_id: snap.model_id.clone(),
+        revision: snap.revision.clone(),
+        state,
+        api_key_env: snap
+            .credential_env
+            .clone()
+            .or_else(|| spec.and_then(credential_env)),
+        base_url: snap.endpoint.as_deref().map(redact_url).or_else(|| {
+            spec.and_then(|s| string_option(s, "base_url"))
+                .map(|u| redact_url(&u))
+        }),
+        requested_execution_providers: spec.and_then(requested_eps),
+        active_execution_providers: active.filter(|eps| !eps.is_empty()),
+    }
+}
+
+/// A catalog alias the runtime does not hold (it should always hold one).
+fn not_in_runtime(spec: &ModelAliasSpec) -> ModelStatus {
+    ModelStatus {
+        alias: spec.alias.clone(),
+        task: spec.task,
+        provider_id: spec.provider_id.clone(),
+        model_id: spec.model_id.clone(),
+        revision: spec.revision.clone(),
+        state: ModelState::NotLoaded,
+        api_key_env: credential_env(spec),
+        base_url: string_option(spec, "base_url").map(|u| redact_url(&u)),
+        requested_execution_providers: requested_eps(spec),
+        active_execution_providers: None,
+    }
+}
+
+/// Vertex AI names its credential variable `api_token_env`.
+fn credential_env(spec: &ModelAliasSpec) -> Option<String> {
+    string_option(spec, "api_key_env").or_else(|| string_option(spec, "api_token_env"))
+}
+
+fn requested_eps(spec: &ModelAliasSpec) -> Option<Vec<String>> {
+    spec.options
+        .get("execution_providers")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
 }
 
 fn string_option(spec: &ModelAliasSpec, key: &str) -> Option<String> {
@@ -308,6 +276,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn runtime_load_states_map_to_model_states() {
+        assert_eq!(
+            ModelState::from(&LoadState::Registered),
+            ModelState::NotLoaded
+        );
+        assert_eq!(ModelState::from(&LoadState::Loading), ModelState::Loading);
+        assert_eq!(ModelState::from(&LoadState::Loaded), ModelState::Loaded);
+        let failed = ModelState::from(&LoadState::Failed {
+            error: "request to https://u:secret@h.io/v1?key=k failed".into(),
+            at: std::time::SystemTime::now(),
+        });
+        let ModelState::Failed(error) = failed else {
+            panic!("{failed:?}");
+        };
+        assert!(
+            !error.contains("secret") && !error.contains("key=k"),
+            "{error}"
+        );
+        assert!(error.contains("https://h.io/v1"), "{error}");
+        // Serialized flat, as the capability report shows it.
+        let json = serde_json::to_value(ModelState::Loading).unwrap();
+        assert_eq!(json["state"], "loading");
+    }
+
+    #[test]
     fn redact_url_strips_userinfo_query_and_fragment() {
         assert_eq!(
             redact_url("https://user:pw@api.example.com/v1?key=abc#x"),
@@ -342,41 +335,5 @@ mod tests {
             );
             assert!(out.contains("h.io"), "{tricky} -> {out}");
         }
-    }
-
-    #[test]
-    fn a_late_failure_does_not_override_a_successful_load() {
-        let states: ModelStates = Arc::new(RwLock::new(HashMap::from([(
-            "embed/a".to_string(),
-            ModelState::NotLoaded,
-        )])));
-        mark_loaded(&states, "embed/a");
-        record_failure(&states, "embed/a", "timed out".into());
-        assert_eq!(states.read().unwrap()["embed/a"], ModelState::Loaded);
-
-        let fresh: ModelStates = Arc::new(RwLock::new(HashMap::from([(
-            "embed/b".to_string(),
-            ModelState::NotLoaded,
-        )])));
-        record_failure(&fresh, "embed/b", "boom".into());
-        mark_loaded(&fresh, "embed/b");
-        assert_eq!(
-            fresh.read().unwrap()["embed/b"],
-            ModelState::Loaded,
-            "success clears a failure"
-        );
-    }
-
-    #[test]
-    fn mark_loaded_ignores_aliases_outside_the_catalog() {
-        let states: ModelStates = Arc::new(RwLock::new(HashMap::from([(
-            "embed/a".to_string(),
-            ModelState::NotLoaded,
-        )])));
-        mark_loaded(&states, "embed/a");
-        mark_loaded(&states, "embed/other");
-        let table = states.read().unwrap();
-        assert_eq!(table.get("embed/a"), Some(&ModelState::Loaded));
-        assert!(!table.contains_key("embed/other"));
     }
 }

@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 use uniko_api::tools::{
-    ExtractRequest, LlmSpec, Modality, PrefetchPolicy, RecallScope, Requirement, SharedRuntime,
-    TextExtractor, Uniko, UnikoBuilder, UnikoError,
+    ExtractOutput, ExtractRequest, Extraction, LlmSpec, Modality, ModelExtractor, PrefetchPolicy,
+    RecallScope, Requirement, SharedRuntime, TextExtractor, Uniko, UnikoBuilder, UnikoError,
+    VideoParts,
 };
 
 use crate::agent::PyAgent;
@@ -98,6 +99,100 @@ pymethods_with_sync! {
             })
         }
 
+        /// What the store at ``path`` was built with, and whether a config
+        /// can open it as is. ``config`` is a partial config dict over the
+        /// defaults and ``embedding`` a preset name or embedding section, as
+        /// on the builder. Reads only: nothing is written and no model loads.
+        #[staticmethod]
+        #[pyo3(signature = (path, config=None, *, embedding=None))]
+        fn inspect_store<'py>(
+            py: Python<'py>,
+            path: String,
+            config: Option<Bound<'py, PyAny>>,
+            embedding: Option<Bound<'py, PyAny>>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let target = crate::store::target_config(config.as_ref(), embedding.as_ref())?;
+            bridge!(py, _g = (), {
+                let report = Uniko::inspect_store(&path, &target).await.map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyStoreReport::from_rust(py, &report))
+            })
+        }
+
+        /// Blocking variant of ``inspect_store``.
+        #[staticmethod]
+        #[pyo3(signature = (path, config=None, *, embedding=None))]
+        fn inspect_store_sync<'py>(
+            py: Python<'py>,
+            path: String,
+            config: Option<Bound<'py, PyAny>>,
+            embedding: Option<Bound<'py, PyAny>>,
+        ) -> PyResult<Py<crate::store::PyStoreReport>> {
+            let target = crate::store::target_config(config.as_ref(), embedding.as_ref())?;
+            bridge_sync!(py, _g = (), {
+                let report = Uniko::inspect_store(&path, &target).await.map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyStoreReport::from_rust(py, &report))
+            })
+        }
+
+        /// Bring the store at ``path`` in line with a config in place:
+        /// ``"enable_hybrid"`` (add and fill the sparse and ColBERT columns,
+        /// same model) or ``"rebuild_vector_indexes"`` (new metric,
+        /// algorithm, query prefix or batch size; a document prefix change
+        /// needs a fresh store). Raises ``IncompatibleStoreError`` when the
+        /// migration can't resolve the differences; a rerun resumes.
+        ///
+        /// ``progress`` is called with a dict (``migration``, ``phase``,
+        /// ``label``, ``done``, ``total``) after each phase and batch. It
+        /// can't cancel the migration: an exception it raises
+        /// (``KeyboardInterrupt`` and ``SystemExit`` included) or a panic it
+        /// sets off is printed to stderr and ignored. An ``async def``
+        /// callback is not awaited. The callback must not call other
+        /// ``_sync`` uniko methods.
+        #[staticmethod]
+        #[pyo3(signature = (path, migration, config=None, *, embedding=None, progress=None))]
+        fn migrate_store<'py>(
+            py: Python<'py>,
+            path: String,
+            migration: String,
+            config: Option<Bound<'py, PyAny>>,
+            embedding: Option<Bound<'py, PyAny>>,
+            progress: Option<Py<PyAny>>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let target = crate::store::target_config(config.as_ref(), embedding.as_ref())?;
+            let migration = crate::store::migration_from_str(&migration)?;
+            bridge!(py, _g = (), {
+                let report = Uniko::migrate_store(&path, target, migration, crate::store::progress_fn(progress))
+                    .await
+                    .map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyMigrationReport::from_rust(py, &report))
+            })
+        }
+
+        /// Blocking variant of ``migrate_store``, with the same ``progress``
+        /// rules: exceptions and panics in the callback are printed to
+        /// stderr and ignored, the callback can't cancel the migration, an
+        /// ``async def`` callback is not awaited, and the callback must not
+        /// call other ``_sync`` uniko methods.
+        #[staticmethod]
+        #[pyo3(signature = (path, migration, config=None, *, embedding=None, progress=None))]
+        fn migrate_store_sync<'py>(
+            py: Python<'py>,
+            path: String,
+            migration: String,
+            config: Option<Bound<'py, PyAny>>,
+            embedding: Option<Bound<'py, PyAny>>,
+            progress: Option<Py<PyAny>>,
+        ) -> PyResult<Py<crate::store::PyMigrationReport>> {
+            let target = crate::store::target_config(config.as_ref(), embedding.as_ref())?;
+            let migration = crate::store::migration_from_str(&migration)?;
+            bridge_sync!(py, _g = (), {
+                let report = Uniko::migrate_store(&path, target, migration, crate::store::progress_fn(progress))
+                    .await
+                    .map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyMigrationReport::from_rust(py, &report))
+            })
+        }
+
         /// Start a builder for non-default construction.
         #[staticmethod]
         fn builder() -> PyUnikoBuilder {
@@ -120,6 +215,15 @@ pymethods_with_sync! {
             let guard = self.inner.lock().expect("Uniko mutex poisoned");
             let uniko = guard.as_ref().ok_or_else(closed)?;
             config_to_py(py, uniko.config())
+        }
+
+        /// The streaming pipeline's dead letters: list, count, retry and
+        /// resolve ingest items that failed.
+        #[getter]
+        fn dead_letters(&self) -> PyResult<crate::dead_letters::PyDeadLetters> {
+            let guard = self.inner.lock().expect("Uniko mutex poisoned");
+            let uniko = guard.as_ref().ok_or_else(closed)?;
+            Ok(crate::dead_letters::PyDeadLetters::wrap(uniko.dead_letters()))
         }
 
         /// A health snapshot of the streaming pipeline, or `None` when the
@@ -175,6 +279,19 @@ pymethods_with_sync! {
                     .remove_team_member(&participant_id, &team_id)
                     .await
                     .map_err(to_pyerr)
+
+            }
+        }
+
+        /// What this instance's store was built with.
+        fn store_info / store_info_sync(&self, py) -> Py<crate::store::PyStoreInfo> {
+            prepare {
+                let uniko = self.cloned()?;
+
+            }
+            run(instance = uniko) {
+                let info = instance.store_info().await.map_err(to_pyerr)?;
+                Python::attach(|py| crate::store::PyStoreInfo::from_rust(py, &info))
 
             }
         }
@@ -424,33 +541,111 @@ pymethods_with_sync! {
         ///
         /// `modality` is `"image"`, `"audio"` or `"video"`. `extract` is called
         /// with an `ExtractRequest` (the payload `data`, its `mime`, `path` and
-        /// `metadata`) and returns the text to index — a caption, a transcript,
-        /// OCR output. It runs on a worker thread, holding the GIL only while
-        /// it runs; an exception fails that ingest. Registering a modality
-        /// again replaces the earlier extractor.
+        /// `metadata`) and returns the text to index (a caption, a transcript,
+        /// OCR output) as a `str`, or an `Extraction` of `Segment`s (or a list of
+        /// them, one per model) whose page, time range, region, confidence and
+        /// model go into each chunk. It runs
+        /// on a worker thread, holding the GIL only while it runs; an exception
+        /// fails that ingest. Registering a modality again replaces the earlier
+        /// extractor.
+        ///
+        /// `retention` is `"none"` (the default: keep the text only),
+        /// `"identity"` (record the original's hash, type and size as a source
+        /// the text links to) or `"bytes"` (also store the original bytes).
+        #[pyo3(signature = (modality, extract, *, retention = "none"))]
         fn extractor<'py>(
             slf: PyRef<'py, Self>,
             modality: &str,
             extract: Py<PyAny>,
+            retention: &str,
         ) -> PyResult<PyRef<'py, Self>> {
-            let modality = match modality {
-                "image" => Modality::Image,
-                "audio" => Modality::Audio,
-                "video" => Modality::Video,
-                other => {
-                    return Err(to_pyerr(UnikoError::Config(format!(
-                        "extractor modality '{other}': expected image, audio or video"
-                    ))));
-                }
-            };
+            let modality = parse_modality(modality, "extractor")?;
+            let retention = crate::media::parse_retention(retention)?;
             if !extract.bind(slf.py()).is_callable() {
                 return Err(to_pyerr(UnikoError::Config(
                     "extractor: `extract` must be callable".to_string(),
                 )));
             }
             let extractor =
-                TextExtractor::new(modality, move |request| call_extract(&extract, request));
+                TextExtractor::with_output(modality, move |request| call_extract(&extract, request))
+                    .with_retention(retention);
             slf.map(|b| b.extractor(std::sync::Arc::new(extractor)))?;
+            Ok(slf)
+        }
+
+        /// Index image, audio or video sources with models from the catalog.
+        ///
+        /// Each mode names a catalog alias:
+        ///
+        /// - `ocr`: an OCR alias (`local/onnx`); recognized lines become
+        ///   `ocr_region` chunks, each line's box in its `position.segments` (or `position.bbox`);
+        /// - `caption`: a generation alias on `remote/openai`,
+        ///   `remote/azure-openai` or `remote/llamacpp`, sent the image with
+        ///   `caption_prompt` and up to `max_caption_tokens` (512); other
+        ///   providers drop images and are refused;
+        /// - `document`: a document-extraction alias; blocks become `page_block`
+        ///   chunks in reading order;
+        /// - `transcribe`: a transcription alias, in `language` if set. Audio must
+        ///   be 16 kHz 16-bit PCM WAV. No provider is usable yet: uni-db's model
+        ///   runtime does not register `local/whisper-cpp`, and `build()` says
+        ///   so.
+        ///
+        /// Images take `ocr`, `caption` and `document`; audio takes
+        /// `transcribe`. A video needs `composer`, a callable that takes an
+        /// `ExtractRequest` and returns `VideoParts` (frames and a WAV audio
+        /// track, usually from ffmpeg); the image modes then run on every frame
+        /// and `transcribe` on the track. `retention` is as for `extractor`.
+        /// `build()` refuses a mode the modality cannot use or an alias that is
+        /// missing or serves another task.
+        #[pyo3(signature = (modality, *, ocr = None, caption = None, caption_prompt = None, max_caption_tokens = None, document = None, transcribe = None, language = None, composer = None, retention = "none"))]
+        #[allow(clippy::too_many_arguments)]
+        fn model_extractor<'py>(
+            slf: PyRef<'py, Self>,
+            modality: &str,
+            ocr: Option<String>,
+            caption: Option<String>,
+            caption_prompt: Option<String>,
+            max_caption_tokens: Option<usize>,
+            document: Option<String>,
+            transcribe: Option<String>,
+            language: Option<String>,
+            composer: Option<Py<PyAny>>,
+            retention: &str,
+        ) -> PyResult<PyRef<'py, Self>> {
+            let modality = parse_modality(modality, "model_extractor")?;
+            let retention = crate::media::parse_retention(retention)?;
+            let mut spec = ModelExtractor::new(modality);
+            if let Some(composer) = composer {
+                if !composer.bind(slf.py()).is_callable() {
+                    return Err(to_pyerr(UnikoError::Config(
+                        "model_extractor: `composer` must be callable".to_string(),
+                    )));
+                }
+                spec = spec.composer(move |request| call_composer(&composer, request.clone()));
+            }
+            if let Some(alias) = ocr {
+                spec = spec.ocr(alias);
+            }
+            if let Some(alias) = caption {
+                spec = spec.caption(alias);
+                if let Some(prompt) = caption_prompt {
+                    spec = spec.caption_prompt(prompt);
+                }
+                if let Some(tokens) = max_caption_tokens {
+                    spec = spec.max_caption_tokens(tokens);
+                }
+            }
+            if let Some(alias) = document {
+                spec = spec.document(alias);
+            }
+            if let Some(alias) = transcribe {
+                spec = spec.transcribe(alias);
+                if let Some(language) = language {
+                    spec = spec.language(language);
+                }
+            }
+            let spec = spec.retention(retention);
+            slf.map(|b| b.model_extractor(spec))?;
             Ok(slf)
         }
 
@@ -522,6 +717,16 @@ pymethods_with_sync! {
             let timeout = seconds_to_timeout("readiness_timeout", seconds)?
                 .unwrap_or(std::time::Duration::MAX);
             slf.map(|b| b.readiness_timeout(timeout))?;
+            Ok(slf)
+        }
+
+        /// Also verify, when readiness runs, that each required remote
+        /// model can reach its endpoint with a valid credential: one cheap
+        /// request per alias, here and on every later `check_readiness`.
+        /// A failure is `verification_failed`, its reason in `error`. Off
+        /// by default.
+        fn verify_remote<'py>(slf: PyRef<'py, Self>, on: bool) -> PyResult<PyRef<'py, Self>> {
+            slf.map(|b| b.verify_remote(on))?;
             Ok(slf)
         }
 
@@ -854,17 +1059,66 @@ impl PyLlmSpec {
     }
 }
 
-/// Call a Python extractor with `request`, returning its text.
-fn call_extract(extract: &Py<PyAny>, request: ExtractRequest) -> Result<String, UnikoError> {
+/// Parse an extractor modality name.
+fn parse_modality(modality: &str, method: &str) -> PyResult<Modality> {
+    match modality {
+        "image" => Ok(Modality::Image),
+        "audio" => Ok(Modality::Audio),
+        "video" => Ok(Modality::Video),
+        other => Err(to_pyerr(UnikoError::Config(format!(
+            "{method} modality '{other}': expected image, audio or video"
+        )))),
+    }
+}
+
+/// Call a Python extractor with `request`, returning its text or segments.
+fn call_extract(extract: &Py<PyAny>, request: ExtractRequest) -> Result<ExtractOutput, UnikoError> {
     Python::attach(|py| {
         let request = Py::new(
             py,
             PyExtractRequest::from_rust(py, request).map_err(py_err)?,
         )
         .map_err(py_err)?;
-        let text = extract.call1(py, (request,)).map_err(py_err)?;
-        text.extract::<String>(py)
-            .map_err(|_| UnikoError::Config("extractor must return a str".to_string()))
+        let out = extract.call1(py, (request,)).map_err(py_err)?;
+        let out = out.bind(py);
+        if let Ok(ex) = out.cast::<crate::media::PyExtraction>() {
+            return Ok(ExtractOutput::Structured(ex.get().to_rust(py)));
+        }
+        // Several models' output: one Extraction each, kept apart.
+        if let Ok(list) = out.cast::<pyo3::types::PyList>() {
+            let mut merged = Extraction::default();
+            for item in list.iter() {
+                let ex = item.cast::<crate::media::PyExtraction>().map_err(|_| {
+                    UnikoError::Config("extractor: a list result must hold only Extractions".into())
+                })?;
+                merged.derivations.extend(ex.get().to_rust(py).derivations);
+            }
+            return Ok(ExtractOutput::Structured(merged));
+        }
+        out.extract::<String>()
+            .map(ExtractOutput::Text)
+            .map_err(|_| {
+                UnikoError::Config(
+                    "extractor must return a str, an Extraction or a list of Extractions"
+                        .to_string(),
+                )
+            })
+    })
+}
+
+/// Call a Python video composer with `request`.
+fn call_composer(composer: &Py<PyAny>, request: ExtractRequest) -> Result<VideoParts, UnikoError> {
+    Python::attach(|py| {
+        let request = Py::new(
+            py,
+            PyExtractRequest::from_rust(py, request).map_err(py_err)?,
+        )
+        .map_err(py_err)?;
+        let out = composer.call1(py, (request,)).map_err(py_err)?;
+        let out = out.bind(py);
+        out.cast::<crate::media::PyVideoParts>()
+            .map(|p| p.get().to_rust(py))
+            .map_err(|_| UnikoError::Config("composer must return VideoParts".to_string()))
     })
 }
 

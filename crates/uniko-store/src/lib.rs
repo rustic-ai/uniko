@@ -45,8 +45,12 @@ pub use model_state::{ModelState, ModelStatus};
 pub use readiness::{ReadinessCode, ReadinessFailure};
 pub use shared_runtime::{PrefetchPolicy, SharedRuntime};
 pub use storage::KnowledgeBase;
+pub use storage::compatibility::{
+    Compatibility, Migration, StoreDifference, StoreInfo, StoredEmbedding, Verdict,
+};
 #[doc(inline)]
 pub use storage::deletion::DeletionReport;
+pub use storage::migrate_store::{MigrationProgress, MigrationReport};
 // Diagnostic batch-recording surface, only present with the
 // `batch-record` feature (used by the bulk-vs-UNWIND benchmark).
 #[cfg(feature = "batch-record")]
@@ -56,9 +60,8 @@ pub use types::*;
 
 // Re-export `ModelRuntime` so callers can name the type without
 // taking a direct dependency on `uni_xervo`. Needed for multi-KB
-// workflows that share one ONNX session — see
-// [`KnowledgeBase::build_shared_runtime`] and
-// [`KnowledgeBase::open_with_runtime`]. uni-db wraps `ModelRuntime`
+// workflows that share one ONNX session — see `SharedRuntime::build`
+// and [`KnowledgeBase::open_shared`]. uni-db wraps `ModelRuntime`
 // internally but does not re-export it.
 pub use uni_xervo::runtime::ModelRuntime;
 

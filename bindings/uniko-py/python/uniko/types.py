@@ -12,7 +12,7 @@ type checker catch a misspelt phase or kind before it fails at runtime::
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, TypedDict
 
 #: A goal's lifecycle phase (``GoalView.phase``, ``Goals.in_phase``).
 GoalPhase = Literal["planned", "active", "completed", "abandoned"]
@@ -37,12 +37,41 @@ WorkerStatus = Literal["healthy", "degraded", "backpressured", "stalled"]
 #: The LLM circuit breaker's state (``PipelineHealth.llm_circuit``).
 CircuitState = Literal["closed", "open", "half_open"]
 
+#: What ``Agent.register`` did (``Registration.outcome``).
+RegistrationOutcome = Literal["created", "upgraded", "existing"]
+
+#: An in-place store migration (``Uniko.migrate_store``).
+MigrationName = Literal["enable_hybrid", "rebuild_vector_indexes"]
+
+#: How a store differs from a config (``StoreDifference.verdict``):
+#: ``"unknown"`` is a verdict this build doesn't know.
+VerdictName = Literal["incompatible", "needs_migration", "unknown"]
+
+
+class MigrationProgressEvent(TypedDict):
+    """What a ``Uniko.migrate_store`` ``progress`` callback is called with."""
+
+    migration: MigrationName
+    phase: Literal["schema", "rebuild", "backfill", "done"]
+    label: str | None
+    done: int
+    total: int
+
+
+#: Where a dead letter is in its lifecycle (``DeadLetter.status``).
+DeadLetterStatus = Literal["pending", "retrying", "exhausted", "resolved", "legacy"]
+
 __all__ = [
     "CircuitState",
+    "DeadLetterStatus",
+    "RegistrationOutcome",
     "GoalPhase",
+    "MigrationName",
+    "MigrationProgressEvent",
     "IngestKind",
     "RecallKind",
     "RecallSourceKind",
     "TaskPhase",
+    "VerdictName",
     "WorkerStatus",
 ]

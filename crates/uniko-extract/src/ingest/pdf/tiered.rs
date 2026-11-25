@@ -62,7 +62,6 @@ pub(super) async fn extract_tiered(
         .pdf_extractor(config)
         .await
         .map_err(|e| PdfExtractError::Tiered(e.to_string()))?;
-    kb.note_model_loaded(OCR_ALIAS);
 
     extractor
         .extract(

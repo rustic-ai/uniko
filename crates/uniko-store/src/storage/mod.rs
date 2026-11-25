@@ -7,12 +7,15 @@
 pub mod batch;
 pub mod batch_record;
 pub mod blob;
+pub mod compatibility;
 pub mod deletion;
 pub mod edges;
 pub mod filter;
 pub mod kb_stats;
+pub mod migrate_store;
 pub mod migrations;
 pub mod nodes;
+pub(crate) mod remote;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -22,13 +25,16 @@ use uni_db::{ModelAliasSpec, ModelTask, Uni, UniConfig, WarmupPolicy};
 /// Diagnostic perf-knob override read from env vars. Set
 /// `UNIKO_WAL_DISABLED=1` to disable WAL, or
 /// `UNIKO_AUTOFLUSH_THRESHOLD=N` to override the L0 auto-flush
-/// threshold. Returns Some(cfg) only if at least one knob is set, so
-/// the default UniConfig isn't perturbed in normal use.
+/// threshold, or `UNIKO_QUERY_TIMEOUT_SECS=N` to raise uni-db's
+/// per-query timeout (30 s), which a store in a distant bucket can
+/// exceed. Returns Some(cfg) only if at least one knob is set, so the
+/// default UniConfig isn't perturbed in normal use.
 fn apply_perf_knobs_from_env() -> Option<UniConfig> {
     let wal = std::env::var("UNIKO_WAL_DISABLED").ok();
     let flush = std::env::var("UNIKO_AUTOFLUSH_THRESHOLD").ok();
     let flush_interval_off = std::env::var("UNIKO_AUTOFLUSH_INTERVAL_OFF").ok();
-    if wal.is_none() && flush.is_none() && flush_interval_off.is_none() {
+    let query_timeout = std::env::var("UNIKO_QUERY_TIMEOUT_SECS").ok();
+    if wal.is_none() && flush.is_none() && flush_interval_off.is_none() && query_timeout.is_none() {
         return None;
     }
     let mut cfg = UniConfig::default();
@@ -45,6 +51,13 @@ fn apply_perf_knobs_from_env() -> Option<UniConfig> {
     if matches!(flush_interval_off.as_deref(), Some("1") | Some("true")) {
         cfg.auto_flush_interval = None;
         tracing::warn!("UNIKO_AUTOFLUSH_INTERVAL_OFF=1 — disabling time-based flush");
+    }
+    if let Some(s) = query_timeout
+        && let Ok(n) = s.parse::<u64>()
+        && n > 0
+    {
+        cfg.query_timeout = std::time::Duration::from_secs(n);
+        tracing::warn!(secs = n, "UNIKO_QUERY_TIMEOUT_SECS set");
     }
     Some(cfg)
 }
@@ -114,11 +127,204 @@ pub struct KnowledgeBase {
     /// elsewhere ([`KnowledgeBase::open_with_runtime`]), whose catalog
     /// this store never saw.
     pub(crate) catalog: Option<Arc<[ModelAliasSpec]>>,
-    /// Per-alias load state for [`KnowledgeBase::model_status`]. Empty
-    /// when the catalog is unknown.
-    pub(crate) model_states: crate::model_state::ModelStates,
     /// The store's own background prefetch, cancelled at shutdown.
     pub(crate) prefetch_task: Option<tokio::task::AbortHandle>,
+    /// Marks the path open in this process while any clone of this store
+    /// lives, so [`inspect`](Self::inspect) and [`migrate`](Self::migrate)
+    /// refuse it. `None` for an in-memory store.
+    pub(crate) open_path: Option<Arc<OpenPath>>,
+}
+
+/// Stores in use in this process, by canonical path. uni-db holds one
+/// writer per store across processes (an OS lock on a local store's
+/// `writer.lock`, a lease in an object store), but a second open in the same
+/// process would only wait out its grace period before failing. This
+/// registry refuses it at once, with an error that says which handle holds
+/// the store, and keeps [`inspect`](KnowledgeBase::inspect) and
+/// [`migrate`](KnowledgeBase::migrate) off a store this process has open.
+static OPEN_PATHS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Claim>>,
+> = std::sync::LazyLock::new(Default::default);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    /// An open store.
+    Open,
+    /// Being inspected or migrated.
+    Exclusive,
+}
+
+/// A claim on a store path in this process, released when dropped.
+#[derive(Debug)]
+pub(crate) struct OpenPath {
+    key: std::path::PathBuf,
+    exclusive: bool,
+}
+
+impl OpenPath {
+    /// Claim `path` for an open store: refused while the store is open, or
+    /// being inspected or migrated, in this process.
+    fn claim(path: &Path) -> Result<Self> {
+        let key = canonical(path);
+        let mut open = OPEN_PATHS.lock().expect("open-path registry poisoned");
+        match open.get(&key) {
+            Some(Claim::Exclusive) => return Err(busy(path)),
+            Some(Claim::Open) => return Err(already_open(path)),
+            None => {}
+        }
+        open.insert(key.clone(), Claim::Open);
+        Ok(Self {
+            key,
+            exclusive: false,
+        })
+    }
+
+    /// Claim `path` exclusively, to inspect or migrate it: refused while
+    /// the store is open, inspected or migrated in this process.
+    pub(crate) fn claim_exclusive(path: &Path) -> Result<Self> {
+        let key = canonical(path);
+        let mut open = OPEN_PATHS.lock().expect("open-path registry poisoned");
+        match open.get(&key) {
+            Some(Claim::Open) => {
+                return Err(UnikoError::Config(format!(
+                    "the store at {} is open in this process; shut it down first",
+                    path.display()
+                )));
+            }
+            Some(Claim::Exclusive) => return Err(busy(path)),
+            None => {}
+        }
+        open.insert(key.clone(), Claim::Exclusive);
+        Ok(Self {
+            key,
+            exclusive: true,
+        })
+    }
+}
+
+/// An in-memory store has nowhere to put `remote_storage`: refuse it rather
+/// than keep the data in memory while the config says S3.
+fn refuse_remote_in_memory(config: &UnikoConfig) -> Result<()> {
+    if config.remote_storage.is_some() {
+        return Err(UnikoError::Config(
+            "remote_storage needs a store path: a local directory (hybrid) or the store's own \
+             URL (remote-only); an in-memory store can't use it"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A uni-db builder for the store at `path`. `existing` refuses to create
+/// one.
+///
+/// - A local path alone is a local store.
+/// - A local path with `config.remote_storage` is a hybrid store: data in
+///   the bucket, the write-ahead log and id allocator in the directory.
+/// - An `s3://`, `gs://` or `az://` path is a remote-only store, kept wholly in the
+///   bucket. `remote_storage`, when set, must name the same URL, and gives
+///   its endpoint and credentials; unset, they come from the environment.
+pub(crate) fn uni_builder(
+    path: &Path,
+    config: &UnikoConfig,
+    existing: bool,
+) -> Result<uni_db::UniBuilder> {
+    let at = path.to_string_lossy();
+    let builder = if existing {
+        Uni::open_existing(at.clone())
+    } else {
+        Uni::open(at.clone())
+    };
+    let Some(remote) = &config.remote_storage else {
+        return Ok(builder);
+    };
+    let resolved = remote::ResolvedRemote::resolve(remote)?;
+    let builder = if remote::is_object_store_uri(&at) {
+        if !remote::same_store(&at, &resolved.url) {
+            return Err(UnikoError::Config(format!(
+                "the store path {at} and remote_storage.url {} name different stores; a \
+                 remote-only store's path is its URL, and a hybrid store's is a local directory",
+                resolved.url
+            )));
+        }
+        builder
+    } else if at.contains("://") && file_url_path(&at).is_none() {
+        return Err(UnikoError::Config(format!(
+            "with remote_storage set, the store path ({at}) is a local directory (hybrid) or \
+             the store's s3://, gs:// or az:// URL (remote-only)"
+        )));
+    } else {
+        builder.hybrid(&resolved.url)
+    };
+    let mut builder = match resolved.cloud {
+        Some(cloud) => builder.cloud_storage(cloud),
+        None => builder,
+    };
+    if remote.set_aside_stale_wal {
+        builder = builder.set_aside_stale_wal();
+    }
+    Ok(builder)
+}
+
+/// The local directory a `file://` URI names, or `None` for any other URI.
+fn file_url_path(uri: &str) -> Option<std::path::PathBuf> {
+    url::Url::parse(uri)
+        .ok()
+        .filter(|u| u.scheme() == "file")
+        .and_then(|u| u.to_file_path().ok())
+}
+
+fn already_open(path: &Path) -> UnikoError {
+    UnikoError::Config(format!(
+        "the store at {} is already open in this process; use that instance (its clones \
+         share it) or shut it down before opening it again",
+        path.display()
+    ))
+}
+
+fn busy(path: &Path) -> UnikoError {
+    UnikoError::Config(format!(
+        "the store at {} is being inspected or migrated in this process",
+        path.display()
+    ))
+}
+
+impl Drop for OpenPath {
+    fn drop(&mut self) {
+        let mut open = OPEN_PATHS.lock().expect("open-path registry poisoned");
+        match open.get(&self.key) {
+            Some(Claim::Open) if !self.exclusive => {
+                open.remove(&self.key);
+            }
+            Some(Claim::Exclusive) if self.exclusive => {
+                open.remove(&self.key);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The key a path is claimed under. A store that doesn't exist yet is keyed
+/// by its canonical parent, so the key doesn't change once uni-db creates
+/// the directory (on macOS a temp dir under `/var` canonicalizes to
+/// `/private/var`).
+fn canonical(path: &Path) -> std::path::PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => {
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            std::fs::canonicalize(parent)
+                .map(|p| p.join(name))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 impl KnowledgeBase {
@@ -165,9 +371,9 @@ impl KnowledgeBase {
         prefetch: PrefetchPolicy,
     ) -> Result<Self> {
         config.validate()?;
+        refuse_remote_in_memory(&config)?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
-        let model_states = crate::model_state::new_states(&kept);
         let db = Uni::in_memory().xervo_catalog(catalog).build().await?;
         apply_schema(&db, &config).await?;
         let mut kb = Self {
@@ -177,8 +383,8 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
-            model_states,
             prefetch_task: None,
+            open_path: None,
         };
         kb.prefetch_task = kb.prefetch_catalog(prefetch).await;
         kb.finalize_init().await
@@ -243,12 +449,12 @@ impl KnowledgeBase {
         config.validate()?;
         let catalog = load_catalog(&config, &extra_catalog)?;
         let kept: Arc<[ModelAliasSpec]> = catalog.clone().into();
-        let model_states = crate::model_state::new_states(&kept);
-        let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_catalog(catalog);
+        let open_path = Arc::new(OpenPath::claim(path.as_ref())?);
+        let mut builder = uni_builder(path.as_ref(), &config, false)?.xervo_catalog(catalog);
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
         }
-        let db = builder.build().await?;
+        let db = build_or_explain(builder, path.as_ref(), &config).await?;
         apply_schema(&db, &config).await?;
         // Check the store against the config (blob backend, embedding model)
         // before prefetching: a mismatched reopen should fail at once, not
@@ -260,12 +466,13 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(kept),
-            model_states,
             prefetch_task: None,
+            open_path: None,
         }
         .finalize_init()
         .await?;
         let mut kb = kb;
+        kb.open_path = Some(open_path);
         kb.prefetch_task = kb.prefetch_catalog(prefetch).await;
         Ok(kb)
     }
@@ -286,6 +493,7 @@ impl KnowledgeBase {
     /// cannot be created.
     pub async fn in_memory_shared(config: UnikoConfig, runtime: &SharedRuntime) -> Result<Self> {
         config.validate()?;
+        refuse_remote_in_memory(&config)?;
         runtime.check_serves(&config)?;
         let db = Uni::in_memory()
             .xervo_runtime(runtime.runtime.clone())
@@ -312,13 +520,16 @@ impl KnowledgeBase {
     ) -> Result<Self> {
         config.validate()?;
         runtime.check_serves(&config)?;
+        let open_path = Arc::new(OpenPath::claim(path.as_ref())?);
         let mut builder =
-            Uni::open(path.as_ref().to_string_lossy()).xervo_runtime(runtime.runtime.clone());
+            uni_builder(path.as_ref(), &config, false)?.xervo_runtime(runtime.runtime.clone());
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
         }
-        let db = builder.build().await?;
-        Self::over_shared(db, config, runtime).await
+        let db = build_or_explain(builder, path.as_ref(), &config).await?;
+        let mut kb = Self::over_shared(db, config, runtime).await?;
+        kb.open_path = Some(open_path);
+        Ok(kb)
     }
 
     async fn over_shared(db: Uni, config: UnikoConfig, runtime: &SharedRuntime) -> Result<Self> {
@@ -330,8 +541,8 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: Some(runtime.catalog.clone()),
-            model_states: runtime.states.clone(),
             prefetch_task: None,
+            open_path: None,
         }
         .finalize_init()
         .await
@@ -340,8 +551,7 @@ impl KnowledgeBase {
     /// Build a single model runtime that multiple KBs can share.
     ///
     /// Superseded by [`SharedRuntime::build`], whose handle also carries the
-    /// catalog, so stores over it can be checked against their config and
-    /// report [`model_status`](Self::model_status).
+    /// catalog, so stores over it can be checked against their config.
     ///
     /// # Errors
     ///
@@ -379,14 +589,15 @@ impl KnowledgeBase {
         runtime: Arc<uni_xervo::runtime::ModelRuntime>,
     ) -> Result<Self> {
         config.validate()?;
-        let mut builder = Uni::open(path.as_ref().to_string_lossy()).xervo_runtime(runtime);
+        let open_path = Arc::new(OpenPath::claim(path.as_ref())?);
+        let mut builder = uni_builder(path.as_ref(), &config, false)?.xervo_runtime(runtime);
         // Apply the same env-driven storage perf knobs (WAL / autoflush) the
         // catalog-open path applies — otherwise opening via a shared runtime
         // silently ignores them.
         if let Some(uni_cfg) = apply_perf_knobs_from_env() {
             builder = builder.config(uni_cfg);
         }
-        let db = builder.build().await?;
+        let db = build_or_explain(builder, path.as_ref(), &config).await?;
         apply_schema(&db, &config).await?;
         Self {
             db: Arc::new(db),
@@ -395,8 +606,8 @@ impl KnowledgeBase {
             rmw_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             setup_locks: Arc::new(crate::locks::StripedLocks::from_env()),
             catalog: None,
-            model_states: Arc::default(),
             prefetch_task: None,
+            open_path: Some(open_path),
         }
         .finalize_init()
         .await
@@ -414,9 +625,7 @@ impl KnowledgeBase {
         let (Some(catalog), Some(runtime)) = (self.catalog.clone(), self.model_runtime()) else {
             return None;
         };
-        policy
-            .run(catalog, self.model_states.clone(), runtime)
-            .await
+        policy.run(catalog, runtime).await
     }
 
     /// Run post-construction init steps. Currently:
@@ -458,7 +667,8 @@ impl KnowledgeBase {
     /// # Errors
     ///
     /// Returns [`UnikoError::Storage`] (or [`UnikoError::Conflict`]) if the
-    /// transaction cannot be opened.
+    /// transaction cannot be opened, or [`UnikoError::Config`] once another
+    /// handle took the store over.
     pub async fn begin_tx(&self) -> Result<uni_db::Transaction> {
         Ok(self.db.session().tx().await?)
     }
@@ -679,10 +889,18 @@ impl KnowledgeBase {
 
     /// Graceful shutdown, flushing pending writes.
     ///
+    /// uni-db's shutdown stops the store's background tasks and releases
+    /// its writer lease whether or not its final flush succeeds, then
+    /// returns the failure. A failed flush leaves the last commits only in
+    /// the write-ahead log. They are not lost: the next open replays them.
+    /// On a hybrid store that log is on this host, so another host opening
+    /// the store doesn't see them until it is reopened here first.
+    ///
     /// # Errors
     ///
     /// Returns [`UnikoError::Internal`] if other `Arc` references still
-    /// exist, or [`UnikoError::Storage`] if shutdown fails.
+    /// exist, or [`UnikoError::Storage`] if the final flush or the shutdown
+    /// fails.
     pub async fn shutdown(self) -> Result<()> {
         // Stop loading models nobody will use; a no-op once it finished.
         if let Some(task) = &self.prefetch_task {
@@ -750,8 +968,72 @@ fn reject_duplicate_aliases(catalog: &[ModelAliasSpec]) -> Result<()> {
     Ok(())
 }
 
-/// Apply the schema from a JSON file or the builder-based registration.
+/// Open the store, turning uni-db's catalog check into a compatibility
+/// report.
+///
+/// uni-db refuses at open a store whose vector indexes name a model alias
+/// the catalog lacks: a hybrid store (`embed/hybrid`) opened with a
+/// dense-only config. That would surface as a raw "missing alias" error;
+/// inspecting the store explains it as [`UnikoError::IncompatibleStore`]
+/// instead. Any other open error, or one inspection doesn't explain, is
+/// returned as is.
+async fn build_or_explain(
+    builder: uni_db::UniBuilder,
+    path: &Path,
+    config: &UnikoConfig,
+) -> Result<Uni> {
+    match builder.build().await {
+        Ok(db) => Ok(db),
+        Err(e) => {
+            let raw = UnikoError::from(e);
+            let text = raw.to_string();
+            if config.schema_path.is_none()
+                && (text.contains("Missing Uni-Xervo alias")
+                    || text.contains("catalog is required"))
+                && let Ok((_, verdict)) = migrate_store::inspect_unclaimed(path, config).await
+                && !verdict.is_compatible()
+            {
+                return Err(UnikoError::IncompatibleStore(Box::new(verdict)));
+            }
+            Err(raw)
+        }
+    }
+}
+
+/// Check the store against `config`, then apply the schema from a JSON file
+/// or the builder-based registration.
+///
+/// The check runs first, on the schema already on disk: a config that the
+/// store can't serve (another model or dimensions, a hybrid store opened
+/// dense-only) or that needs a migration (new hybrid columns, a different
+/// index) is refused with [`UnikoError::IncompatibleStore`] before uni-db
+/// changes or rebuilds anything. A `schema_path` config skips the check:
+/// its column types come from the file, not the config.
 async fn apply_schema(db: &Uni, config: &UnikoConfig) -> Result<()> {
+    if config.schema_path.is_none() {
+        let stored = compatibility::inspect_db(db, false).await?;
+        let verdict = compatibility::check(&stored, config);
+        if !verdict.is_compatible() {
+            return Err(UnikoError::IncompatibleStore(Box::new(verdict)));
+        }
+        // A cut-off hybrid backfill opens: the data is correct, some rows
+        // just lack the new vectors until `enable_hybrid` is rerun.
+        if stored.migration_in_progress == Some(compatibility::Migration::EnableHybrid)
+            && !stored.migration_in_schema
+        {
+            tracing::warn!(
+                "an enable_hybrid migration was cut off: rows it didn't reach take no part in \
+                 sparse or ColBERT recall until it is rerun (store_info().hybrid_backfill_pending \
+                 counts them)"
+            );
+        }
+    }
+    apply_schema_unchecked(db, config).await
+}
+
+/// Apply the schema without the compatibility check, for a migration that
+/// has already checked it.
+pub(crate) async fn apply_schema_unchecked(db: &Uni, config: &UnikoConfig) -> Result<()> {
     if let Some(path) = &config.schema_path {
         db.load_schema(path)
             .await
@@ -907,6 +1189,19 @@ pub fn embed_catalog(config: &UnikoConfig) -> Vec<ModelAliasSpec> {
         // `uni-xervo-pdf`. Option keys mirror uni-xervo's `local_onnx` OCR
         // loader (`onnx_path`/`char_dict_path`/`det_onnx_path`/…); defaults
         // target the English PP-OCRv5 export `monkt/paddleocr-onnx`.
+        let mut ocr_options = serde_json::json!({
+            "onnx_path": config.ocr.rec_artifact,
+            "char_dict_path": config.ocr.char_dict_path,
+            "det_onnx_path": config.ocr.det_artifact,
+            "image_height": config.ocr.image_height,
+            "image_width": config.ocr.image_width,
+            "normalization": config.ocr.normalization,
+            "blank_class": 0,
+            "execution_providers": ocr_eps,
+        });
+        if let Some(max) = config.ocr.max_image_width {
+            ocr_options["max_image_width"] = max.into();
+        }
         catalog.push(ModelAliasSpec {
             alias: OCR_ALIAS.to_string(),
             task: ModelTask::Ocr,
@@ -918,16 +1213,7 @@ pub fn embed_catalog(config: &UnikoConfig) -> Vec<ModelAliasSpec> {
             timeout: None,
             load_timeout: None,
             retry: None,
-            options: serde_json::json!({
-                "onnx_path": config.ocr.rec_artifact,
-                "char_dict_path": config.ocr.char_dict_path,
-                "det_onnx_path": config.ocr.det_artifact,
-                "image_height": config.ocr.image_height,
-                "image_width": config.ocr.image_width,
-                "normalization": config.ocr.normalization,
-                "blank_class": 0,
-                "execution_providers": ocr_eps,
-            }),
+            options: ocr_options,
         });
     }
 
@@ -1136,5 +1422,106 @@ mod catalog_tests {
         let catalog = load_catalog(&config, &[extra]).unwrap();
         assert_eq!(catalog.len(), embed_catalog(&config).len() + 1);
         assert_eq!(catalog.last().unwrap().alias, "embed/extra");
+    }
+}
+
+#[cfg(test)]
+mod open_path_tests {
+    use super::*;
+
+    #[test]
+    fn a_path_takes_one_claim_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        // Claimed before the directory exists: the key stays the same once
+        // uni-db creates it.
+        let path = dir.path().join("kb");
+        let open = OpenPath::claim(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let err = OpenPath::claim_exclusive(&path).unwrap_err();
+        assert!(err.to_string().contains("open in this process"), "{err}");
+        let err = OpenPath::claim(&path).unwrap_err();
+        assert!(err.to_string().contains("already open"), "{err}");
+        drop(open);
+
+        let exclusive = OpenPath::claim_exclusive(&path).unwrap();
+        let err = OpenPath::claim(&path).unwrap_err();
+        assert!(err.to_string().contains("inspected or migrated"), "{err}");
+        assert!(OpenPath::claim_exclusive(&path).is_err());
+        drop(exclusive);
+        drop(OpenPath::claim(&path).unwrap());
+        drop(OpenPath::claim_exclusive(&path).unwrap());
+    }
+
+    /// A second process is kept out by uni-db's writer lock, which a
+    /// second handle in this process meets the same way once uniko's own
+    /// registry is out of the way.
+    #[tokio::test]
+    async fn uni_db_refuses_a_second_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kb");
+        let config = UnikoConfig::default();
+        let first = uni_builder(&path, &config, false)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let mut uni_cfg = UniConfig::default();
+        uni_cfg.writer_lease.acquire_grace = std::time::Duration::from_millis(100);
+        let err = uni_builder(&path, &config, true)
+            .unwrap()
+            .config(uni_cfg)
+            .build()
+            .await
+            .err()
+            .expect("a second writer is refused");
+        let err = UnikoError::from(err);
+        assert!(
+            matches!(&err, UnikoError::Config(m) if m.contains("open for writing elsewhere")),
+            "{err}"
+        );
+        first.shutdown().await.unwrap();
+        uni_builder(&path, &config, true)
+            .unwrap()
+            .build()
+            .await
+            .expect("free once the first writer closed")
+            .shutdown()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn remote_storage_is_checked_before_anything_opens() {
+        use crate::config::RemoteStorage;
+        let with = |url: &str| UnikoConfig {
+            remote_storage: Some(RemoteStorage::s3(url)),
+            ..UnikoConfig::default()
+        };
+        let err = KnowledgeBase::in_memory(with("s3://bucket"))
+            .await
+            .err()
+            .expect("in-memory refuses remote_storage");
+        assert!(err.to_string().contains("in-memory"), "{err}");
+        let err = with("https://bucket/kb").validate().unwrap_err();
+        assert!(err.to_string().contains("s3://, gs:// or az://"), "{err}");
+        drop(
+            uni_builder(Path::new("s3://bucket/kb/"), &with("s3://bucket/kb"), false)
+                .expect("a remote-only store: the path is remote_storage's URL"),
+        );
+        let err = uni_builder(Path::new("s3://bucket/a"), &with("s3://bucket/b"), false)
+            .err()
+            .expect("a URI path naming another store");
+        assert!(err.to_string().contains("different stores"), "{err}");
+        let err = uni_builder(Path::new("https://acct/kb"), &with("s3://bucket"), false)
+            .err()
+            .expect("a URI that isn't an object store uniko supports");
+        assert!(
+            err.to_string().contains("local directory (hybrid)"),
+            "{err}"
+        );
+        let typo = serde_json::from_value::<RemoteStorage>(
+            serde_json::json!({"url": "s3://b", "endpoint_url": "http://x"}),
+        );
+        assert!(typo.is_err(), "an unknown key is refused, not dropped");
     }
 }

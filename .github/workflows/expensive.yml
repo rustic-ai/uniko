@@ -1,0 +1,125 @@
+name: Expensive tests
+
+# Tests that load large models (BGE-M3 is ~2 GB, plus the NLP and OCR
+# models) run only with EXPENSIVE_TESTS=1, so the PR workflow skips them.
+# This runs them nightly on main and on demand on any branch:
+# Actions -> Expensive tests -> Run workflow.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  EXPENSIVE_TESTS: "1"
+
+jobs:
+  expensive:
+    name: EXPENSIVE_TESTS (Rust)
+    # Same runner as the PR check: a debug build of the workspace does not
+    # fit ubuntu-latest's disk.
+    runs-on: ubuntu-xlarge
+    env:
+      # One model cache for every test process, kept between runs.
+      UNI_CACHE_DIR: ${{ github.workspace }}/.uni_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # mold: `.cargo/config.toml` forces `-fuse-ld=mold` on Linux.
+          sudo apt-get install -y protobuf-compiler mold
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-expensive-${{ hashFiles('**/Cargo.lock') }}
+
+      # The models change only when the catalog does, so key the cache on the
+      # files that name them.
+      - name: Cache models
+        uses: actions/cache@v5
+        with:
+          path: .uni_cache
+          key: models-${{ hashFiles('crates/uniko-store/src/storage/mod.rs', 'crates/uniko-store/src/config.rs') }}
+          restore-keys: models-
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: cargo nextest run (EXPENSIVE_TESTS=1)
+        run: |
+          # Warm the model cache serially first, as ci.yml does: parallel cold
+          # downloads of the same model race for its lock. Same `--workspace`
+          # feature set as the main run, so it builds once. This covers the
+          # default models (uniko-cortex), BGE-M3 and the NLP/OCR models.
+          # `--workspace` also turns on `pdf-ocr` (through uniko-py), so the
+          # tiered PDF OCR tests run in the main pass.
+          cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal \
+            --test-threads 1 \
+            -E 'package(uniko-cortex) | test(hybrid_regressions) | test(nlp_and_ocr_models_report)'
+          cargo nextest run --workspace --exclude uniko-cuda --exclude uniko-metal
+
+  python:
+    name: EXPENSIVE_TESTS (Python)
+    runs-on: ubuntu-xlarge
+    env:
+      UNI_CACHE_DIR: ${{ github.workspace }}/.uni_cache
+    defaults:
+      run:
+        working-directory: bindings/uniko-py
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler mold
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-py-expensive-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache models
+        uses: actions/cache@v5
+        with:
+          path: .uni_cache
+          key: models-py-${{ hashFiles('crates/uniko-store/src/storage/mod.rs', 'crates/uniko-store/src/config.rs') }}
+          restore-keys: models-py-
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: uv sync --locked
+
+      - name: Build the extension
+        run: uv run maturin develop
+
+      - name: Warm the model cache
+        run: uv run python -I ../../scripts/ci/smoke_wheel.py
+
+      - name: pytest (EXPENSIVE_TESTS=1)
+        run: uv run pytest -n 4

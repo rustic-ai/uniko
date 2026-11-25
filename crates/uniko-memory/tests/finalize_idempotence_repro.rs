@@ -11,7 +11,7 @@
 //!
 //! Run:
 //! ```sh
-//! cargo nextest run -p uniko-memory --test finalize_idempotence_repro \
+//! cargo nextest run -p uniko-memory --test integration finalize_idempotence_repro:: \
 //!   --run-ignored all --no-capture
 //! ```
 //!

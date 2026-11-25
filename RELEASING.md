@@ -4,7 +4,8 @@
 This repo ships two artifact families from a single tag:
 
 - **Rust crates** → [crates.io] (6 publishable crates, one shared workspace version).
-- **Python wheels** → [PyPI] (the `uniko` package, built with maturin).
+- **Python wheels** → [PyPI] (the `uniko`, `uniko-cuda` and `uniko-metal`
+  packages, built with maturin).
 
 Both are published by `.github/workflows/release.yml`, triggered by pushing a
 `v*` tag. Authentication is **OIDC Trusted Publishing** for both registries —
@@ -175,7 +176,7 @@ On PyPI, for **each** of `uniko`, `uniko-cuda`, `uniko-metal`:
 - Environment name: `release`
 
 (To rehearse against [TestPyPI], register the same publisher there and point
-`publish-pypi` at it temporarily.)
+the `publish-pypi-*` jobs at it temporarily.)
 
 #### File-size limit (still required for the GPU variants)
 
@@ -247,7 +248,8 @@ Wheels reach users three ways, and only the first depends on PyPI:
    ```
 
 Channels 2 and 3 are **independent of PyPI**: `github-release` runs on
-`always() && publish-crates == 'success'` and attaches `dist/*`, so a wheel PyPI
+`always() && publish-crates == 'success'` (plus every smoke job passing,
+whatever the PyPI jobs did) and attaches `dist/*`, so a wheel PyPI
 rejects — on size, or because a file-size exception has not taken effect — is
 still released and still installable through the index. `gen_package_index.py`
 groups by normalized project name, so `uniko`, `uniko-cuda` and `uniko-metal`
@@ -270,7 +272,7 @@ Because the publishes are gated, the safest rehearsal is:
    pip install ./uniko-0.1.0-cp310-abi3-manylinux_2_28_x86_64.whl
    python -I scripts/ci/smoke_wheel.py
    ```
-4. **Do not approve** the `release` environment. Cancel the run (or just leave the
+3. **Do not approve** the `release` environment. Cancel the run (or just leave the
    gated jobs unapproved) and delete the rc tag.
 
 ---

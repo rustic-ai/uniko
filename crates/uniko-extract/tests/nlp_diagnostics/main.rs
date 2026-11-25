@@ -6,7 +6,7 @@
 //! once instead of once per file.
 //!
 //! Run an individual tool, e.g.:
-//! `cargo nextest run -p uniko-extract --test nlp_diagnostics cls_quality_audit --run-ignored all --no-capture`
+//! `cargo nextest run -p uniko-extract --test integration nlp_diagnostics::cls_quality_audit --run-ignored all --no-capture`
 
 mod cls_quality_audit;
 mod cls_raw_dump;

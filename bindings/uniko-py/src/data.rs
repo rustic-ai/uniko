@@ -15,6 +15,7 @@ use uniko_api::tools::Agent;
 
 use crate::errors::to_pyerr;
 use crate::macros::pymethods_with_sync;
+use crate::media::PyMediaSourceView;
 use crate::outputs::{PyArtifactView, PyMessageView};
 
 /// Addressed (by-id) retrieval over an agent's store.
@@ -67,6 +68,28 @@ pymethods_with_sync! {
                 Python::attach(|py| match view {
                     Some(v) => PyArtifactView::from_rust(py, &v).map(|p| p.into_any()),
                     None => Ok(py.None()),
+                })
+
+            }
+        }
+
+        /// The original media an artifact's text was derived from (when it was
+        /// ingested with a retention other than `"none"`), as a list of
+        /// `MediaSourceView`. Pass a derived artifact's id, or a source's own.
+        fn media_sources / media_sources_sync(&self, py, artifact_id: String) -> Py<PyAny> {
+            prepare {}
+            run(agent = self.inner.clone()) {
+                let sources = agent
+                    .data()
+                    .media_sources(&artifact_id)
+                    .await
+                    .map_err(to_pyerr)?;
+                Python::attach(|py| {
+                    let list = pyo3::types::PyList::empty(py);
+                    for s in &sources {
+                        list.append(PyMediaSourceView::from_rust(py, s)?)?;
+                    }
+                    Ok(list.into_any().unbind())
                 })
 
             }

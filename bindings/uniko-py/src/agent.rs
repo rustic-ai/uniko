@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use uniko_api::tools::{
-    AddObservationParams, Agent, AssertFactParams, ConsolidateOptions, InvalidateFactParams,
-    NodeId, RecallOverrides, RecordActionParams, RecordEpisodeParams, Scope, Visibility,
-    fact_id_for_scoped,
+    AddObservationParams, Agent, AgentRegistration, AssertFactParams, ConsolidateOptions,
+    InvalidateFactParams, NodeId, RecallOverrides, RecordActionParams, RecordEpisodeParams, Scope,
+    Visibility, fact_id_for_scoped,
 };
 
 use crate::convert::{self, params_to_rust};
@@ -91,6 +91,32 @@ pymethods_with_sync! {
 
     }
     bridged {
+        /// Register this agent as a participant of kind ``agent`` without
+        /// recording a session, message or action.
+        ///
+        /// Idempotent and safe to call concurrently. Returns a
+        /// ``Registration`` whose ``outcome`` is ``"created"`` the first
+        /// time, ``"existing"`` afterwards, and ``"upgraded"`` when the
+        /// participant already existed with kind ``unknown`` (for example
+        /// from ``add_org_member``). ``name`` is set only when the
+        /// participant has none; memberships are kept. Goals, tasks, actions
+        /// and tool calls ensure the agent themselves, so this is optional.
+        #[pyo3(signature = (*, name=None))]
+        fn register / register_sync(&self, py, name: Option<String>) -> Py<crate::outputs::PyRegistration> {
+            prepare {
+                let mut opts = AgentRegistration::new();
+                if let Some(n) = name {
+                    opts = opts.name(n);
+                }
+
+            }
+            run(agent = self.inner.clone()) {
+                let reg = agent.register(opts).await.map_err(to_pyerr)?;
+                Python::attach(|py| crate::outputs::PyRegistration::from_rust(py, &reg))
+
+            }
+        }
+
         /// Run the recall cascade for `query`, returning a ranked context bundle.
         fn recall / recall_sync(&self, py, query: String) -> Py<PyContextBundle> {
             prepare {}

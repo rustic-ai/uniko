@@ -44,7 +44,7 @@ pub enum BlobStorage {
         /// Root directory. Created lazily on first PUT if absent.
         root: PathBuf,
     },
-    /// S3-compatible object store. **Not yet implemented.**
+    /// S3-compatible object store (see `s3.rs`).
     S3 {
         /// Bucket name (no `s3://` prefix).
         bucket: String,

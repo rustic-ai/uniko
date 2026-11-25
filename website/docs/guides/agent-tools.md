@@ -14,11 +14,14 @@ these off a transcript, so the cognitive stack exposes them as explicit calls.
 ## Two layers
 
 - **The facade** — goals and tasks are first-class on the [`Agent`](../reference/api.md): reach them
-  through `agent.goals()`. This is the surface most callers want.
-- **Recording primitives** — facts, observations, episodes, and actions are **free functions** over a
-  `KnowledgeBase` (the engine handle the facade wraps). They're for engine-level callers who hold a
-  `KnowledgeBase` directly: `tool(&kb, agent_id, params)` (or `(&kb, params)` for `assert_fact` /
-  `invalidate_fact`).
+  through `agent.goals()`. Facts, observations, episodes, and actions are `Agent` methods too —
+  `agent.assert_fact(params)`, `agent.invalidate_fact(params)`, `agent.add_observation(params)`,
+  `agent.record_episode(params)`, `agent.record_action(params)` (and `session.record_action(params)`,
+  which fills in the session). This is the surface most callers want.
+- **Recording primitives** — the same operations as **free functions** over a `KnowledgeBase` (the
+  engine handle the facade wraps). They're for engine-level callers who hold a `KnowledgeBase`
+  directly: `tool(&kb, agent_id, params)` (or `(&kb, params)` for `assert_fact` /
+  `invalidate_fact`). The examples below use this form; each `Agent` method takes the same params.
 
 ```rust
 // The facade params for goals and tasks come from `uniko_api::tools`.
@@ -36,9 +39,10 @@ use uniko_memory::{
 ```
 
 !!! warning "The Participant must exist first"
-    Tools that take an `agent_id` resolve it to a `Participant` node up front and fail fast with
-    `UnikoError::Storage` if it is missing. `session.observe(...)` creates the agent's Participant on
-    first sight; a pure-planning agent should observe once (or seed the Participant) before recording.
+    The free functions that take an `agent_id` resolve it to a `Participant` node up front and fail
+    fast with `UnikoError::Storage` if it is missing. The `Agent` / `Session` methods create the
+    agent's Participant first, as `session.observe(...)` does on first sight; an engine-level caller
+    should seed the Participant before recording.
 
 ---
 
@@ -151,6 +155,7 @@ input/output payloads and links to the artifacts it produces and the messages th
 pub struct RecordActionResult {
     pub action_node: NodeId,
     pub overflow_artifact: Option<NodeId>,
+    pub diagnostics: Vec<uniko_store::Diagnostic>,
 }
 ```
 
@@ -185,8 +190,8 @@ moment. Episodes feed procedure promotion, the relevance-decay rule, and Phase 2
 `action_type` and `outcome` are the meaningful inputs; `state`/`delta` are free-form JSON. The first
 non-empty string at `topic`/`question`/`description`/`summary`/`input` in `state` becomes the
 embedding text. `importance` (`[0.0, 1.0]`, default `0.5`) drives decay. The tool wires
-`RECORDED_BY`, a `FOLLOWED_BY` edge within the one-hour continuity window, and best-effort `INVOLVES`
-edges to `involved_action_ids`.
+`RECORDED_BY`, a `FOLLOWED_BY` edge within the one-hour continuity window, and best-effort
+`TRIGGERED_BY` (to `triggered_by_message_id`) and `INVOLVES` edges (to `involved_action_ids`).
 
 ```rust
 use serde_json::json;
@@ -228,8 +233,8 @@ let obs = add_observation(&kb, "assistant", AddObservationParams {
 ### assert_fact
 
 Most `Fact`s are *derived* by consolidation. `assert_fact` lets an agent assert one directly. The
-triple `(subject, predicate, object)` is the Fact's identity — asserting the same triple reinforces
-rather than duplicates. Returns a `FactUpsert` (was it new, current observation count).
+triple `(subject, predicate, object)` and its visibility scope are the Fact's identity — asserting
+the same triple in the same scope reinforces rather than duplicates. Returns a `FactUpsert` (was it new, current observation count).
 
 ```rust
 use uniko_memory::{assert_fact, AssertFactParams};
@@ -245,8 +250,9 @@ let upsert = assert_fact(&kb, AssertFactParams {
 ### invalidate_fact
 
 `invalidate_fact` retracts a Fact by closing its bitemporal validity interval at `now` — the Fact is
-not deleted, it stops being valid. When `replacement_fact_id` resolves, the supersession is recorded
-via an `INVALIDATES` edge carrying the optional `reason`.
+not deleted, it stops being valid. When `replacement_fact_id` is set, the supersession is recorded
+via an `INVALIDATES` edge carrying the optional `reason`; a replacement that does not resolve is an
+error (`UnikoError::Storage`), raised before anything is written.
 
 ```rust
 use uniko_memory::{invalidate_fact, InvalidateFactParams};
@@ -314,12 +320,15 @@ let answer = answer_query(
 A `Summary` is a compact, embedded synopsis of a Session that Phase-3 recall falls back to when
 finer-grained Observations and Facts under-cover a query. `session.summarize()` builds or refreshes
 it — extractive and deterministic by default (offline, no model), abstractive when an LLM is
-configured. Idempotent on a stable id; returns `None` when there's nothing to summarize. (The
-free-function form, `generate_session_summary(&kb, session_id, now, llm_alias)`, is available
-engine-side.)
+configured. Idempotent on a stable id. It also refreshes the session-level retrieval chunks
+(`finalize`) on a best-effort basis and returns a `SummarizeReport`: `summary` is `None` when there's
+nothing to summarize, and `finalize_error` says why the chunk refresh failed, if it did. (The
+free-function form, `generate_session_summary(&kb, session_id, now, llm_alias)`, returns the
+`Option<NodeId>` alone and is available engine-side.)
 
 ```rust
-let summary_id = session.summarize().await?;   // Option<NodeId>
+let report = session.summarize().await?;   // SummarizeReport
+let summary_id = report.summary;           // Option<NodeId>
 ```
 
 ---
