@@ -7,59 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **Azure Blob Storage for `remote_storage`.** An `az://container[/prefix]` URL keeps a
-  store in an Azure container, hybrid or remote-only, like `s3://` and `gs://`.
-  `RemoteStorage::azure(url, account)` names the storage account, and
-  `with_access_key` or `with_sas_token` the credentials (in Python, the `account`,
-  `access_key` and `sas_token` keys). Unset settings come from the `AZURE_*`
-  environment. `Uniko.config()` redacts the key and token.
-
-### Fixed
-
-- **`shutdown` returns a failed final flush.** uni-db's shutdown used to log a
-  failed final flush and return Ok, so a hybrid store whose flush timed out shut
-  down "successfully" with its last commits only in the local write-ahead log,
-  and another host opened it without them. uni-db 6.0 returns the failure
-  (rustic-ai/uni-db#354), after still releasing the writer lease, and uniko's
-  `shutdown` passes it on as a `Storage` error, for every store. Reopening from
-  the same local directory replays the commits.
-- **A flush to a slow bucket runs to the end.** uni-db abandoned a flush after
-  60 s in all; it now gives up after 60 s without a table commit, or 15 times
-  that in all (rustic-ai/uni-db#355). It also checks one table's existence
-  instead of listing every table, a round trip each on an object store.
-- **DATETIME indexes are built.** The BTree indexes on `Message.timestamp`,
-  `Session.started_at`, `Episode.timestamp`, `Action.started_at`,
-  `ConsolidationCycle.started_at`, `Observation.temporal_anchor`,
-  `Source.first_seen` and `Source.retired_at` never existed: uni-db stores
-  DATETIME as a struct column, which Lance's BTree refuses, and only logged it.
-  uni-db 6.0 indexes DATETIME through a hidden derived key column
-  (rustic-ai/uni-db#356), and range and equality filters on those properties
-  use it.
-
-### Upgrading
-
-- **The first writable open of an existing store rewrites its DATETIME-indexed
-  tables.** uni-db upgrades each of the indexes above in place: it backfills the
-  key column over the label's table, builds the index, and rebuilds the label's
-  other indexes, which the rewrite drops, including the vector and full-text
-  indexes on Message and Observation. On a large store the open takes as long as
-  those rebuilds. A failed upgrade is logged and leaves the index as it was; the
-  store still opens. `inspect_store` opens read-only and doesn't trigger it.
-
-### Changed
-
-- **`UNIKO_QUERY_TIMEOUT_SECS`** raises uni-db's 30-second query timeout, for a
-  store far from its bucket.
-- **A `remote_storage` setting for another provider is refused** instead of being
-  ignored: an `access_key` on an `s3://` store, a `region` on an `az://` one.
-
-## [0.6.0] - 2026-11-22
+## [0.6.0] - 2026-11-24
 
 ### Breaking
 
-- **uniko requires uni-db 6.0** (was 5.2.1). uniko re-exports uni-db types
+- **uniko requires uni-db 6.0** (was 5.3.0). uniko re-exports uni-db types
   (`Value`, `Transaction`, `ModelAliasSpec`, `ModelTask`, `TemporalValue`,
   …), so code that names them moves to uni-db 6 with it.
 - **The minimum Rust version is 1.95** (was 1.91), the highest any
@@ -101,8 +53,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deprecated. `note_model_loaded` does nothing: load state comes from the
   model runtime.
 
+### Upgrading
+
+- **The first writable open of an existing store rewrites its DATETIME-indexed
+  tables.** uni-db upgrades each of the indexes above in place: it backfills the
+  key column over the label's table, builds the index, and rebuilds the label's
+  other indexes, which the rewrite drops, including the vector and full-text
+  indexes on Message and Observation. On a large store the open takes as long as
+  those rebuilds. A failed upgrade is logged and leaves the index as it was; the
+  store still opens. `inspect_store` opens read-only and doesn't trigger it.
+
 ### Added
 
+- **Azure Blob Storage for `remote_storage`.** An `az://container[/prefix]` URL keeps a
+  store in an Azure container, hybrid or remote-only, like `s3://` and `gs://`.
+  `RemoteStorage::azure(url, account)` names the storage account, and
+  `with_access_key` or `with_sas_token` the credentials (in Python, the `account`,
+  `access_key` and `sas_token` keys). Unset settings come from the `AZURE_*`
+  environment. `Uniko.config()` redacts the key and token.
 - **Stores in an object store.** `UnikoConfig::remote_storage` keeps a
   store's data in S3 (or an S3-compatible service) or GCS. With a local
   path the store is hybrid: data in the bucket, write-ahead log and ids
@@ -176,6 +144,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`UNIKO_QUERY_TIMEOUT_SECS`** raises uni-db's 30-second query timeout, for a
+  store far from its bucket.
+- **A `remote_storage` setting for another provider is refused** instead of being
+  ignored: an `access_key` on an `s3://` store, a `region` on an `az://` one.
 - **ColBERT reranking scores candidates in uniko** (MaxSim with the
   configured metric) instead of through a filtered multi-vector query,
   which leaked rows outside the candidate set on unflushed data. A
@@ -190,6 +162,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`shutdown` returns a failed final flush.** uni-db's shutdown used to log a
+  failed final flush and return Ok, so a hybrid store whose flush timed out shut
+  down "successfully" with its last commits only in the local write-ahead log,
+  and another host opened it without them. uni-db 6.0 returns the failure
+  (rustic-ai/uni-db#354), after still releasing the writer lease, and uniko's
+  `shutdown` passes it on as a `Storage` error, for every store. Reopening from
+  the same local directory replays the commits.
+- **A flush to a slow bucket runs to the end.** uni-db abandoned a flush after
+  60 s in all; it now gives up after 60 s without a table commit, or 15 times
+  that in all (rustic-ai/uni-db#355). It also checks one table's existence
+  instead of listing every table, a round trip each on an object store.
+- **DATETIME indexes are built.** The BTree indexes on `Message.timestamp`,
+  `Session.started_at`, `Episode.timestamp`, `Action.started_at`,
+  `ConsolidationCycle.started_at`, `Observation.temporal_anchor`,
+  `Source.first_seen` and `Source.retired_at` never existed: uni-db stores
+  DATETIME as a struct column, which Lance's BTree refuses, and only logged it.
+  uni-db 6.0 indexes DATETIME through a hidden derived key column
+  (rustic-ai/uni-db#356), and range and equality filters on those properties
+  use it.
 - **OCR keeps the spaces between words and reads long lines in full**
   (uni-xervo 0.20), so scanned PDFs are searchable.
 - **Concurrent loads of a cached model no longer fail** on a missing file
@@ -210,6 +201,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The release workflow mints a fresh crates.io token for each publish
   attempt.** Trusted Publishing tokens expire after 30 minutes, and the
   0.5.1 publish, which got one token up front, lost it after four crates.
+
+### Security
+
+- **`url` 2.5.9** (RUSTSEC-2026-0592). `Url::origin()` in 2.5.8 recursed once
+  per nested `blob:` prefix, so a crafted URL overflowed the stack and aborted
+  the process. uniko parses its own store URLs with `url`, and Lance's object
+  store clients use it too.
 
 ## [0.5.1] - 2026-11-15
 
